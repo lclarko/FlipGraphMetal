@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/dronperminov/ternary_flip_graph",
+  "commit": "a3ee98a5e47ad747307610bce7d3f47afd9cf0d3",
+  "source_path": "src/schemes/ternary_scheme.hpp",
+  "source_sha256": "753bbaac4cb4d86513ddc948cec200c454c8eb1335f035aceef1bc95a4791da3",
+  "extraction": "Exact bytes from bool TernaryScheme<T>::checkFlipReduce through its matching closing brace; no modification.",
+  "files": {
+    "check_flip_reduce.hpp": "2be9a4cc28897b7b71210e8c701079872e886fd2cb26c3e174ab33896727952a",
+    "LICENSE": "6fb12f5da62f0da3a305708e94993e9aaa4209a191498ca677fc14e97017ed51"
+  },
+  "license_source_path": "LICENSE",
+  "attribution": "Copyright (c) 2025 Andrew Perminov; MIT License"
+}

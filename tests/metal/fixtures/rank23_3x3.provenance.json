@@ -1,0 +1,21 @@
+{
+  "description": "Locally generated signed 3x3 rank-23 search fixture. Original generation records are privately retained.",
+  "fixture": "rank23_3x3.txt",
+  "sha256": "602d0c2f464be877132a35a71219899b96001e1405fe2f2c6d3e0a1c06b2447e",
+  "dimensions": [
+    3,
+    3,
+    3
+  ],
+  "rank": 23,
+  "domain": "integers",
+  "coefficients": [
+    -1,
+    0,
+    1
+  ],
+  "layout": "Factor-major U, V, W; one flattened factor per rank term. W uses output index j*n1+i.",
+  "verification": "Independent exact-integer reconstruction checks all 729 tensor equations with tests/metal/verify.py.",
+  "attribution": "Generated using the Metal port derived from Andrew Perminov\u2019s FlipGraphGPU.",
+  "claims": "A verification fixture, not a claim of novelty or optimality."
+}

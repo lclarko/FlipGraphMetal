@@ -1,0 +1,238 @@
+import json
+import math
+from pathlib import Path
+import sys
+import subprocess
+import time
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+BENCHMARKS = Path(__file__).resolve().parents[2] / 'benchmarks/metal'
+sys.path.insert(0, str(BENCHMARKS))
+import application
+from summarize_application import implementation_panels, implementation_summary, paired_interval, panel_interval
+
+
+class BenchmarkEvidence(unittest.TestCase):
+    def test_manifest_rejects_changed_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / 'source'
+            source.mkdir()
+            code = source / 'main.cpp'
+            code.write_text('int main() { return 0; }\n')
+            binary = root / 'program'
+            binary.write_bytes(b'fixture executable')
+            manifest = root / 'build.json'
+            manifest.write_text(json.dumps({
+                'version': 1, 'source_root': str(source),
+                'source_files': application.source_identity(source),
+                'binary': str(binary), 'binary_sha256': application.digest(binary),
+                'commands': [['clang++', str(code), '-o', str(binary)]],
+                'source_revision': 'fixture',
+            }))
+            application.build_identity('cpu', binary, source, manifest)
+            code.write_text('int main() { return 1; }\n')
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                application.build_identity('cpu', binary, source, manifest)
+
+    def test_metal_manifest_requires_compiled_shader_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / 'source'
+            source.mkdir()
+            (source / 'kernels.metal').write_text('kernel void example() {}\n')
+            binary = root / 'program'
+            binary.write_bytes(b'wrong source location')
+            manifest = root / 'build.json'
+            manifest.write_text(json.dumps({
+                'version': 1, 'source_root': str(source),
+                'source_files': application.source_identity(source),
+                'binary': str(binary), 'binary_sha256': application.digest(binary),
+                'commands': [['clang++', '-DMETAL_SOURCE_DIR="' + str(source) + '"']],
+                'source_revision': 'fixture', 'metal_source_dir': str(source),
+            }))
+            with self.assertRaisesRegex(ValueError, 'not present'):
+                application.build_identity('baseline', binary, source, manifest)
+
+    def test_artifact_inventory_detects_additions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / 'stdout.log').write_text('original\n')
+            original = application.artifacts(directory)
+            (directory / 'result.json').write_text('{}')
+            (directory / 'result.sha256').write_text('seal')
+            self.assertEqual(original, application.artifacts(directory))
+            (directory / 'extra.json').write_text('{}')
+            self.assertNotEqual(original, application.artifacts(directory))
+
+    def test_cleanup_reaps_exited_process_before_signaling(self):
+        process = subprocess.Popen(['/usr/bin/true'], start_new_session=True)
+        try:
+            time.sleep(.1)
+            application.terminate(process)
+            self.assertEqual(process.returncode, 0)
+        finally:
+            process.wait(timeout=2)
+
+    def test_bootstrap_uses_seed_and_run_units(self):
+        pairs = [(seed, repeat, 1.25) for seed in [7, 19] for repeat in range(3)]
+        result = paired_interval(pairs, iterations=100)
+        self.assertEqual(result['independent_seeds'], 2)
+        self.assertEqual(result['pairs'], 6)
+        self.assertEqual(result['median_ratio'], 1.25)
+        self.assertEqual(result['confidence_95'], [1.25, 1.25])
+        self.assertEqual(result, paired_interval(pairs, iterations=100))
+
+    def test_cleanup_permission_error_requires_absent_group(self):
+        process = Mock(pid=123, poll=Mock(return_value=0))
+        snapshot = subprocess.CompletedProcess([], 0, '1 1\n456 456\n', '')
+        with patch.object(application.os, 'killpg', side_effect=PermissionError), \
+                patch.object(application.subprocess, 'run', return_value=snapshot) as run:
+            application.terminate(process)
+        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-A', '-o', 'pid=,pgid='])
+        self.assertGreater(run.call_args.kwargs['timeout'], 0)
+        self.assertLessEqual(run.call_args.kwargs['timeout'], 2)
+        process.wait.assert_called_once_with(timeout=2)
+
+    def test_cleanup_permission_error_rejects_members_or_failed_snapshot(self):
+        for output in ['', 'pid pgid\n']:
+            process = Mock(pid=123, poll=Mock(return_value=0))
+            snapshot = subprocess.CompletedProcess([], 0, output, '')
+            with self.subTest(output=output), \
+                    patch.object(application.os, 'killpg', side_effect=PermissionError), \
+                    patch.object(application.subprocess, 'run', return_value=snapshot):
+                with self.assertRaises((PermissionError, RuntimeError)):
+                    application.terminate(process)
+        for error in [subprocess.CalledProcessError(1, 'ps'), subprocess.TimeoutExpired('ps', 2)]:
+            process = Mock(pid=123, poll=Mock(return_value=0))
+            with self.subTest(error=error), \
+                    patch.object(application.os, 'killpg', side_effect=PermissionError), \
+                    patch.object(application.subprocess, 'run', side_effect=error):
+                with self.assertRaises(type(error)):
+                    application.terminate(process)
+
+    def test_cleanup_permission_error_does_not_accept_live_leader(self):
+        process = Mock(pid=123, poll=Mock(return_value=None))
+        with patch.object(application.os, 'killpg', side_effect=PermissionError) as kill, \
+                patch.object(application.time, 'monotonic', side_effect=[0, 1, 2, 2]), \
+                patch.object(application.time, 'sleep'), \
+                patch.object(application.subprocess, 'run') as run:
+            with self.assertRaisesRegex(PermissionError, 'KILL after TERM grace; leader=None'):
+                application.terminate(process)
+        run.assert_not_called()
+        self.assertEqual(kill.call_args.args, (123, application.signal.SIGKILL))
+
+    def test_cleanup_permission_error_can_finish_during_grace(self):
+        for lingering in [False, True]:
+            process = Mock(pid=123, poll=Mock(side_effect=[0, None if not lingering else 0, 0, 0]))
+            absent = subprocess.CompletedProcess([], 0, '1 1\n', '')
+            present = subprocess.CompletedProcess([], 0, '1 1\n456 123\n', '')
+            snapshots = [present, absent] if lingering else [absent]
+            with self.subTest(lingering=lingering), \
+                    patch.object(application.os, 'killpg', side_effect=PermissionError), \
+                    patch.object(application.subprocess, 'run', side_effect=snapshots), \
+                    patch.object(application.time, 'monotonic', return_value=0):
+                application.terminate(process)
+            process.wait.assert_called_once_with(timeout=2)
+
+    def test_cleanup_permission_error_retains_member_evidence_at_deadline(self):
+        process = Mock(pid=123, poll=Mock(return_value=0))
+        present = subprocess.CompletedProcess([], 0, '1 1\n456 123\n', '')
+        with patch.object(application.os, 'killpg', side_effect=PermissionError) as kill, \
+                patch.object(application.subprocess, 'run', return_value=present), \
+                patch.object(application.time, 'monotonic', side_effect=[0, 0, 2, 2]):
+            with self.assertRaisesRegex(PermissionError, r'KILL after TERM grace; leader=0; members=\[\[456, 123\]\]'):
+                application.terminate(process)
+        self.assertEqual(kill.call_args.args, (123, application.signal.SIGKILL))
+
+
+class CounterbalancedPanels(unittest.TestCase):
+    def fixture(self, seeds=(7, 19), repeats=2, factor=1.5, fixtures=('naive',)):
+        cases = application.case_matrix(['cpu', 'baseline', 'candidate'], list(fixtures), [2048], list(seeds), repeats, True)
+        config = {'cases': cases, 'rounds': 33, 'counterbalance': {'enabled': True, 'seed_order': list(seeds)}}
+        accepted = {}
+        for index, case in enumerate(cases):
+            rate = 100 * (2 if index % 2 else 1)
+            if case['backend'] == 'candidate':
+                rate *= factor
+            accepted[(case['fixture'], case['count'], case['seed'], case['repeat'], case['backend'])] = {
+                **case, 'complete': True, 'steady_steps_per_second': rate}
+        return config, accepted
+
+    def test_panel_cancels_period_two_multiplier(self):
+        config, accepted = self.fixture()
+        panels, excluded = implementation_panels(config, accepted)
+        self.assertFalse(excluded)
+        self.assertEqual(len(panels), 2)
+        for panel in panels:
+            self.assertAlmostEqual(panel['geometric_ratio'], 1.5)
+            self.assertEqual(sorted(row['ratio'] for row in panel['raw_pairs']), [.75, 3.0])
+        result = panel_interval(panels, iterations=100)
+        self.assertAlmostEqual(result['geometric_mean_ratio'], 1.5)
+        for bound in result['confidence_95']:
+            self.assertAlmostEqual(bound, 1.5)
+        self.assertEqual(result, panel_interval(panels, iterations=100))
+
+    def test_panel_weights_seeds_equally(self):
+        panels = [{'seed': 7, 'log_ratio': math.log(4)},
+                  {'seed': 19, 'log_ratio': math.log(1)}, {'seed': 19, 'log_ratio': math.log(1)}]
+        result = panel_interval(panels, iterations=100)
+        self.assertAlmostEqual(result['geometric_mean_ratio'], 2)
+
+    def test_incomplete_panel_is_excluded(self):
+        config, accepted = self.fixture(seeds=(7,))
+        del accepted[('naive', 2048, 7, 1, 'candidate')]
+        panels, excluded = implementation_panels(config, accepted)
+        self.assertFalse(panels)
+        self.assertEqual(len(excluded), 1)
+        self.assertIn('incomplete', excluded[0]['reason'])
+
+    def test_wrong_recorded_order_is_rejected(self):
+        config, accepted = self.fixture(seeds=(7,))
+        config['cases'][3], config['cases'][4] = config['cases'][4], config['cases'][3]
+        panels, excluded = implementation_panels(config, accepted)
+        self.assertFalse(panels)
+        self.assertEqual(len(excluded), 1)
+
+    def test_screening_does_not_pass_final_gate(self):
+        config, accepted = self.fixture()
+        summary = implementation_summary(config, accepted)
+        self.assertEqual(summary['performance_gate'], 'NOT VERIFIED')
+        self.assertFalse(summary['final_design_complete'])
+
+    def test_complete_prospective_design_passes_performance_gate(self):
+        config, accepted = self.fixture(seeds=(7, 19, 41, 73, 101), repeats=6, fixtures=('naive', 'rank26'))
+        summary = implementation_summary(config, accepted)
+        self.assertTrue(summary['final_design_complete'])
+        self.assertEqual(summary['performance_gate'], 'PASS')
+        self.assertEqual(summary['secondary_nonregression_95'], 'PASS')
+
+    def test_three_panel_orientation_balance(self):
+        config, _ = self.fixture(seeds=(7, 19, 41, 73, 101), repeats=6)
+        starts = [case for case in config['cases'] if case['panel_position'] == 0]
+        self.assertEqual(sum(case['orientation'] == 'ABBA' for case in starts), 8)
+        self.assertEqual(sum(case['orientation'] == 'BAAB' for case in starts), 7)
+        for index in range(0, len(config['cases']), 6):
+            panel = config['cases'][index:index + 6]
+            self.assertEqual(panel[0]['backend'], 'cpu')
+            self.assertEqual(panel[-1]['backend'], 'cpu')
+            self.assertEqual([case['backend'] for case in panel], [case['backend'] for case in panel[::-1]])
+
+    def test_counterbalance_rejects_incompatible_matrix(self):
+        with self.assertRaises(ValueError):
+            application.case_matrix(['baseline', 'candidate'], ['naive'], [2048], [7], 6, True)
+        with self.assertRaises(ValueError):
+            application.case_matrix(['cpu', 'baseline', 'candidate'], ['naive'], [2048], [7], 3, True)
+
+    def test_gpu_evidence_accepts_only_search_kernels(self):
+        for name in ['randomWalkKernel', 'randomWalkCompactKernel']:
+            match = application.GPU.search(f'Metal dispatch {name}: 2048 threads, 12.5 ms GPU')
+            self.assertEqual(match['kernel'], name)
+            self.assertEqual(float(match['ms']), 12.5)
+        self.assertIsNone(application.GPU.search('Metal dispatch initializeNaiveKernel: 2048 threads, 12.5 ms GPU'))
+
+
+if __name__ == '__main__':
+    unittest.main()
