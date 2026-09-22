@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := metal
 
 METAL_FLAGS = -mmacosx-version-min=15.0 -std=c++17 -O2 -fobjc-arc -ffp-contract=off -framework Foundation -framework Metal -DMETAL_SOURCE_DIR='"$(CURDIR)/src/metal"'
-METAL_SOURCES = $(wildcard src/metal/*.h src/metal/*.cpp src/metal/*.metal) src/metal/runtime.mm src/entities/arg_parser.cu src/entities/arg_parser.cuh
+METAL_SOURCES = $(wildcard src/metal/*.h src/metal/*.cpp src/metal/*.metal) src/metal/runtime.mm src/common/arg_parser.cpp src/common/arg_parser.h
 .PHONY: metal
 metal: build/metal/flip_graph build/metal/complexity_minimizer build/metal/additions_reducer
 

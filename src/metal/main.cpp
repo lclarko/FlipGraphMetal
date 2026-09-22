@@ -1,5 +1,5 @@
 #include "host.h"
-#include "../entities/arg_parser.cu"
+#include "../common/arg_parser.cpp"
 #include "utils.cpp"
 int metalRounds = 0;
 
