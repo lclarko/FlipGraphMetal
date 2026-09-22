@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -12,12 +13,15 @@ from application import artifacts, digest, source_identity, terminate, wired_mem
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def check_log(log, expected_rounds=None):
+def check_log(log, expected_rounds=None, expected_kernel=None):
     dispatches = [(name, float(value) / 1000) for name, value in re.findall(
-        r'Metal dispatch (\w+):.*?, ([\d.]+) ms GPU', log)]
-    if not dispatches or any(seconds <= 0 for _, seconds in dispatches):
+        r'Metal dispatch (\w+):.*?, ([\d.eE+-]+|nan|inf) ms GPU', log)]
+    if not dispatches or any(not math.isfinite(seconds) or seconds <= 0 for _, seconds in dispatches):
         raise RuntimeError('missing or nonpositive GPU dispatch timings')
-    gpu_seconds = [seconds for name, seconds in dispatches if name in ('randomWalkKernel', 'randomWalkCompactKernel')]
+    walks = [(name, seconds) for name, seconds in dispatches if name in ('randomWalkKernel', 'randomWalkCompactKernel')]
+    if expected_kernel is not None and any(name != expected_kernel for name, _ in walks):
+        raise RuntimeError('walk dispatch kernel differs from expected kernel')
+    gpu_seconds = [seconds for _, seconds in walks]
     rounds = re.findall(r'^(?:ROUND|REPEAT) (\d+).* MATCH$', log, re.M)
     if expected_rounds is not None:
         if rounds != [str(i) for i in range(expected_rounds)]:
@@ -27,9 +31,11 @@ def check_log(log, expected_rounds=None):
     return gpu_seconds, rounds
 
 
-def execute(argv, directory, expected_exports, expected_rounds=None):
+def execute(argv, directory, expected_exports, expected_rounds=None, expected_kernel=None):
     directory.mkdir(parents=True, exist_ok=False)
     record = {'argv': argv, 'complete': False, 'memory': []}
+    record['expected_kernel'] = expected_kernel
+    write_json(directory / 'result.json', record)
     process = None
     start = time.monotonic()
     try:
@@ -37,7 +43,7 @@ def execute(argv, directory, expected_exports, expected_rounds=None):
         record['memory'].append({'seconds': 0, 'wired_bytes': initial})
         if initial > 3 * 1024**3:
             raise RuntimeError('wired memory exceeded 3 GiB before launch')
-        with (directory / 'run.log').open('w') as log:
+        with (directory / 'run.log').open('x') as log:
             process = subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, env={key: os.environ[key] for key in
                     ['PATH', 'HOME', 'TMPDIR', 'DEVELOPER_DIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME'] if key in os.environ})
@@ -66,7 +72,9 @@ def execute(argv, directory, expected_exports, expected_rounds=None):
             verify(json.loads(path.read_text()))
         record['verified_exports'] = len(files)
         log = (directory / 'run.log').read_text()
-        record['gpu_seconds'], record['matched_rounds'] = check_log(log, expected_rounds)
+        record['gpu_seconds'], record['matched_rounds'] = check_log(log, expected_rounds, expected_kernel)
+        if not re.search(r'^Metal device: Apple .+', log, re.M):
+            raise RuntimeError('missing Apple GPU device evidence')
         record['complete'] = True
     except Exception as error:
         record['error'] = str(error)
@@ -85,10 +93,27 @@ def execute(argv, directory, expected_exports, expected_rounds=None):
     return record
 
 
+def check_manifest(build, expected_kernel):
+    manifest = json.loads((build / 'build.json').read_text())
+    if manifest.get('complete') is not True:
+        raise ValueError('profiling build is incomplete')
+    if manifest.get('gpu_kernel') != expected_kernel:
+        raise ValueError('build manifest kernel differs from expected kernel')
+    if expected_kernel == 'randomWalkCompactKernel' and manifest.get('rank_capacity') != 350:
+        raise ValueError('compact walks require rank capacity 350')
+    expected_binary = manifest.get('binary_sha256', {}).get('matched')
+    if not expected_binary or digest(build / 'matched') != expected_binary:
+        raise ValueError('matched executable differs from completed build manifest')
+    if not manifest.get('snapshot_files') or source_identity(build) != manifest['snapshot_files']:
+        raise ValueError('source snapshots differ from completed build manifest')
+    return manifest
+
+
 def main():
     parser = argparse.ArgumentParser(description='Screen frozen CPU/Metal walks under process and memory bounds')
     parser.add_argument('--builds', nargs='+', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--expected-kernel', choices=['randomWalkKernel', 'randomWalkCompactKernel'], required=True)
     parser.add_argument('--populations', nargs='+', type=int, default=[512, 2048])
     parser.add_argument('--seeds', nargs='+', type=int, default=[7, 19])
     parser.add_argument('--repeats', type=int, default=1)
@@ -100,6 +125,8 @@ def main():
     builds = [p.resolve(strict=True) for p in args.builds]
     if len(set(p.name for p in builds)) != len(builds):
         parser.error('build directory names must be unique')
+    for build in builds:
+        check_manifest(build, args.expected_kernel)
     identities = {str(p): {'binary': digest(p / 'matched'), 'manifest': digest(p / 'build.json'),
                            'source': source_identity(p)} for p in builds}
     output = args.output.resolve()
@@ -123,7 +150,7 @@ def main():
                     if args.fixture:
                         argv += ['32', str(args.fixture.resolve())]
                     expected = 13 if args.mode == 'repeat' else 6
-                    record = execute(argv, directory, count, expected_rounds=expected)
+                    record = execute(argv, directory, count, expected_rounds=expected, expected_kernel=args.expected_kernel)
                     record.update(name=name, build=str(build), count=count, seed=seed, repeat=repeat)
                     records.append(record)
                     write_json(output / 'results.json', records)

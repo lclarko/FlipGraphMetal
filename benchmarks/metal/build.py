@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+from application import source_identity
 parser = argparse.ArgumentParser(description="Build the signed 3x3 CPU/Metal profiling executables")
 parser.add_argument('--rank-capacity', type=int, choices=[32, 350], default=350)
 parser.add_argument('--output', type=Path, help='directory for source snapshots and executables')
@@ -18,9 +19,7 @@ if args.gpu_kernel == "randomWalkCompactKernel" and args.rank_capacity != 350:
 root = Path(__file__).resolve().parents[2]
 output = args.output.resolve() if args.output else root / ('build/metal/profile' if args.rank_capacity == 350 else 'build/metal/profile-cap32')
 production = output / 'production'
-production.mkdir(parents=True, exist_ok=True)
 source = output / 'source'
-source.mkdir(parents=True, exist_ok=True)
 input_source = args.source.resolve() if args.source else root / 'src/metal'
 gpu_source = args.gpu_source.resolve() if args.gpu_source else input_source
 if not input_source.is_dir() or not gpu_source.is_dir():
@@ -29,6 +28,10 @@ if input_source in (source, production) or gpu_source in (source, production):
     parser.error('input source directories must differ from output snapshots')
 if args.rank_capacity != 350 and (gpu_source / 'storage.json').is_file():
     parser.error('storage diagnostics require rank capacity 350')
+output.mkdir(parents=True, exist_ok=False)
+production.mkdir()
+source.mkdir()
+(output / 'build.json').write_text(json.dumps({'complete': False, 'gpu_kernel': args.gpu_kernel, 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source)}, indent=2) + '\n')
 inputs = list(input_source.glob('*'))
 gpu_inputs = list(gpu_source.glob('*'))
 for path in inputs:
@@ -182,7 +185,12 @@ matched = commands[-1].copy()
 matched[matched.index('-DMETAL_SOURCE_DIR="'+str(source)+'"')] = '-DMETAL_SOURCE_DIR="'+str(production)+'"'
 matched[-1] = str(output / 'matched')
 commands.append(matched)
+manifest = {'complete': False, 'gpu_kernel': args.gpu_kernel, 'runtime_input': str(runtime_input), 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source), 'commands': commands, 'inputs': {str(p.relative_to(root)) if p.is_relative_to(root) else str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [*inputs, *gpu_inputs, *Path(__file__).parent.glob('*')] if p.is_file()}}
+(output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
+
 for command in commands:
     subprocess.run(command, cwd=root, check=True)
-manifest = {'gpu_kernel': args.gpu_kernel, 'runtime_input': str(runtime_input), 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source), 'commands': commands, 'inputs': {str(p.relative_to(root)) if p.is_relative_to(root) else str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [*inputs, *gpu_inputs, *Path(__file__).parent.glob('*')] if p.is_file()}}
-(output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
+manifest['snapshot_files'] = source_identity(output)
+manifest['complete'] = True
+manifest['binary_sha256'] = {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ('profile', 'matched')}
+(output / 'build.json').write_text(json.dumps(manifest, indent=2) + '\n')

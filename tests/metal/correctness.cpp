@@ -25,9 +25,17 @@ void textScheme(std::ostream &out, const SchemeInteger &scheme) {
         }
 }
 
-int main() {
+int main(int argc, char **argv) {
     try {
-        std::filesystem::create_directories("build/metal/test-output");
+        if (argc == 2 && std::string(argv[1]) == "--help") {
+            std::cout << "Usage: " << argv[0] << " --output-dir NEW_DIRECTORY\n";
+            return 0;
+        }
+        if (argc != 3 || std::string(argv[1]) != "--output-dir" || !argv[2][0] || std::string(argv[2]).rfind("--", 0) == 0)
+            throw std::runtime_error("expected --output-dir NEW_DIRECTORY; parent directory must exist");
+        const std::filesystem::path output(argv[2]);
+        if (!std::filesystem::create_directory(output))
+            throw std::runtime_error("output directory already exists: " + output.string());
         unsigned *layout;
         metalAllocate(&layout, 4 * sizeof(unsigned));
         metalDispatch("layoutKernel", 1, 1, layout);
@@ -70,14 +78,14 @@ int main() {
         RandomState preparation = {1234567};
         for (int i = 0; i < 100; i++) initial.tryFlip(preparation);
         require(initial.validate(), "CPU preparation tensor invalid");
-        initial.save("build/metal/test-output/input.json");
+        initial.save((output / "input.json").string());
         {
-            std::ofstream out("build/metal/test-output/input.txt");
+            std::ofstream out((output / "input.txt"));
             out << "3 3 3 " << initial.m << '\n';
             textScheme(out, initial);
         }
         {
-            std::ofstream out("build/metal/test-output/minimizer.txt");
+            std::ofstream out((output / "minimizer.txt"));
             out << "3 3 3 " << initial.m << " 1\n";
             textScheme(out, initial);
         }
@@ -123,7 +131,7 @@ int main() {
             for (int i = 0; i < 4; i++) {
                 require(equal(cpu[i], gpu[i]), "CPU/Metal transformation mismatch: " + std::to_string(operation));
                 require(states[i].value == expected[i].value, "CPU/Metal random decisions mismatch");
-                gpu[i].save("build/metal/test-output/transform-" + std::to_string(operation) + "-" + std::to_string(i) + ".json");
+                gpu[i].save((output / ("transform-" + std::to_string(operation) + "-" + std::to_string(i) + ".json")).string());
             }
         }
         metalFree(gpu); metalFree(other); metalFree(states);

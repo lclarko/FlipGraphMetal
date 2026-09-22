@@ -7,7 +7,7 @@ class CommandLineTests(unittest.TestCase):
     def reject(self, program, arguments, message):
         path = Path("build/metal") / program
         if not path.exists():
-            self.skipTest("build Metal executables first")
+            self.fail("build Metal executables first: missing " + str(path))
         result = subprocess.run([str(path), *arguments], capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(message, result.stdout + result.stderr)

@@ -1,8 +1,16 @@
 #include "../../src/metal/host.h"
 
-int main() {
+int main(int argc, char **argv) {
     try {
-        std::filesystem::create_directories("build/metal/f2-test-output");
+        if (argc == 2 && std::string(argv[1]) == "--help") {
+            std::cout << "Usage: " << argv[0] << " --output-dir NEW_DIRECTORY\n";
+            return 0;
+        }
+        if (argc != 3 || std::string(argv[1]) != "--output-dir" || !argv[2][0] || std::string(argv[2]).rfind("--", 0) == 0)
+            throw std::runtime_error("expected --output-dir NEW_DIRECTORY; parent directory must exist");
+        const std::filesystem::path output(argv[2]);
+        if (!std::filesystem::create_directory(output))
+            throw std::runtime_error("output directory already exists: " + output.string());
         SchemeZ2 *gpu, *other;
         RandomState *states;
         metalAllocate(&gpu, sizeof(SchemeZ2));
@@ -43,7 +51,7 @@ int main() {
                 for (size_t i = 0; i < cpu.flips[p].size; i++)
                     if (cpu.flips[p].pairs[i] != gpu->flips[p].pairs[i]) throw std::runtime_error("F2 flip ordering mismatch");
             }
-            gpu->save("build/metal/f2-test-output/transform-" + std::to_string(operation) + ".json");
+            gpu->save((output / ("transform-" + std::to_string(operation) + ".json")).string());
         }
         metalFree(gpu); metalFree(other); metalFree(states);
         std::cout << "PASS: 13 F2 CPU/Metal transformations and random states\n";

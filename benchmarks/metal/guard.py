@@ -20,7 +20,7 @@ def run(argv, output):
         record['memory'].append(dict(seconds=0, wired_bytes=initial))
         if initial > LIMIT:
             raise RuntimeError('wired memory exceeded 3 GiB before launch')
-        with (output / 'run.log').open('w') as log:
+        with (output / 'run.log').open('x') as log:
             process_start = time.monotonic()
             process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, env={key: os.environ[key] for key in
