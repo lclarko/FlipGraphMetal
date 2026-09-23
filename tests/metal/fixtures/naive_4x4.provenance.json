@@ -1,0 +1,21 @@
+{
+  "coefficient_domain": "signed integers {-1,0,1}",
+  "construction": "scalar schoolbook multiplication",
+  "dimensions": [
+    4,
+    4,
+    4
+  ],
+  "fixture": "naive_4x4.txt",
+  "format": "one raw scheme without a scheme-count prefix; U[i*4+j], V[j*4+k], W[k*4+i]",
+  "generator": "benchmarks/metal/make_4x4_fixtures.py",
+  "mathematical_reference": null,
+  "rank": 64,
+  "sha256": "bce8d7a988ce57c9871928a721613f290273f545550216dea01a04e23c869419",
+  "source": "generated from mathematical definitions; no external code or fixture copied",
+  "verification": {
+    "equations": 4096,
+    "method": "independent exact-integer tensor reconstruction using tests/metal/verify.py"
+  },
+  "version": 1
+}

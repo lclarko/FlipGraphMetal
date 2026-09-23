@@ -34,6 +34,27 @@ def metal_report(iteration, elapsed, count=2048):
 
 
 class SourceTiming(unittest.TestCase):
+    def test_seventeen_reports_measure_sixteen_intervals(self):
+        for backend, factory, precision in [('cpu', cpu_report, 2),
+                                            ('candidate', metal_report, 3)]:
+            with self.subTest(backend=backend):
+                text = ''.join(factory(i, f'{i / 10:.{precision}f}') for i in range(1, 18))
+                result = application.source_timing(text, backend, 2048, 17)
+                self.assertEqual(result['measured_report_indices'], [1, 17])
+                self.assertEqual(len(result['source_reports']), 17)
+                self.assertAlmostEqual(result['steady_seconds'], 1.6)
+                self.assertAlmostEqual(result['steady_steps_per_second'], 32768000 / 1.6)
+                self.assertEqual(result['source_completed_overshoot'], 0)
+                with self.assertRaises(ValueError):
+                    application.source_timing(text, backend, 2048, 18)
+        device = 'Metal device: Apple M1\n'
+        dispatch = 'Metal dispatch randomWalkKernel: 2048 threads, 12.5 ms GPU\n'
+        evidence = application.gpu_evidence(device, dispatch * 17, 17, 'randomWalkKernel')
+        self.assertEqual(len(evidence['gpu_seconds']), 17)
+        for count in [16, 18]:
+            with self.subTest(dispatches=count), self.assertRaises(ValueError):
+                application.gpu_evidence(device, dispatch * count, 17, 'randomWalkKernel')
+
     def test_cpu_cumulative_window_and_precision(self):
         result = application.source_timing(''.join(cpu_report(i, f'{i / 10:.2f}')
                                                   for i in range(1, 4)), 'cpu', 2048, 3)

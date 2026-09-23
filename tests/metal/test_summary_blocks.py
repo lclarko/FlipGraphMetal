@@ -1,11 +1,14 @@
 from pathlib import Path
 import sys
+import tempfile
+import json
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'benchmarks/metal'))
+import application
 from application import case_matrix
-from summarize_application import combine_directories
+from summarize_application import combine_directories, load_directory
 
 
 class FixtureBlocks(unittest.TestCase):
@@ -62,6 +65,60 @@ class FixtureBlocks(unittest.TestCase):
             second[1][field] = 'changed'
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'incompatible'):
                 self.combine([first, second])
+
+    def test_kernel_selector_is_part_of_combined_protocol(self):
+        for left, right in [(None, 'randomWalkKernel'),
+                            ('randomWalkKernel', None),
+                            ('randomWalkKernel', 'randomWalkCompactKernel')]:
+            first = self.matrix('/first', ['naive'])
+            second = self.matrix('/second', ['rank26'])
+            if left:
+                first[1]['expected_kernel'] = left
+            if right:
+                second[1]['expected_kernel'] = right
+            with self.subTest(left=left, right=right), self.assertRaisesRegex(ValueError, 'incompatible'):
+                self.combine([first, second])
+
+    def test_summary_rechecks_declared_kernel_device_and_logs(self):
+        case = dict(name='gpu-case', fixture='custom', count=2048, seed=7, repeat=0, backend='candidate')
+        identity = dict(binary='/unused/program', source='/unused/source', build_manifest='/unused/build.json')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / case['name']
+            directory.mkdir()
+            stdout = 'Metal device: Apple M1\n'
+            stderr = 'Metal dispatch randomWalkKernel: 2048 threads, 12.5 ms GPU\n' * 2
+            (directory / 'stdout.log').write_text(stdout)
+            (directory / 'stderr.log').write_text(stderr)
+            config = dict(rounds=2, cases=[case], identities={'candidate': identity},
+                          expected_kernel='randomWalkKernel')
+            application.write_json(root / 'config.json', config)
+            record = dict(case, complete=True, wall_seconds=1, reports=[.4, .6],
+                          steady_steps_per_second=100, expected_kernel='randomWalkKernel')
+            record.update(application.gpu_evidence(stdout, stderr, 2, 'randomWalkKernel'))
+
+            def seal():
+                record['artifacts'] = application.artifacts(directory)
+                application.write_json(directory / 'result.json', record)
+                (directory / 'result.sha256').write_text(application.digest(directory / 'result.json') + '\n')
+
+            seal()
+            with patch('summarize_application.build_identity', return_value=identity):
+                self.assertEqual(len(load_directory(root)[1]), 1)
+                record['expected_kernel'] = 'randomWalkCompactKernel'
+                seal()
+                with self.assertRaisesRegex(ValueError, 'expected kernel'):
+                    load_directory(root)
+                record['expected_kernel'] = 'randomWalkKernel'
+                record['gpu_seconds'] = [.02, .02]
+                seal()
+                with self.assertRaisesRegex(ValueError, 'retained logs'):
+                    load_directory(root)
+                record['gpu_seconds'] = [.0125, .0125]
+                (directory / 'stderr.log').write_text(stderr.replace('randomWalkKernel', 'randomWalkCompactKernel'))
+                seal()
+                with self.assertRaisesRegex(ValueError, 'search kernel'):
+                    load_directory(root)
 
     def test_runner_change_requires_explicit_reason(self):
         with self.assertRaisesRegex(ValueError, 'runner-change-reason'):

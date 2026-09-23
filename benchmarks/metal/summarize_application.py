@@ -6,7 +6,7 @@ from pathlib import Path
 import random
 import statistics
 
-from application import SOURCE_TIMING, artifacts, build_identity, digest, source_timing
+from application import SOURCE_TIMING, artifacts, build_identity, digest, gpu_evidence, source_timing
 
 
 def distribution(values):
@@ -197,6 +197,15 @@ def load_directory(directory):
                                          case['backend'], case['count'], config['rounds'])
                 if any(record.get(key) != value for key, value in expected.items()):
                     raise ValueError('source timing metadata differs from retained stdout')
+            if config.get('expected_kernel') is not None:
+                if record.get('expected_kernel') != config['expected_kernel']:
+                    raise ValueError('record expected kernel differs from configured protocol')
+                if case['backend'] != 'cpu':
+                    evidence = gpu_evidence((path.parent / 'stdout.log').read_text(),
+                                            (path.parent / 'stderr.log').read_text(),
+                                            config['rounds'], config['expected_kernel'])
+                    if any(record.get(key) != value for key, value in evidence.items()):
+                        raise ValueError('GPU evidence differs from retained logs')
             process_timing(record, config['rounds'])
             accepted[(case['fixture'], case['count'], case['seed'], case['repeat'], case['backend'])] = record
     return config, accepted, missing
@@ -208,6 +217,7 @@ def combine_directories(inputs, runner_change_reason=None):
               'developer_dir', 'iterations_per_round', 'time_limit', 'wired_limit')
     for directory, config, accepted, missing in inputs:
         if (any(key not in config or key not in first or config[key] != first[key] for key in common)
+                or config.get('expected_kernel') != first.get('expected_kernel')
                 or config.get('custom_fixture') != first.get('custom_fixture')
                 or config.get('timing_method', 'arrival') != first.get('timing_method', 'arrival')):
             raise ValueError('incompatible fixture-block inputs: ' + str(directory))

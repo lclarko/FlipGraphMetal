@@ -226,6 +226,81 @@ class CounterbalancedPanels(unittest.TestCase):
         with self.assertRaises(ValueError):
             application.case_matrix(['cpu', 'baseline', 'candidate'], ['naive'], [2048], [7], 3, True)
 
+    @staticmethod
+    def naive_raw(n):
+        a, b, c = n
+        factors = [[], [], []]
+        for i in range(a):
+            for j in range(b):
+                for k in range(c):
+                    for rows, width, index in zip(factors, [a*b, b*c, c*a],
+                                                  [i*b+j, j*c+k, k*a+i]):
+                        rows.append([int(t == index) for t in range(width)])
+        values = [*n, a*b*c, *(v for rows in factors for row in rows for v in row)]
+        return ' '.join(map(str, values)) + '\n'
+
+    def test_custom_signed_dimensions_and_backend_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for n in [[3, 3, 3], [4, 4, 4], [2, 3, 4]]:
+                fixture = root / ('fixture-' + '-'.join(map(str, n)))
+                raw = self.naive_raw(n)
+                fixture.write_text(raw)
+                metadata, text = application.custom_fixture(fixture)
+                self.assertEqual(metadata['n'], n)
+                self.assertEqual(metadata['rank'], n[0]*n[1]*n[2])
+                self.assertEqual(text, raw)
+                self.assertEqual(metadata['sha256'], application.digest(fixture))
+                for backend in ['cpu', 'baseline', 'candidate']:
+                    directory = root / (fixture.name + backend)
+                    directory.mkdir()
+                    argv = application.command('/unused/program', backend, 2048, 7, 6,
+                                               'custom', directory, fixture_path=fixture)
+                    self.assertEqual((directory / 'input.txt').read_text(),
+                                     ('' if backend == 'cpu' else '1\n') + raw)
+                    if backend == 'cpu':
+                        self.assertNotIn('-n1', argv)
+                        self.assertEqual(argv[argv.index('--ring') + 1], 'ZT')
+                    else:
+                        for index, dimension in enumerate(n, 1):
+                            self.assertEqual(argv[argv.index(f'-n{index}') + 1], str(dimension))
+
+    def test_custom_rejects_invalid_domain_count_and_tensor(self):
+        good = self.naive_raw([2, 3, 4]).split()
+        variants = []
+        for field, value in [(0, '0'), (0, '17'), (3, '0'), (3, '351'), (4, '2')]:
+            changed = good.copy()
+            changed[field] = value
+            variants.append(' '.join(changed))
+        variants += [' '.join(good[:-1]), ' '.join(good + ['0']),
+                     '16 16 1 1 ' + '0 ' * 288, 'bad 3 3 1',
+                     '2 3 4 1 ' + '0 ' * 26]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'fixture.txt'
+            for text in variants:
+                with self.subTest(text=text[:40]):
+                    path.write_text(text)
+                    with self.assertRaises(ValueError):
+                        application.custom_fixture(path)
+
+    def test_gpu_evidence_requires_apple_expected_kernel_and_finite_timings(self):
+        line = 'Metal dispatch randomWalkKernel: 2048 threads, 12.5 ms GPU\n'
+        stdout = 'Metal device: Apple M1\n'
+        evidence = application.gpu_evidence(stdout, line * 2, 2, 'randomWalkKernel')
+        self.assertEqual(evidence['gpu_device'], 'Apple M1')
+        self.assertEqual(evidence['gpu_seconds'], [.0125, .0125])
+        variants = [(stdout, line, 'randomWalkKernel'),
+                    (stdout, line * 3, 'randomWalkKernel'),
+                    (stdout, line * 2, 'randomWalkCompactKernel'),
+                    ('', line * 2, 'randomWalkKernel'),
+                    ('Metal device: Intel GPU\n', line * 2, 'randomWalkKernel'),
+                    (stdout * 2, line * 2, 'randomWalkKernel')]
+        for bad in ['0', 'nan', 'inf', '-1', '1.2.3', '9' * 400]:
+            variants.append((stdout, line.replace('12.5', bad) * 2, 'randomWalkKernel'))
+        for out, err, kernel in variants:
+            with self.subTest(stderr=err[:90], stdout=out), self.assertRaises(ValueError):
+                application.gpu_evidence(out, err, 2, kernel)
+
     def test_gpu_evidence_accepts_only_search_kernels(self):
         for name in ['randomWalkKernel', 'randomWalkCompactKernel']:
             match = application.GPU.search(f'Metal dispatch {name}: 2048 threads, 12.5 ms GPU')

@@ -1,0 +1,21 @@
+{
+  "coefficient_domain": "signed integers {-1,0,1}",
+  "construction": "tensor square of the canonical seven-product 2x2 Strassen formulas",
+  "dimensions": [
+    4,
+    4,
+    4
+  ],
+  "fixture": "strassen_4x4.txt",
+  "format": "one raw scheme without a scheme-count prefix; U[i*4+j], V[j*4+k], W[k*4+i]",
+  "generator": "benchmarks/metal/make_4x4_fixtures.py",
+  "mathematical_reference": "Volker Strassen, Gaussian elimination is not optimal, Numerische Mathematik 13 (1969), 354-356, doi:10.1007/BF02165411",
+  "rank": 49,
+  "sha256": "b846459bf9c9544e52415070b202deb6e1c998593db785569cc3b2053e20f072",
+  "source": "generated from mathematical definitions; no external code or fixture copied",
+  "verification": {
+    "equations": 4096,
+    "method": "independent exact-integer tensor reconstruction using tests/metal/verify.py"
+  },
+  "version": 1
+}

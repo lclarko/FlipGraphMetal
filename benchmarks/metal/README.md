@@ -1,6 +1,6 @@
 # Metal developer tools
 
-These optional tools support correctness comparisons, source snapshots and performance investigation. Python is not part of the production runtime. Read [development](../../docs/development.md) for normal tests and [performance](../../docs/performance.md) for the historical results and limits.
+These optional tools support correctness comparisons, source snapshots and performance investigation. Python is not part of the production runtime. Read [development](../../docs/development.md) for normal tests and [performance](../../docs/performance.md) for measured results and their limits.
 
 ## Prerequisites and supervision
 
@@ -48,9 +48,62 @@ python3 benchmarks/metal/freeze_application.py \
 
 The snapshot resolves the parser only within the selected project root, supporting the original or current layout and rejecting ambiguous dependencies. It records source identities, build arguments and executable hashes. Its executable uses the snapshot's absolute shader directory; keep that directory intact.
 
-`application.py` compares external CPU and baseline/candidate Metal applications. Supply explicit binary, source and build-manifest arguments for each selected backend; inspect `--help` for their names. Use `--timing source-elapsed` for source-clock timing, and a new output directory. Custom fixtures require `--fixtures custom --fixture-path PATH` with one raw signed 3×3 scheme, no scheme-count prefix. The runner validates the tensor, records the hash and rechecks it before cases.
+`application.py` compares external CPU and baseline/candidate Metal applications. Supply explicit binary, source and build-manifest arguments for each selected backend; inspect `--help` for their names. Use `--timing source-elapsed` for source-clock timing, and a new output directory. Custom fixtures require `--fixtures custom --fixture-path PATH` with one raw signed scheme and no scheme-count prefix. Dimensions must be 1..16, each factor width at most 64, and rank 1..350. The runner checks the exact coefficient count, restricts coefficients to −1, 0 or 1, independently verifies the tensor, records the hash and rechecks it before cases. Use `--expected-kernel` to bind GPU evidence to the intended search kernel.
 
-`summarize_application.py DIRECTORY` rechecks retained records and timing. Preserve CPU thread counts, work sizes and policy differences in any report. GPU command time, application time and wall time must remain distinct. The historical CPU has no round cap, so asynchronously stopped CPU exports may include work after the measured interval.
+`summarize_application.py DIRECTORY` rechecks retained records and timing. Report per-fixture throughput ratios and confidence intervals. Its legacy milestone fields encode older experiment criteria; they do not define current project goals. Preserve CPU thread counts, work sizes and policy differences in any report. GPU command time, application time and wall time must remain distinct. The historical CPU has no round cap, so asynchronously stopped CPU exports may include work after the measured interval.
+
+## Signed 4×4 benchmark
+
+The checked-in `tests/metal/fixtures/naive_4x4.txt` and `strassen_4x4.txt` start at ranks 64 and 49. Their adjacent provenance files describe schoolbook multiplication and the tensor square of the seven-product Strassen formulas. Both satisfy all 4096 exact-integer tensor equations. To reproduce their bytes in a new directory:
+
+```sh
+python3 benchmarks/metal/make_4x4_fixtures.py --output "$ATTEMPT/generated-fixtures"
+```
+
+Use the general kernel for 4×4. With the same explicit frozen reference and fresh `ATTEMPT` conventions above, build and check both fixtures:
+
+```sh
+python3 benchmarks/metal/guard.py --output "$ATTEMPT/general-build-guard" -- \
+  python3 benchmarks/metal/build.py \
+    --source "$REFERENCE_METAL_SOURCE" --gpu-source "$PWD/src/metal" \
+    --gpu-kernel randomWalkKernel --rank-capacity 350 \
+    --output "$ATTEMPT/general-profile"
+
+for fixture in naive_4x4 strassen_4x4; do
+  python3 benchmarks/metal/screen.py \
+    --builds "$ATTEMPT/general-profile" --output "$ATTEMPT/check-$fixture" \
+    --expected-kernel randomWalkKernel \
+    --populations 33 512 --seeds 7 19 --repeats 1 --mode matched \
+    --fixture "$PWD/tests/metal/fixtures/$fixture.txt" || exit 1
+done
+```
+
+Inspect the six `ACTIVITY` rows as well as each exact `MATCH`: changed states demonstrate activity; rank ranges and candidate counts describe the resulting walks. Failed-flip recovery can expand a scheme even when optional expansion probability is zero, so search ranks can change from the starting rank.
+
+For application measurements, first create the frozen application snapshot above. Set `CPU_BINARY`, `CPU_SOURCE` and `CPU_BUILD_MANIFEST` to a compatible, pinned external CPU build. The manifest must match its source and executable; the CPU must emit the source-clock report format accepted by the runner.
+
+Before confirmation, run both fixtures with six reports, seed 7 and two repeats at populations 512 and 2048, each in a fresh pilot directory. The measured protocol selected 2048 only when every pilot completed, maximum process duration multiplied by 17/6 was below 30 seconds, and sampled wired memory was below 2.75 GiB. These are headroom checks within the hard guards, not permanent resource guarantees. If the intended report count fails the checks, stop and declare a shorter protocol before collecting confirmation data. Preserve all pilots and incomplete attempts; exclude pilot timings from confirmation statistics.
+
+After those checks, the 120-process confirmation design is:
+
+```sh
+for fixture in naive_4x4 strassen_4x4; do
+  python3 benchmarks/metal/application.py \
+    --output "$ATTEMPT/confirmation-$fixture" --backends cpu candidate \
+    --cpu "$CPU_BINARY" --cpu-source "$CPU_SOURCE" \
+    --cpu-build-manifest "$CPU_BUILD_MANIFEST" \
+    --candidate "$ATTEMPT/application/flip_graph" \
+    --candidate-source "$ATTEMPT/application/source" \
+    --candidate-build-manifest "$ATTEMPT/application/build.json" \
+    --fixtures custom --fixture-path "$PWD/tests/metal/fixtures/$fixture.txt" \
+    --populations 2048 --seeds 7 19 41 73 101 --repeats 6 --rounds 17 \
+    --timing source-elapsed --expected-kernel randomWalkKernel || exit 1
+  python3 benchmarks/metal/summarize_application.py \
+    "$ATTEMPT/confirmation-$fixture" || exit 1
+done
+```
+
+The runner uses eight CPU threads, 1000 attempted iterations per scheme per round, and alternating backend order across repetitions. Timing uses report 17 minus report 1, excluding the first round. Attempted iterations are not successful flips or equal candidate work, and CPU/Metal policies differ. Report each fixture separately without interpreting throughput as equal search quality.
 
 ## Diagnostics
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from application import source_identity
-parser = argparse.ArgumentParser(description="Build the signed 3x3 CPU/Metal profiling executables")
+parser = argparse.ArgumentParser(description="Build the signed CPU/Metal profiling executables")
 parser.add_argument('--rank-capacity', type=int, choices=[32, 350], default=350)
 parser.add_argument('--output', type=Path, help='directory for source snapshots and executables')
 parser.add_argument('--source', type=Path, help='Metal source directory for the CPU reference and diagnostics')
@@ -42,10 +42,12 @@ for path in gpu_inputs:
         shutil.copy2(path, production / path.name)
 for name in ['build.py', 'profile.cpp', 'kernels.metal']:
     shutil.copy2(root / 'benchmarks/metal' / name, output / name)
-runtime_input = gpu_source / 'runtime.mm' if args.gpu_kernel == 'randomWalkCompactKernel' else source / 'runtime.mm'
+runtime_input = gpu_source / 'runtime.mm'
 runtime = runtime_input.read_text()
-if args.gpu_kernel == 'randomWalkCompactKernel':
+# Match the loader to the GPU snapshot, including headers it compiles eagerly.
+if '@"compact.h"' in runtime:
     shutil.copy2(gpu_source / 'compact.h', source / 'compact.h')
+if args.gpu_kernel == 'randomWalkCompactKernel':
     benchmark = output / 'profile.cpp'
     benchmark.write_text(benchmark.read_text().replace('"randomWalkKernel"', '"randomWalkCompactKernel"'))
 

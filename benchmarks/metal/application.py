@@ -202,13 +202,16 @@ def custom_fixture(path):
         raise ValueError('custom fixture must contain only raw signed-scheme integers')
     values = [int(token) for token in tokens]
     n, rank = values[:3], values[3]
-    if n != [3, 3, 3] or not 1 <= rank <= 350:
-        raise ValueError('custom fixture requires signed 3x3 and rank 1..350')
-    if len(values) != 4 + 27 * rank or any(value not in (-1, 0, 1) for value in values[4:]):
-        raise ValueError('custom fixture requires exactly 27 coefficients per term, each -1, 0 or 1')
+    widths = [n[0] * n[1], n[1] * n[2], n[2] * n[0]]
+    if any(not 1 <= dim <= 16 for dim in n) or max(widths) > 64 or not 1 <= rank <= 350:
+        raise ValueError('custom fixture requires dimensions 1..16, factor widths <=64 and rank 1..350')
+    if len(values) != 4 + sum(widths) * rank or any(value not in (-1, 0, 1) for value in values[4:]):
+        raise ValueError('custom fixture coefficient count must match dimensions and rank; values must be -1, 0 or 1')
     data = {'n': n, 'm': rank, 'z2': False}
-    for p, key in enumerate('uvw'):
-        data[key] = [values[4 + 9 * (p * rank + r):4 + 9 * (p * rank + r + 1)] for r in range(rank)]
+    offset = 4
+    for width, key in zip(widths, 'uvw'):
+        data[key] = [values[offset + width * r:offset + width * (r + 1)] for r in range(rank)]
+        offset += width * rank
     verify(data)
     return {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(), 'rank': rank, 'n': n}, text
 
@@ -218,11 +221,14 @@ def command(binary, backend, count, seed, rounds, fixture, directory, *, fixture
         raise ValueError('unknown fixture: ' + fixture)
     if (fixture == 'custom') != (fixture_path is not None):
         raise ValueError('fixture_path is required only for the custom fixture')
+    custom, custom_text = custom_fixture(fixture_path) if fixture == 'custom' else (None, None)
+    dimensions = custom['n'] if custom else [3, 3, 3]
     common = ['--seed', str(seed)]
     if fixture == 'naive' or backend != 'cpu':
-        common += ['-n1', '3', '-n2', '3', '-n3', '3']
+        for index, dimension in enumerate(dimensions, 1):
+            common += [f'-n{index}', str(dimension)]
     if fixture in ('rank26', 'custom'):
-        text = (custom_fixture(fixture_path)[1] if fixture == 'custom'
+        text = (custom_text if fixture == 'custom'
                 else (ROOT / 'tests/metal/fixtures/strassen_3x3.txt').read_text())
         input_path = directory / 'input.txt'
         input_path.write_text(('' if backend == 'cpu' else '1\n') + text)
@@ -243,10 +249,30 @@ def command(binary, backend, count, seed, rounds, fixture, directory, *, fixture
     return [str(binary), *common, *options]
 
 
-def run_case(case, argv, directory, rounds, timing='arrival'):
+def gpu_evidence(stdout, stderr, rounds, expected_kernel=None):
+    """Validate retained device and search-dispatch evidence, without GPU execution."""
+    if expected_kernel not in (None, 'randomWalkKernel', 'randomWalkCompactKernel'):
+        raise ValueError('unknown expected search kernel')
+    combined = stdout + '\n' + stderr
+    devices = re.findall(r'^Metal device: (.+)$', combined, re.MULTILINE)
+    matches = list(GPU.finditer(combined))
+    seconds = [float(match['ms']) / 1000 for match in matches]
+    kernels = [match['kernel'] for match in matches]
+    dispatch_lines = [line for line in combined.splitlines() if line.startswith('Metal dispatch randomWalk')]
+    if (len(devices) != 1 or not devices[0].startswith('Apple ')
+            or len(matches) != rounds or len(dispatch_lines) != rounds
+            or any(not math.isfinite(value) or value <= 0 for value in seconds)
+            or (expected_kernel is not None and any(kernel != expected_kernel for kernel in kernels))):
+        raise ValueError('Metal Apple device, search kernel or positive dispatch timing evidence invalid')
+    return dict(gpu_device=devices[0], gpu_seconds=seconds, gpu_kernels=kernels)
+
+
+def run_case(case, argv, directory, rounds, timing='arrival', *, expected_kernel=None):
     sys.path.insert(0, str(ROOT / 'tests/metal'))
     from verify import verify
     record = {**case, 'argv': argv, 'complete': False, 'reports': [], 'gpu_seconds': [], 'gpu_kernels': [], 'memory': [], 'coalesced_reports': []}
+    if expected_kernel is not None:
+        record['expected_kernel'] = expected_kernel
     write_json(directory / 'result.json', record)
     start = time.monotonic()
     reason = None
@@ -366,12 +392,15 @@ def run_case(case, argv, directory, rounds, timing='arrival'):
         if case['backend'] == 'cpu':
             if not intentional or record['exit_code'] not in (0, -signal.SIGTERM):
                 raise RuntimeError('CPU did not stop cleanly at report limit')
-        elif record['exit_code'] or len(record['gpu_seconds']) != rounds or min(record['gpu_seconds']) <= 0:
-            raise RuntimeError('Metal exit or GPU dispatch evidence invalid')
+        else:
+            if record['exit_code']:
+                raise RuntimeError('Metal exit invalid')
+            record.update(gpu_evidence((directory / 'stdout.log').read_text(),
+                                       (directory / 'stderr.log').read_text(), rounds, expected_kernel))
         exports = {}
         for path in sorted((directory / 'schemes').rglob('*.json')):
             data = json.loads(path.read_text())
-            if data.get('n') != [3, 3, 3] or data.get('z2') is not False:
+            if data.get('n') != case.get('custom_fixture', {}).get('n', [3, 3, 3]) or data.get('z2') is not False:
                 raise RuntimeError(f'export domain mismatch: {path}')
             verify(data)
             exports[str(path.relative_to(directory))] = digest(path)
@@ -445,11 +474,12 @@ def main():
     parser.add_argument('--populations', nargs='+', type=int, choices=[512, 1024, 2048], default=[512, 1024, 2048])
     parser.add_argument('--seeds', nargs='+', type=int, default=[7, 19])
     parser.add_argument('--repeats', type=int, default=3)
-    parser.add_argument('--rounds', type=int, choices=[6, 33], default=6)
+    parser.add_argument('--rounds', type=int, choices=[6, 17, 33], default=6)
     parser.add_argument('--timing', choices=['arrival', 'source-elapsed'], default='arrival',
                         help='source-elapsed uses frozen report-entry clocks and retains arrival batching as a diagnostic')
     parser.add_argument('--fixtures', nargs='+', choices=['naive', 'rank26', 'custom'], default=['naive', 'rank26'])
     parser.add_argument('--fixture-path', type=Path)
+    parser.add_argument('--expected-kernel', choices=['randomWalkKernel', 'randomWalkCompactKernel'])
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--counterbalance', action='store_true', help='CPU-bracketed ABBA/BAAB panels; requires all three backends and even repeats')
     args = parser.parse_args()
@@ -494,6 +524,8 @@ def main():
               'runner_sha256': digest(Path(__file__)), 'platform': platform.platform(),
               'developer_dir': os.environ.get('DEVELOPER_DIR'), 'iterations_per_round': 1000,
               'time_limit': 45, 'wired_limit': LIMIT}
+    if args.expected_kernel is not None:
+        config['expected_kernel'] = args.expected_kernel
     if args.timing == 'source-elapsed':
         config['timing_method'] = SOURCE_TIMING
     if custom:
@@ -541,6 +573,14 @@ def main():
                 raise RuntimeError(f'altered artifact inventory: {directory}')
             if not record.get('complete') or any(record.get(k) != v for k, v in case.items()):
                 raise RuntimeError(f'incomplete or altered record: {directory}; use a new output directory')
+            if args.expected_kernel is not None:
+                if record.get('expected_kernel') != args.expected_kernel:
+                    raise RuntimeError('retained record expected kernel differs from configured protocol')
+                if backend != 'cpu':
+                    evidence = gpu_evidence((directory / 'stdout.log').read_text(),
+                                            (directory / 'stderr.log').read_text(), args.rounds, args.expected_kernel)
+                    if any(record.get(key) != value for key, value in evidence.items()):
+                        raise RuntimeError('retained GPU evidence differs from logs')
             for relative, expected in record['exports'].items():
                 if digest(directory / relative) != expected:
                     raise RuntimeError(f'altered export: {directory / relative}')
@@ -554,7 +594,7 @@ def main():
                 raw = copied if case['backend'] == 'cpu' else copied.removeprefix(b'1\n')
                 if hashlib.sha256(raw).hexdigest() != custom['sha256']:
                     raise RuntimeError('custom fixture changed while preparing the case')
-            record = run_case(case, argv, directory, args.rounds, args.timing)
+            record = run_case(case, argv, directory, args.rounds, args.timing, expected_kernel=args.expected_kernel)
         results.append(record)
         write_json(output / 'results.json', results)
         print(case['name'], 'PASS' if record['complete'] else 'INCOMPLETE', record.get('steady_steps_per_second'), flush=True)

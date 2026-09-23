@@ -82,8 +82,10 @@ int main(int argc, char **argv) {
         initial.initializeNaive(3, 3, 3);
         if (argc == 8) {
             std::ifstream fixture(argv[7]);
-            if (!fixture || !initial.read(fixture) || initial.n[0] != 3 || initial.n[1] != 3 || initial.n[2] != 3)
-                throw std::runtime_error("expected a valid signed 3x3 input fixture");
+            // Scheme::read checks dimensions 1..16, factor widths <=64, rank
+            // <=MAX_RANK, signed coefficients, and every tensor equation.
+            if (!fixture || !initial.read(fixture))
+                throw std::runtime_error("expected a valid signed input fixture within the compiled shape and rank limits");
             fixture >> std::ws;
             if (!fixture.eof()) throw std::runtime_error("unexpected content after fixture scheme");
         }
@@ -138,7 +140,27 @@ int main(int argc, char **argv) {
             metalDispatch("randomWalkKernel", count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
             double gpuTime = seconds(start);
             check(count);
+            // Report activity only after timings and exact state comparison.
+            // Attempt counters alone do not establish successful transitions.
+            int changed = 0, minimumRank = MAX_RANK, maximumRank = 0;
+            size_t candidates = 0;
+            for (const Scheme &current : cpu) {
+                bool differs = current.m != initial.m;
+                minimumRank = std::min(minimumRank, current.m);
+                maximumRank = std::max(maximumRank, current.m);
+                for (int p = 0; p < 3; p++) {
+                    candidates += current.flips[p].size;
+                    differs |= current.n[p] != initial.n[p];
+                    if (current.m == initial.m)
+                        for (int r = 0; r < current.m; r++)
+                            differs |= current.uvw[p][r] != initial.uvw[p][r];
+                }
+                changed += differs;
+            }
             std::cout << "ROUND " << round << " CPU " << cpuTime << " METAL_WALL " << gpuTime << " MATCH\n";
+            std::cout << "ACTIVITY " << round << " CHANGED_FROM_INITIAL " << changed
+                      << " RANK_MIN " << minimumRank << " RANK_MAX " << maximumRank
+                      << " CANDIDATE_PAIRS " << candidates << '\n';
         }
         if (repeat) {
             auto input = cpu, inputBest = cpuBest;
