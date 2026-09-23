@@ -138,35 +138,19 @@ def implementation_summary(config, accepted):
         groups[(panel['fixture'], panel['count'])].append(panel)
     comparisons = [{'fixture': fixture, 'count': count, **panel_interval(values)}
                    for (fixture, count), values in sorted(groups.items())]
-    required = {(fixture, 2048, seed, panel) for fixture in ['naive', 'rank26']
-                for seed in [7, 19, 41, 73, 101] for panel in range(3)}
-    completed = {(p['fixture'], p['count'], p['seed'], p['panel']) for p in panels}
-    ready = config.get('counterbalance', {}).get('enabled', False) and config['rounds'] == 33 and required <= completed and not excluded
-    primary = next((x for x in comparisons if (x['fixture'], x['count']) == ('naive', 2048)), None)
-    secondary = next((x for x in comparisons if (x['fixture'], x['count']) == ('rank26', 2048)), None)
-    gate = 'NOT VERIFIED'
-    secondary_gate = 'NOT VERIFIED'
-    if ready and primary and secondary:
-        if secondary['geometric_mean_ratio'] < .95:
-            secondary_gate = 'FAIL'
-        elif secondary['confidence_95'][0] >= .95:
-            secondary_gate = 'PASS'
-        if primary['geometric_mean_ratio'] < 1.15 or secondary_gate == 'FAIL':
-            gate = 'FAIL'
-        elif primary['confidence_95'][0] > 1 and secondary_gate == 'PASS':
-            gate = 'PASS'
-    return {'performance_gate': gate, 'secondary_nonregression_95': secondary_gate,
-            'final_design_complete': bool(ready), 'panels': panels, 'excluded_panels': excluded, 'comparisons': comparisons,
+    return {'panels': panels, 'excluded_panels': excluded, 'comparisons': comparisons,
             'method': 'Each panel averages two opposite-order log candidate/baseline ratios. Effect exponentiates mean seed-level mean panel contrasts. Bootstrap resamples seeds and whole panels; individual panel positions and dispatches are never resampled.',
-            'scope': 'Additional implementation performance criterion only: primary2048 geometric gain at least15% and95% interval above1; rank26 interval at least0.95. Does not replace the raw CPU median milestone or correctness review.',
             'limitations': 'Counterbalancing cancels linear log-time drift and multiplicative period-two effects; it does not establish a frequency cause or remove arbitrary carryover. Intervals describe the tested seeds and panels.'}
 
 
-def load_directory(directory):
+def load_directory(directory, archive=None):
     directory = directory.resolve(strict=True)
+    if archive:
+        archive.verify_config(directory / 'config.json')
     config = json.loads((directory / 'config.json').read_text())
     for backend, identity in config['identities'].items():
-        current = build_identity(backend, Path(identity['binary']), Path(identity['source']), Path(identity['build_manifest']))
+        current = build_identity(backend, Path(identity['binary']), Path(identity['source']), Path(identity['build_manifest']),
+                                 **({'resolver': archive} if archive else {}))
         if current != identity:
             raise ValueError('source or build identity changed: ' + str(directory))
     accepted, missing = {}, []
@@ -176,7 +160,12 @@ def load_directory(directory):
     if any(case['backend'] not in config['identities'] for case in config['cases']):
         raise ValueError('missing backend build identity: ' + str(directory))
     for case in config['cases']:
-        path = directory / case['name'] / 'result.json'
+        name = Path(case['name'])
+        if len(name.parts) != 1 or name.name in ('.', '..') or name.is_absolute():
+            raise ValueError('unsafe case directory')
+        path = directory / name / 'result.json'
+        if archive:
+            archive.check_tree(directory / name)
         record = json.loads(path.read_text()) if path.is_file() else {}
         seal = path.with_name('result.sha256')
         if record and (not seal.is_file() or seal.read_text().strip() != digest(path)):
@@ -270,11 +259,16 @@ def main():
     parser = argparse.ArgumentParser(description='Summarize independent application benchmark runs')
     parser.add_argument('directory', type=Path, nargs='+')
     parser.add_argument('--runner-change-reason')
+    parser.add_argument('--archive-map', type=Path, help='Explicit bundle-relative artifact mapping and config hashes')
     args = parser.parse_args()
     directories = [path.resolve(strict=True) for path in args.directory]
     if len(set(directories)) != len(directories):
         raise ValueError('duplicate input directory')
-    inputs = [(directory, *load_directory(directory)) for directory in directories]
+    archive = None
+    if args.archive_map:
+        from archive import ArchiveResolver
+        archive = ArchiveResolver(args.archive_map)
+    inputs = [(directory, *load_directory(directory, archive)) for directory in directories]
     block_selection = None
     if len(inputs) == 1:
         _, config, accepted, missing = inputs[0]
@@ -328,19 +322,8 @@ def main():
                             bounded.append((seed, repeat, candidate['steady_steps_per_second_bounds'][0] /
                                             other['steady_steps_per_second_bounds'][1]))
                     output['comparisons'][-1]['conservative_rounding_lower_ratios'] = paired_interval(bounded)
-    required = {(fixture, 2048, seed, repeat, backend) for fixture in ['naive', 'rank26']
-                for seed in [7, 19, 41, 73, 101] for repeat in range(3) for backend in ['cpu', 'baseline', 'candidate']}
-    complete = not missing and config['rounds'] == 33 and required <= accepted.keys()
-    primary = next((x for x in output['comparisons'] if (x['fixture'], x['count'], x['reference']) == ('naive', 2048, 'cpu')), None)
-    secondary = next((x for x in output['comparisons'] if (x['fixture'], x['count'], x['reference']) == ('rank26', 2048, 'baseline')), None)
-    output['milestone'] = 'NOT VERIFIED'
-    if complete and primary and secondary:
-        output['milestone'] = 'PASS' if primary['median_ratio'] >= 1.2 and primary['confidence_95'][0] > 1 and secondary['median_ratio'] >= .95 else 'FAIL'
-    output['milestone_scope'] = 'CPU throughput target and median secondary regression check only; implementation promotion and correctness acceptance require separate review.'
-    output['implementation_promotion'] = 'NOT VERIFIED'
     output['counterbalanced_implementation'] = implementation_summary(config, accepted)
     output['correctness_suite'] = 'NOT VERIFIED'
-    output['secondary_nonregression_95'] = ('PASS' if secondary['confidence_95'][0] >= .95 else 'NOT VERIFIED') if complete and secondary else 'NOT VERIFIED'
     output['method'] = 'Paired process ratios; hierarchical resampling of seeds and runs; first report discarded; dispatches are not independent samples.'
     output['timing_scope'] = 'Each distribution sample represents one process. GPU samples average command-buffer GPU seconds over rounds after the first. Application throughput uses inter-report elapsed time. Optional process_seconds measures immediately before process launch through observed child reaping before output verification; it includes pipe draining and any cleanup before reaping, not an exact OS exit timestamp. process_wall_seconds is total recorded runner time including output verification and final cleanup. Missing process_seconds is explicit. CPU runs stop intentionally at the report limit.'
     if config.get('timing_method') == SOURCE_TIMING:

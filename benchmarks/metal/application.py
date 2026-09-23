@@ -100,6 +100,28 @@ def source_identity(path):
                 part in {'.git', 'build', '__pycache__'} for part in p.relative_to(path).parts)}
 
 
+
+def hardware_inventory():
+    """Retain reproduction fields, never raw profiler output or identifiers."""
+    argv = ['system_profiler', '-json', 'SPHardwareDataType', 'SPDisplaysDataType']
+    allowed = {
+        'SPHardwareDataType': ('machine_name', 'machine_model', 'chip_type', 'cpu_type',
+                               'number_processors', 'physical_memory'),
+        'SPDisplaysDataType': ('sppci_model', 'spdisplays_cores', 'spdisplays_metal'),
+    }
+    try:
+        capture = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        if capture.returncode:
+            return {'argv': argv, 'exit_code': capture.returncode, 'error': 'profiler failed'}
+        raw = json.loads(capture.stdout)
+        fields = {category: [{key: item[key] for key in keys
+                             if key in item and isinstance(item[key], (str, int, float))}
+                            for item in raw.get(category, []) if isinstance(item, dict)]
+                  for category, keys in allowed.items()}
+        return {'argv': argv, 'exit_code': 0, 'fields': fields}
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError):
+        return {'argv': argv, 'error': 'profiler unavailable or malformed'}
+
 def write_json(path, value):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, indent=2) + '\n')
@@ -163,8 +185,13 @@ def artifacts(directory):
             if p.is_file() and p.relative_to(directory).as_posix() not in {'result.json', 'result.sha256'}}
 
 
-def build_identity(backend, binary, source, manifest_path):
-    binary, source = binary.resolve(strict=True), source.resolve(strict=True)
+def build_identity(backend, binary, source, manifest_path, *, resolver=None):
+    original_binary, original_source, original_manifest = binary, source, manifest_path
+    resolve = resolver.resolve if resolver else lambda path: path.resolve(strict=True)
+    binary, source, manifest_path = map(resolve, (binary, source, manifest_path))
+    recorded_binary = str(original_binary) if resolver else str(binary)
+    recorded_source = str(original_source) if resolver else str(source)
+    recorded_manifest = str(original_manifest) if resolver else str(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     commands = manifest.get('commands')
     if (manifest.get('version') != 1 or not isinstance(commands, list) or not commands
@@ -173,21 +200,23 @@ def build_identity(backend, binary, source, manifest_path):
             or not isinstance(manifest.get('source_revision'), str) or not manifest['source_revision']):
         raise ValueError('build manifest requires version 1, source_revision and build argv lists')
     files = source_identity(source)
-    if (manifest.get('source_root') != str(source) or manifest.get('source_files') != files
-            or not files or manifest.get('binary') != str(binary)
+    if (manifest.get('source_root') != recorded_source or manifest.get('source_files') != files
+            or not files or manifest.get('binary') != recorded_binary
             or manifest.get('binary_sha256') != digest(binary)):
         raise ValueError('build manifest does not match source and executable')
     if backend != 'cpu':
-        shader = Path(manifest.get('metal_source_dir', '')).resolve(strict=True)
-        if not shader.is_dir() or not shader.is_relative_to(source):
+        recorded_shader = Path(manifest.get('metal_source_dir', ''))
+        shader = resolve(recorded_shader)
+        if (not shader.is_dir() or not shader.is_relative_to(source)
+                or not recorded_shader.is_relative_to(Path(recorded_source))):
             raise ValueError('Metal shader directory must be inside the recorded source root')
-        if str(shader).encode() not in binary.read_bytes():
+        if str(recorded_shader).encode() not in binary.read_bytes():
             raise ValueError('Metal shader directory is not present in the compiled executable')
-        if not any('METAL_SOURCE_DIR=' in arg and str(shader) in arg
+        if not any('METAL_SOURCE_DIR=' in arg and str(recorded_shader) in arg
                    for command in commands for arg in command):
             raise ValueError('build argv does not bind the Metal shader directory')
-    return {'binary': str(binary), 'sha256': digest(binary), 'source': str(source), 'files': files,
-            'build_manifest': str(manifest_path.resolve()), 'build_manifest_sha256': digest(manifest_path),
+    return {'binary': recorded_binary, 'sha256': digest(binary), 'source': recorded_source, 'files': files,
+            'build_manifest': recorded_manifest, 'build_manifest_sha256': digest(manifest_path),
             'build': manifest}
 
 
@@ -540,9 +569,8 @@ def main():
     else:
         output.mkdir(parents=True, exist_ok=False)
         write_json(output / 'config.json', config)
-        machine = {}
-        for name, argv in [('hardware', ['system_profiler', 'SPHardwareDataType', 'SPDisplaysDataType']),
-                           ('compiler', ['xcrun', 'clang++', '--version']),
+        machine = {'hardware': hardware_inventory()}
+        for name, argv in [('compiler', ['xcrun', 'clang++', '--version']),
                            ('power', ['pmset', '-g', 'therm'])]:
             try:
                 capture = subprocess.run(argv, capture_output=True, text=True, timeout=10)

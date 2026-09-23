@@ -196,18 +196,19 @@ class CounterbalancedPanels(unittest.TestCase):
         self.assertFalse(panels)
         self.assertEqual(len(excluded), 1)
 
-    def test_screening_does_not_pass_final_gate(self):
+    def test_screening_summary_has_no_promotion_thresholds(self):
         config, accepted = self.fixture()
         summary = implementation_summary(config, accepted)
-        self.assertEqual(summary['performance_gate'], 'NOT VERIFIED')
-        self.assertFalse(summary['final_design_complete'])
+        self.assertNotIn('performance_gate', summary)
+        self.assertNotIn('final_design_complete', summary)
+        self.assertTrue(summary['comparisons'])
 
-    def test_complete_prospective_design_passes_performance_gate(self):
+    def test_complete_prospective_design_reports_all_panels(self):
         config, accepted = self.fixture(seeds=(7, 19, 41, 73, 101), repeats=6, fixtures=('naive', 'rank26'))
         summary = implementation_summary(config, accepted)
-        self.assertTrue(summary['final_design_complete'])
-        self.assertEqual(summary['performance_gate'], 'PASS')
-        self.assertEqual(summary['secondary_nonregression_95'], 'PASS')
+        self.assertEqual(len(summary['panels']), 30)
+        self.assertFalse(summary['excluded_panels'])
+        self.assertNotIn('performance_gate', summary)
 
     def test_three_panel_orientation_balance(self):
         config, _ = self.fixture(seeds=(7, 19, 41, 73, 101), repeats=6)

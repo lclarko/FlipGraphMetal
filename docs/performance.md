@@ -63,4 +63,4 @@ Raw measurements, frozen binaries, source snapshots, corpus inputs and verificat
 
 Use [the benchmark tools](../benchmarks/metal/README.md) for new, separately labeled measurements. Keep source identities, fixtures, commands, raw logs, incomplete runs and timing protocols. Serialize GPU work with the documented process-group and memory supervision. Do not pool incompatible timing methods or replace slow observations selectively.
 
-Repository organization and documentation changes do not require repeating the 450-process study. New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks.
+New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks. The rates above describe the pinned measured revision; subsequent maintenance changes have not been rebenchmarked.
