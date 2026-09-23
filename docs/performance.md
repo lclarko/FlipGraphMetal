@@ -57,10 +57,32 @@ Separate complete-walk checks covered populations 33 and 512 with two seeds and 
 
 Ranks 64 and 49 describe starting schemes. Failed-flip recovery can expand a scheme even with optional expansion disabled, and ranks can change during search. CPU and Metal use different candidate-selection and RNG policies, so attempted iterations are not equal candidate work or equal search quality. CPU termination is asynchronous; exported improvements can include work beyond the measured interval. The shorter window and evolving ranks also prevent treating these rates as interchangeable with the 33-report 3×3 study. Confidence intervals apply per fixture.
 
+## Maintenance revision comparison
+
+A September 23, 2026 regression check compared fresh builds of `4159df7` and `45042b7` on the same Apple M1, using matching compiler settings. The newer revision adds persistent candidate-capacity checks and corrects input and build handling. This comparison measures Metal against Metal; it does not update the CPU comparisons above.
+
+The check contains 56 complete measured processes: two seeds (7 and 19), two repetitions and both revisions for each fixture. Each seed runs previous/current followed by current/previous. All runs use 2048 walks and 1000 attempted iterations per walk per round. Fourteen six-report pilot processes are excluded. The predeclared time-headroom rule selected 33 reports for rank 23, 17 for naive 4×4 and six for Strassen 4×4. Both revisions use the same window within each fixture, measured from cumulative source report 1 to the final report.
+
+Changes below are geometric means of four paired current/previous throughput ratios. The range shows individual paired changes, not a confidence interval.
+
+| Fixture | Throughput change | Individual paired changes |
+|---|---:|---:|
+| Original, 3×3 rank 23 | +0.2% | -1.4% to +1.6% |
+| Laderman, 3×3 rank 23 | +3.7% | +0.5% to +7.1% |
+| Smirnov, 3×3 rank 23 | +1.2% | -0.3% to +3.1% |
+| Sun, 3×3 rank 23 | +3.7% | +1.9% to +5.5% |
+| CN122, 3×3 rank 23 | +2.4% | +1.7% to +3.1% |
+| Naive, 4×4 rank 64 | +2.6% | -10.9% to +17.5% |
+| Strassen tensor square, 4×4 rank 49 | +0.5% | +0.1% to +1.1% |
+
+No consistent throughput loss appeared in this screen. Two seeds and four pairs per fixture do not establish performance equivalence or a general speedup. Naive 4×4 showed substantial variation between pairs; its small aggregate increase should not be treated as a demonstrated improvement. Strassen 4×4 covers a shorter search window than the earlier CPU comparison.
+
+All 1504 expected search dispatches recorded positive GPU timings on Apple M1. Eight exports from the measured runs passed independent exact-integer tensor verification. Every process remained within the 45-second and sampled 3 GiB wired-memory limits.
+
 ## Reproduction and new measurements
 
 Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for these studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.
 
 Use [the benchmark tools](../benchmarks/metal/README.md) for new, separately labeled measurements. Keep source identities, fixtures, commands, raw logs, incomplete runs and timing protocols. Serialize GPU work with the documented process-group and memory supervision. Do not pool incompatible timing methods or replace slow observations selectively.
 
-New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks. The rates above describe the pinned measured revision; subsequent maintenance changes have not been rebenchmarked.
+New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks. Each comparison above applies to its pinned revisions and recorded workload.
