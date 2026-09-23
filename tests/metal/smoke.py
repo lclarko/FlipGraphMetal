@@ -47,7 +47,7 @@ def save_summary(output, summary):
     temporary.replace(output / "results.json")
 
 
-def execute(command, root, output, summary, log_name):
+def execute(command, root, output, summary, log_name, expected_error=None):
     """Persist intent before launch; stream directly without changing process groups."""
     record = {"command": command, "complete": False, "log": log_name}
     summary["runs"].append(record)
@@ -57,7 +57,12 @@ def execute(command, root, output, summary, log_name):
         child = subprocess.run(command, cwd=root, stdout=log, stderr=subprocess.STDOUT)
     record.update(returncode=child.returncode, wall_seconds=time.monotonic() - start)
     save_summary(output, summary)
-    if child.returncode:
+    if expected_error is not None:
+        if child.returncode != 1 or expected_error not in (output / log_name).read_text():
+            raise RuntimeError("expected explicit rejection: " + expected_error)
+        record['expected_rejection'] = expected_error
+        save_summary(output, summary)
+    elif child.returncode:
         raise RuntimeError(f"child exited {child.returncode}; retained log: {output / log_name}")
     return record
 
@@ -104,17 +109,23 @@ def main(argv=None):
             stream.write(converted_f2(f2 / "transform-0.json"))
         runs = [
             ("flip_graph", ["-n1", "3", "-n2", "3", "-n3", "3", "--schemes", "8", "--max-iterations", "100", "--resize-probability", "0", "--path", str(output / "flip")]),
-            ("flip_graph", ["-n1", "3", "-n2", "3", "-n3", "3", "--schemes", "4", "--max-iterations", "10", "--resize-probability", "1", "--path", str(output / "resize")]),
+            ("flip_graph", ["-n1", "3", "-n2", "3", "-n3", "3", "--schemes", "4", "--max-iterations", "10", "--resize-probability", "1", "--path", str(output / "resize"), "--rounds", "2"]),
             ("complexity_minimizer", ["--input-path", str(signed / "minimizer.txt"), "--schemes", "8", "--max-iterations", "100", "--path", str(output / "minimize")]),
             ("additions_reducer", ["-i", str(signed / "input.txt"), "--count", "8", "-o", str(output / "reduce")]),
             ("additions_reducer", ["-i", str(signed / "input.txt"), "--count", "8", "--schemes-count", "2", "--max-flips", "10", "-o", str(output / "reduce-flips")]),
             ("flip_graph_f2", ["-n1", "3", "-n2", "3", "-n3", "3", "--schemes", "8", "--max-iterations", "100", "--resize-probability", "0", "--sandwiching-probability", "1", "--path", str(output / "flip-f2")]),
             ("complexity_minimizer_f2", ["--input-path", str(f2_input), "--schemes", "8", "--max-iterations", "100", "--path", str(output / "minimize-f2")]),
         ]
-        for index, (program, arguments) in enumerate(runs):
+        runs = [(program, arguments, None) for program, arguments in runs]
+        runs.append(("flip_graph", ["-n1", "3", "-n2", "3", "-n3", "3", "--schemes", "4",
+            "--max-iterations", "10", "--resize-probability", "1",
+            "--path", str(output / "resize-reject")], "flip candidate capacity exceeded (500 pairs per factor) in resizeKernel"))
+        for index, (program, arguments, expected_error) in enumerate(runs):
             check_fixtures(signed, f2, expected, f2_input)
-            command = [str(binary / program), *arguments, "--block-size", "4", "--seed", "7", "--rounds", "3"]
-            record = execute(command, root, output, summary, f"{index}-{program}.log")
+            command = [str(binary / program), *arguments, "--block-size", "4", "--seed", "7"]
+            if "--rounds" not in arguments:
+                command += ["--rounds", "3"]
+            record = execute(command, root, output, summary, f"{index}-{program}.log", expected_error)
             record.update(dispatch_evidence((output / record["log"]).read_text()))
             already_verified = {item["file"] for item in summary["verified"]}
             for path in sorted(output.glob("*/*.json")):

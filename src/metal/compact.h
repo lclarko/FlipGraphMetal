@@ -490,7 +490,8 @@ inline void randomPermutationStrided(device int *array, int n, LOCAL RandomState
 
 static_assert(sizeof(Addition) == 32, "interleaved Addition stride changed");
 struct CompactFlipSet {
-    size_t size;
+    uint32_t size;
+    uint32_t overflow;
     device uint32_t *pairs;
     void add(uint32_t index1, uint32_t index2) LOCAL_METHOD;
     void remove(uint32_t index1, uint32_t index2) LOCAL_METHOD;
@@ -500,8 +501,10 @@ struct CompactFlipSet {
     uint32_t index2(size_t i) const LOCAL_METHOD;
 };
 void CompactFlipSet::add(uint32_t index1, uint32_t index2) LOCAL_METHOD {
-    if (size >= MAX_PAIRS)
+    if (size >= MAX_PAIRS) {
+        overflow = 1;
         return;
+    }
 
     uint32_t pair = (index1 << 16) | index2;
     pairs[(size++) * 32] = pair;

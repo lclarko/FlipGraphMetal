@@ -3,6 +3,18 @@ kernel void layoutKernel(device uint *output [[buffer(0)]]) {
     output[1] = sizeof(Scheme);
     output[2] = sizeof(ReducerU);
     output[3] = sizeof(ReducerW);
+    output[4] = alignof(Addition);
+    output[5] = __builtin_offsetof(Addition, values);
+    output[6] = __builtin_offsetof(Addition, signs);
+    output[7] = __builtin_offsetof(Addition, valid);
+    output[8] = alignof(Scheme);
+    output[9] = __builtin_offsetof(Scheme, uvw);
+    output[10] = __builtin_offsetof(Scheme, flips);
+    output[11] = sizeof(FlipSet);
+    output[12] = alignof(FlipSet);
+    output[13] = __builtin_offsetof(FlipSet, size);
+    output[14] = __builtin_offsetof(FlipSet, overflow);
+    output[15] = __builtin_offsetof(FlipSet, pairs);
 }
 
 kernel void arithmeticKernel(device int *output [[buffer(0)]], uint idx [[thread_position_in_grid]]) {
@@ -41,7 +53,7 @@ kernel void transformationKernel(device Scheme *schemes [[buffer(0)]], device Ra
     }
     storeObject(schemes + idx, scheme);
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void reducerTestKernel(device ReducerU *reducers [[buffer(0)]], device RandomState *states [[buffer(1)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -67,4 +79,30 @@ kernel void capacityTestKernel(device ReducerU *reducers [[buffer(0)]], device i
     reducers[0].clear();
     bool accepted = reducers[0].addExpression(values, 33);
     output[0] = !accepted && !reducers[0].isValid();
+}
+
+// Exercise the boundary and a transient overflow erased from the visible list.
+kernel void candidateCapacityKernel(device uint *output [[buffer(0)]],
+                                    device uint *storage [[buffer(1)]]) {
+    FlipSet set;
+    for (uint i = 0; i < MAX_PAIRS; i++) set.add(0, i);
+    output[0] = set.size == MAX_PAIRS && !set.overflow;
+    set.add(1, 2);
+    set.remove(0, 0);
+    set.clear();
+    set.add(2, 3);
+    output[1] = set.size == 1 && set.overflow;
+#ifndef METAL_F2
+    CompactFlipSet compact;
+    compact.size = 0;
+    compact.overflow = 0;
+    compact.pairs = storage;
+    for (uint i = 0; i < MAX_PAIRS; i++) compact.add(0, i);
+    output[2] = compact.size == MAX_PAIRS && !compact.overflow;
+    compact.add(1, 2);
+    compact.remove(0, 0);
+    compact.clear();
+    compact.add(2, 3);
+    output[3] = compact.size == 1 && compact.overflow;
+#endif
 }

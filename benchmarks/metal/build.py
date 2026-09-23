@@ -44,20 +44,18 @@ for name in ['build.py', 'profile.cpp', 'kernels.metal']:
     shutil.copy2(root / 'benchmarks/metal' / name, output / name)
 runtime_input = gpu_source / 'runtime.mm'
 runtime = runtime_input.read_text()
-# Match the loader to the GPU snapshot, including headers it compiles eagerly.
-if '@"compact.h"' in runtime:
-    shutil.copy2(gpu_source / 'compact.h', source / 'compact.h')
-if args.gpu_kernel == 'randomWalkCompactKernel':
-    benchmark = output / 'profile.cpp'
-    benchmark.write_text(benchmark.read_text().replace('"randomWalkKernel"', '"randomWalkCompactKernel"'))
+# Diagnostic shaders belong to the reference, while matched shaders belong to
+# production. Do not splice a newer packed kernel into older shared structures.
+reference_runtime = (input_source / 'runtime.mm').read_text()
 
 creation_check = 'if (!pipeline) throw std::runtime_error(error.localizedDescription.UTF8String);'
 if runtime.count(creation_check) != 1:
     raise RuntimeError('pipeline creation check changed')
-runtime = runtime.replace(creation_check, creation_check + '''
+pipeline_diagnostics = creation_check + '''
             std::cout << "PIPELINE " << name << " SIMD_WIDTH " << pipeline.threadExecutionWidth
                       << " MAX_THREADS " << pipeline.maxTotalThreadsPerThreadgroup
-                      << " STATIC_THREADGROUP_BYTES " << pipeline.staticThreadgroupMemoryLength << std::endl;''')
+                      << " STATIC_THREADGROUP_BYTES " << pipeline.staticThreadgroupMemoryLength << std::endl;'''
+runtime = runtime.replace(creation_check, pipeline_diagnostics)
 storage = json.loads((gpu_source / 'storage.json').read_text()) if (gpu_source / 'storage.json').is_file() else None
 if storage:
     padding = storage['padded_multiple']
@@ -98,7 +96,10 @@ if storage:
             '        }',
             dispatch_line.replace('MTLSizeMake(threads,', 'MTLSizeMake(physicalThreads,')]))
 
-(source / 'runtime.mm').write_text(runtime)
+matched_runtime_source = runtime
+if reference_runtime.count(creation_check) != 1:
+    raise RuntimeError('reference pipeline creation check changed')
+(source / 'runtime.mm').write_text(reference_runtime.replace(creation_check, pipeline_diagnostics))
 if args.rank_capacity != 350:
     for directory in [source, production]:
         path = directory / 'core.h'
@@ -114,10 +115,12 @@ trace = kernels[start:end].replace('randomWalkKernel', 'profileTraceKernel', 1)
 trace = trace.replace('device int *errors [[buffer(30)]]', 'device uint *trace, device int *errors [[buffer(30)]]', 1)
 trace = trace.replace('    for (int iteration = 0; iteration < iterations; iteration++) {',
     '    uint totalPairs = 0, maxPairs = 0;\n    for (int iteration = 0; iteration < iterations; iteration++) {\n        uint pairs = scheme.flips[0].size + scheme.flips[1].size + scheme.flips[2].size;\n        totalPairs += pairs;\n        if (pairs > maxPairs) maxPairs = pairs;')
-trace = trace.replace('    errors[idx] = !scheme.validate();', '    trace[2*idx] = totalPairs;\n    trace[2*idx+1] = maxPairs;\n    errors[idx] = !scheme.validate();')
+validation = ('errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();'
+              if 'candidateOverflow(scheme)' in kernels else 'errors[idx] = !scheme.validate();')
+trace = trace.replace('    ' + validation, '    trace[2*idx] = totalPairs;\n    trace[2*idx+1] = maxPairs;\n    ' + validation)
 (source / 'profile_trace.h').write_text(trace)
 walk = kernels[start:end].replace('randomWalkKernel', 'profileWalkKernel', 1)
-walk = walk.replace('errors[idx] = !scheme.validate();', 'errors[idx] = 0;')
+walk = walk.replace(validation, 'errors[idx] = candidateOverflow(scheme) ? 4 : 0;' if 'candidateOverflow(scheme)' in kernels else 'errors[idx] = 0;')
 scheme = (source / 'scheme_integer.h').read_text()
 flip = scheme[scheme.index('bool SchemeInteger::tryFlip('):scheme.index('bool SchemeInteger::tryPlus(')]
 narrow = flip.replace('SchemeInteger::tryFlip(', 'SchemeInteger::tryFlipNarrow(', 1)
@@ -167,26 +170,22 @@ replay = replay.replace('device ProfileDecision *decisions', 'device const Profi
 replay = replay.replace('        uint operation = profileSelect(scheme, state);\n        decisions[iteration * schemesCount + idx] = {operation, state.value};',
     '        uint operation = decisions[iteration * schemesCount + idx].operation;\n        state.value = decisions[iteration * schemesCount + idx].state;')
 narrow_walk = kernels[start:end].replace('randomWalkKernel', 'profileNarrowKernel', 1).replace('scheme.tryFlip(state)', 'scheme.tryFlipNarrow(state)')
-if args.gpu_kernel == 'randomWalkCompactKernel':
-    compact_kernels = (gpu_source / 'kernels.metal').read_text()
-    compact_start = compact_kernels.index('kernel void randomWalkCompactKernel(')
-    compact_end = compact_kernels.index('\n}\n', compact_start) + 3
-    selected_compact = compact_kernels[compact_start:compact_end]
-    if 'kernel void randomWalkCompactKernel(' in kernels:
-        previous_start = kernels.index('kernel void randomWalkCompactKernel(')
-        previous_end = kernels.index('\n}\n', previous_start) + 3
-        kernels = kernels[:previous_start] + selected_compact + kernels[previous_end:]
-    else:
-        kernels += '\n#if defined(__METAL_VERSION__) && !defined(METAL_F2)\n' + selected_compact + '\n#endif\n'
 (source / 'kernels.metal').write_text(kernels + '\n' + walk + selection + decision + selected_walk + replay + narrow_walk + (root / 'benchmarks/metal/kernels.metal').read_text())
 commands = [
     ['xcrun', 'clang++', '-std=c++17', '-O3', '-ffp-contract=off', '-Wno-unknown-attributes', '-Xpreprocessor', '-fopenmp', '-I/opt/homebrew/opt/libomp/include', '-I'+str(source), '-c', str(output / 'profile.cpp'), '-o', str(output / 'profile.o')],
     ['xcrun', 'clang++', '-std=c++17', '-O2', '-fobjc-arc', '-ffp-contract=off', '-framework', 'Foundation', '-framework', 'Metal', '-DMETAL_SOURCE_DIR="'+str(source)+'"', str(output / 'profile.o'), str(source / 'runtime.mm'), '-L/opt/homebrew/opt/libomp/lib', '-lomp', '-o', str(output / 'profile')],
 ]
+matched_object = commands[0].copy()
+matched_object.insert(2, '-DMETAL_BENCH_WALK_KERNEL="' + args.gpu_kernel + '"')
+matched_object[-1] = str(output / 'matched.o')
 matched = commands[-1].copy()
+matched[matched.index(str(output / 'profile.o'))] = str(output / 'matched.o')
 matched[matched.index('-DMETAL_SOURCE_DIR="'+str(source)+'"')] = '-DMETAL_SOURCE_DIR="'+str(production)+'"'
+matched_runtime = source / 'matched_runtime.mm'
+matched_runtime.write_text(matched_runtime_source)
+matched[matched.index(str(source / 'runtime.mm'))] = str(matched_runtime)
 matched[-1] = str(output / 'matched')
-commands.append(matched)
+commands.extend([matched_object, matched])
 manifest = {'complete': False, 'gpu_kernel': args.gpu_kernel, 'runtime_input': str(runtime_input), 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source), 'commands': commands, 'inputs': {str(p.relative_to(root)) if p.is_relative_to(root) else str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [*inputs, *gpu_inputs, *Path(__file__).parent.glob('*')] if p.is_file()}}
 (output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
 

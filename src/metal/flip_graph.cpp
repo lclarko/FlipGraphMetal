@@ -222,7 +222,7 @@ void FlipGraph::initializeNaive() {
 
 #ifndef METAL_F2
 static bool canUseCompactScheme(const SchemeInteger &scheme) {
-    if (scheme.m < 1 || scheme.m > MAX_RANK) return false;
+    if (candidateOverflow(scheme) || scheme.m < 1 || scheme.m > MAX_RANK) return false;
     for (int p = 0; p < 3; p++) {
         if (scheme.n[p] != 3 || scheme.nn[p] != 9 || scheme.flips[p].size > MAX_PAIRS) return false;
         for (int r = 0; r < scheme.m; r++) {

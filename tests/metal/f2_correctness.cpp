@@ -1,4 +1,5 @@
 #include "../../src/metal/host.h"
+#include "candidate_capacity.h"
 
 int main(int argc, char **argv) {
     try {
@@ -11,6 +12,7 @@ int main(int argc, char **argv) {
         const std::filesystem::path output(argv[2]);
         if (!std::filesystem::create_directory(output))
             throw std::runtime_error("output directory already exists: " + output.string());
+        checkCandidateCapacityAndLayout();
         SchemeZ2 *gpu, *other;
         RandomState *states;
         metalAllocate(&gpu, sizeof(SchemeZ2));

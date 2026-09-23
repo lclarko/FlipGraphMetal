@@ -138,6 +138,7 @@ void metalLaunch(const char *name, size_t threads, size_t blockSize, std::initia
                     reason = "unsupported compact walk configuration";
                 if (std::strcmp(name, "randomWalkCompactKernel") == 0 && status[i] == 3)
                     reason = "unsupported compact scheme representation";
+                if (status[i] == 4) reason = "flip candidate capacity exceeded (500 pairs per factor)";
                 throw std::runtime_error("Metal " + reason + " in " + name + " at worker " + std::to_string(i));
             }
         std::cout << "Metal dispatch " << name << ": " << threads << " threads, "

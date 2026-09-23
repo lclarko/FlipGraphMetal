@@ -60,6 +60,8 @@ def main():
                 verified = {p.name: {'sha256': digest(p), **verify(json.loads(p.read_text()))} for p in files}
                 write_json(attempt / (name + '-verification.json'), verified)
             if args.smoke:
+                from input_cases import run_input_cases
+                run_input_cases(binary, attempt, guarded)
                 from smoke import fixture_hashes
                 receipt = attempt / 'fixture-receipt.json'
                 write_json(receipt, fixture_hashes(attempt / 'signed-exports', attempt / 'f2-exports'))

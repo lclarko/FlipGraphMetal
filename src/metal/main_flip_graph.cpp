@@ -48,16 +48,6 @@ int runProgram(int argc, char* argv[]) {
     if (seed == 0)
         seed = time(0);
 
-    if (inputPath == "null" && n1 * n2 > MAX_MATRIX_ELEMENTS || n2 * n3 > MAX_MATRIX_ELEMENTS || n1 * n3 > MAX_MATRIX_ELEMENTS) {
-        std::cout << "Error sizes, please increase MAX_MATRIX_ELEMENTS (now: " << MAX_MATRIX_ELEMENTS << ")" << std::endl;
-        return 2;
-    }
-
-    if (inputPath == "null" && n1 * n2 * n3 > MAX_RANK) {
-        std::cout << "Error sizes, please increase MAX_RANK (now: " << MAX_RANK << ")" << std::endl;
-        return 2;
-    }
-
     std::cout << "Config:" << std::endl;
     std::cout << "- working ring: " << ring << std::endl;
     std::cout << "- max matrix elements: " << MAX_MATRIX_ELEMENTS << std::endl;

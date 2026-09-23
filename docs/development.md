@@ -6,11 +6,11 @@
 
 `src/common` contains the shared C++ argument parser. Its former CUDA suffixes did not indicate a CUDA dependency. The root build includes parser changes in its dependencies. `reference/cuda` preserves upstream source and its build recipe for reference; CUDA is neither a supported backend nor covered by the Metal validation results.
 
-The runtime compiles shader source with `newLibraryWithSource`. The build embeds the absolute shader-source directory. Rebuild after relocating the checkout, and keep source with the executable. Production builds use the existing macOS 15 deployment target, precise arithmetic settings and disabled floating-point contraction.
+The runtime compiles shader source with `newLibraryWithSource`. The build embeds the absolute shader-source directory. Run `make` after relocating the checkout, and keep source with the executable. Build receipts track effective compiler settings, source location and source contents; unchanged inputs do not trigger recompilation. Production builds use the existing macOS 15 deployment target, precise arithmetic settings and disabled floating-point contraction.
 
 ## Search behavior
 
-The general kernels support signed and F2 arithmetic, both complexity minimizers, transformations and resizing. The signed additions reducer supports all seven selection modes, including prefix reuse. Nonzero signed sandwiching is rejected because the inherited implementation is absent; an F2-only tensor is not admitted to the integer reducer.
+The general kernels support signed and F2 arithmetic, both complexity minimizers, transformations and resizing. Candidate-list overflow is a persistent per-walk error, even if a later removal or rebuild would fit. A dispatch containing an overflow fails before the host accepts or exports its results. The capacity remains 500 pairs per factor in both general and packed paths. The signed additions reducer supports all seven selection modes, including prefix reuse. Nonzero signed sandwiching is rejected because the inherited implementation is absent; an F2-only tensor is not admitted to the integer reducer.
 
 The compact signed 3×3 path requires block size 32, 1000 fixed inner iterations, plus threshold 1000000000 and zero optional transformation probabilities. Every current and best state must satisfy its representation checks. Eligible inputs can have different ranks; production rank capacity remains 350. Other configurations select the general Metal path.
 
@@ -30,7 +30,7 @@ The plaintext formats are distinct:
 | Complexity minimizer | `n1 n2 n3 rank count` |
 | Additions reducer | `n1 n2 n3 rank` for one scheme |
 
-Coefficients follow in U, V, W order, with one flattened factor per rank term. W is transposed: output `(i,j)` uses index `j*n1+i`. JSON exports retain the upstream schema and explicit `z2` domain declaration.
+Coefficients follow in U, V, W order, with one flattened factor per rank term. W is transposed: output `(i,j)` uses index `j*n1+i`. JSON exports retain the upstream schema and explicit `z2` domain declaration. For file-loaded search populations, each scheme header determines its dimensions and initial rank bound; mixed dimensions remain supported. CLI dimensions describe naive initialization.
 
 The independent Python verifier checks every tensor equation with exact integers, reducing modulo two only for declared F2 schemes. For addition circuits it expands fresh variables and outputs, checks references and operation counts, and rejects invalid tensors. Signs and fanout are free; each fresh pair costs one addition/subtraction, and a k-term output costs `max(k-1,0)`.
 
@@ -70,6 +70,6 @@ Optional diagnostics retain lazy-selection, sign-aware-reduction, storage and SI
 
 ## Contributions
 
-Keep behavioral changes separate from source organization and documentation changes. Preserve fixture attribution and required third-party notices. Add tests for changed behavior and update the document that explains it. Use plain prose without em dashes, session narration or personal workspace paths. Performance claims must state hardware, workload, measurement type and limitations.
+Keep behavioral changes separate from source organization and documentation changes. Preserve fixture attribution and required third-party notices. Add tests for changed behavior and update the document that explains it. Performance claims must state hardware, workload, measurement type and limitations.
 
 Project licensing is unresolved as explained in the [README](../README.md#attribution-and-rights). Do not assign a license to inherited material without authority.

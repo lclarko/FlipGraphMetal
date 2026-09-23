@@ -12,8 +12,10 @@ void validateOptions(const ArgParser &parser) {
 #if METAL_PROGRAM == 1
     positive("-n1", 16); positive("-n2", 16); positive("-n3", 16);
     int n1 = std::stoi(parser.get("-n1")), n2 = std::stoi(parser.get("-n2")), n3 = std::stoi(parser.get("-n3"));
-    if (n1*n2 > 64 || n2*n3 > 64 || n3*n1 > 64 || n1*n2*n3 > MAX_RANK)
-        throw std::runtime_error("unsupported dimensions: at most 64 elements per factor and naive rank 350");
+    if (n1*n2 > 64 || n2*n3 > 64 || n3*n1 > 64)
+        throw std::runtime_error("unsupported dimensions: at most 64 elements per factor");
+    if (parser.get("--input-path") == "null" && n1*n2*n3 > MAX_RANK)
+        throw std::runtime_error("unsupported dimensions: naive rank exceeds 350");
     positive("--schemes", 1048576);
     positive("--max-iterations", 2147483647);
     positive("--plus-iterations", 2147483647);

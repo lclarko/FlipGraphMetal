@@ -152,6 +152,7 @@ void SchemeInteger::copyTo(LOCAL SchemeInteger &target, bool withFlips) const LO
     target.m = m;
 
     for (int i = 0; i < 3; i++) {
+        target.flips[i].overflow |= flips[i].overflow;
         target.n[i] = n[i];
         target.nn[i] = nn[i];
 
@@ -189,6 +190,8 @@ bool SchemeInteger::read(std::istream &is, bool checkValidity) {
 
     fixSigns();
     initFlips();
+    if (candidateOverflow(*this))
+        throw std::runtime_error("flip candidate capacity exceeded (500 pairs per factor)");
     return !checkValidity || validate();
 }
 #endif
@@ -221,6 +224,8 @@ bool SchemeInteger::read(std::istream &is, int n1, int n2, int n3, int m, bool c
 
     fixSigns();
     initFlips();
+    if (candidateOverflow(*this))
+        throw std::runtime_error("flip candidate capacity exceeded (500 pairs per factor)");
     return !checkValidity || validate();
 }
 #endif

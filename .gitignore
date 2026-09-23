@@ -2,7 +2,7 @@
 *.exe
 *.exp
 *.lib
-./schemes
+/schemes/
 
 /build/
 __pycache__/

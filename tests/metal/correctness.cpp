@@ -1,5 +1,6 @@
 #include "../../src/metal/host.h"
 #include <cstdlib>
+#include "candidate_capacity.h"
 
 void require(bool condition, const std::string &message) {
     if (!condition) throw std::runtime_error(message);
@@ -36,13 +37,9 @@ int main(int argc, char **argv) {
         const std::filesystem::path output(argv[2]);
         if (!std::filesystem::create_directory(output))
             throw std::runtime_error("output directory already exists: " + output.string());
-        unsigned *layout;
-        metalAllocate(&layout, 4 * sizeof(unsigned));
-        metalDispatch("layoutKernel", 1, 1, layout);
+        checkCandidateCapacityAndLayout();
         using U = AdditionsReducer<350,250,32,2016>;
         using W = AdditionsReducer<64,500,175,61075>;
-        require(layout[0] == sizeof(Addition) && layout[1] == sizeof(SchemeInteger) && layout[2] == sizeof(U) && layout[3] == sizeof(W), "CPU/Metal structure layout mismatch");
-        metalFree(layout);
         int *arithmetic;
         metalAllocate(&arithmetic, 64 * 9 * 4 * sizeof(int));
         metalDispatch("arithmeticKernel", 64 * 9, 32, arithmetic);

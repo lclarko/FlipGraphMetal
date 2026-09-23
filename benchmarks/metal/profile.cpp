@@ -27,6 +27,10 @@ using uchar = unsigned char;
 #undef device
 #undef kernel
 
+#ifndef METAL_BENCH_WALK_KERNEL
+#define METAL_BENCH_WALK_KERNEL "randomWalkKernel"
+#endif
+
 using Clock = std::chrono::steady_clock;
 
 double seconds(Clock::time_point start) {
@@ -137,7 +141,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             start = Clock::now();
-            metalDispatch("randomWalkKernel", count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
+            metalDispatch(METAL_BENCH_WALK_KERNEL, count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
             double gpuTime = seconds(start);
             check(count);
             // Report activity only after timings and exact state comparison.
@@ -191,7 +195,7 @@ int main(int argc, char **argv) {
                 std::copy(inputStates.begin(), inputStates.end(), gpuStates);
                 std::copy(inputRanks.begin(), inputRanks.end(), gpuRanks);
                 std::copy(inputFlips.begin(), inputFlips.end(), gpuFlips);
-                metalDispatch("randomWalkKernel", count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
+                metalDispatch(METAL_BENCH_WALK_KERNEL, count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
                 check(count);
                 std::string name = "org.flipgraphgpu.capture." + std::to_string(getpid());
                 int descriptor = -1;
@@ -214,7 +218,7 @@ int main(int argc, char **argv) {
                     std::copy(inputFlips.begin(), inputFlips.end(), gpuFlips);
                     bool useVariant = variantKernel && (variant + sample) % 2;
                     bool useReplay = replay && useVariant;
-                    const char *name = useVariant ? variantKernel : "randomWalkKernel";
+                    const char *name = useVariant ? variantKernel : METAL_BENCH_WALK_KERNEL;
                     int dispatchBlockSize = dispatch && (variant + sample) % 2 == 0 ? 32 : blockSize;
                     int dispatchCount = population ? populations[(variant + (sample == 12 ? 0 : sample)) % populations.size()] : count;
                     auto start = Clock::now();
@@ -277,7 +281,7 @@ int main(int argc, char **argv) {
                     std::copy(inputStates.begin(), inputStates.end(), gpuStates);
                     std::copy(inputRanks.begin(), inputRanks.end(), gpuRanks);
                     std::copy(inputFlips.begin(), inputFlips.end(), gpuFlips);
-                    const char *name = (variant + repeat) % 2 ? "profileWalkKernel" : "randomWalkKernel";
+                    const char *name = (variant + repeat) % 2 ? "profileWalkKernel" : METAL_BENCH_WALK_KERNEL;
                     std::cout << "FROZEN " << repeat << ' ' << name << '\n';
                     metalDispatch(name, count, blockSize, gpu, gpuBest, gpuRanks, gpuFlips, gpuStates, count, iterations, plusIterations, probability, probability, probability, probability, randomIterations);
                     metalDispatch("profileValidateKernel", count, blockSize, gpu, count);

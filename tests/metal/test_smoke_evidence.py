@@ -89,6 +89,22 @@ class SmokeEvidence(unittest.TestCase):
             self.assertEqual((output / "child.log").read_bytes(), b"partial\n")
             self.assertFalse(json.loads((output / "results.json").read_text())["complete"])
 
+    def test_expected_rejection_requires_the_error_and_exit_code(self):
+        for code, message, accepted in ((1, "capacity exceeded", True), (0, "capacity exceeded", False),
+                                         (1, "different failure", False), (-9, "capacity exceeded", False)):
+            with self.subTest(code=code, message=message), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                def child(*args, **kwargs):
+                    kwargs["stdout"].write(message.encode())
+                    return subprocess.CompletedProcess(args[0], code)
+                with patch("smoke.subprocess.run", side_effect=child):
+                    arguments = (["example"], output, output, {"runs": []}, "child.log", "capacity exceeded")
+                    if accepted:
+                        self.assertEqual(smoke.execute(*arguments)["expected_rejection"], "capacity exceeded")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "expected explicit rejection"):
+                            smoke.execute(*arguments)
+
     def test_group_termination_retains_flushed_child_log_and_incomplete_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

@@ -19,6 +19,7 @@ void loadObject(thread SchemeInteger &target, device const SchemeInteger *source
             target.uvw[p][r].signs = source->uvw[p][r].signs;
             target.uvw[p][r].valid = source->uvw[p][r].valid;
         }
+        target.flips[p].overflow = source->flips[p].overflow;
         target.flips[p].size = source->flips[p].size;
         for (size_t i = 0; i < target.flips[p].size; i++)
             target.flips[p].pairs[i] = source->flips[p].pairs[i];
@@ -36,6 +37,7 @@ void storeObject(device SchemeInteger *target, thread const SchemeInteger &sourc
             target->uvw[p][r].signs = source.uvw[p][r].signs;
             target->uvw[p][r].valid = source.uvw[p][r].valid;
         }
+        target->flips[p].overflow = source.flips[p].overflow;
         target->flips[p].size = source.flips[p].size;
         for (size_t i = 0; i < source.flips[p].size; i++)
             target->flips[p].pairs[i] = source.flips[p].pairs[i];
@@ -63,7 +65,7 @@ kernel void initializeNaiveKernel(device Scheme *schemes [[buffer(0)]], constant
     Scheme scheme;
     scheme.initializeNaive(n1,n2,n3);
     storeObject(schemes + idx, scheme);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void initializeCopyKernel(device Scheme *schemes [[buffer(0)]], constant int &schemesCount [[buffer(1)]], constant int &count [[buffer(2)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -72,7 +74,7 @@ kernel void initializeCopyKernel(device Scheme *schemes [[buffer(0)]], constant 
     loadObject(scheme, schemes + idx % count);
     scheme.copyTo(scheme);
     storeObject(schemes + idx, scheme);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void initializeSchemesKernel(device Scheme *schemes [[buffer(0)]], device Scheme *schemesBest [[buffer(1)]], device int *bestRanks [[buffer(2)]], device int *flips [[buffer(3)]], constant int &n1 [[buffer(4)]], constant int &n2 [[buffer(5)]], constant int &n3 [[buffer(6)]], constant int &schemesCount [[buffer(7)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -80,9 +82,9 @@ kernel void initializeSchemesKernel(device Scheme *schemes [[buffer(0)]], device
     Scheme scheme;
     loadObject(scheme, schemes + idx);
     storeObject(schemesBest + idx, scheme);
-    bestRanks[idx] = n1*n2*n3;
+    bestRanks[idx] = scheme.n[0]*scheme.n[1]*scheme.n[2];
     flips[idx] = 0;
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void randomWalkKernel(device Scheme *schemes [[buffer(0)]], device Scheme *schemesBest [[buffer(1)]], device int *bestRanks [[buffer(2)]], device int *flips [[buffer(3)]], device RandomState *states [[buffer(4)]], constant int &schemesCount [[buffer(5)]], constant int &maxIterations [[buffer(6)]], constant int &plusIterations [[buffer(7)]], constant float &reduceProbability [[buffer(8)]], constant float &expandProbability [[buffer(9)]], constant float &sandwichingProbability [[buffer(10)]], constant float &basisProbability [[buffer(11)]], constant bool &randomIterations [[buffer(12)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -97,6 +99,7 @@ kernel void randomWalkKernel(device Scheme *schemes [[buffer(0)]], device Scheme
     int iterations = randomIterations ? randint(1, maxIterations, state) : maxIterations;
 
     for (int iteration = 0; iteration < iterations; iteration++) {
+        if (candidateOverflow(scheme)) { errors[idx] = 4; return; }
         int rank = scheme.m;
 
         if (!scheme.tryFlip(state)) {
@@ -141,7 +144,7 @@ kernel void randomWalkKernel(device Scheme *schemes [[buffer(0)]], device Scheme
 
     storeObject(schemes + idx, scheme);
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void resizeKernel(device Scheme *schemes [[buffer(0)]], device Scheme *schemesBest [[buffer(1)]], constant int &schemesCount [[buffer(2)]], device RandomState *states [[buffer(3)]], constant float &resizeProbability [[buffer(4)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -172,7 +175,7 @@ kernel void resizeKernel(device Scheme *schemes [[buffer(0)]], device Scheme *sc
     }
     storeObject(schemes + idx, scheme);
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void initializeMinimizerKernel(device Scheme *schemes [[buffer(0)]], device Scheme *schemesBest [[buffer(1)]], device int *bestComplexities [[buffer(2)]], device RandomState *states [[buffer(3)]], constant int &schemesCount [[buffer(4)]], constant int &initialCount [[buffer(5)]], constant int &complexity [[buffer(6)]], constant int &seed [[buffer(7)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -185,7 +188,7 @@ kernel void initializeMinimizerKernel(device Scheme *schemes [[buffer(0)]], devi
     bestComplexities[idx] = complexity;
     states[idx].value = uint(seed) ^ (0x9e3779b9u * (idx + 1));
     if (states[idx].value == 0) states[idx].value = 1;
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void minimizeKernel(device Scheme *schemes [[buffer(0)]], device Scheme *schemesBest [[buffer(1)]], device int *bestComplexities [[buffer(2)]], device RandomState *states [[buffer(3)]], constant int &schemesCount [[buffer(4)]], constant int &iterations [[buffer(5)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -196,6 +199,7 @@ kernel void minimizeKernel(device Scheme *schemes [[buffer(0)]], device Scheme *
     loadObject(state, states + idx);
     int bestComplexity = bestComplexities[idx];
     for (int iteration = 0; iteration < iterations; iteration++) {
+        if (candidateOverflow(scheme)) { errors[idx] = 4; return; }
         if (!scheme.tryFlip(state, false)) break;
         int complexity = scheme.getComplexity();
         if (complexity < bestComplexity) {
@@ -206,7 +210,7 @@ kernel void minimizeKernel(device Scheme *schemes [[buffer(0)]], device Scheme *
     bestComplexities[idx] = bestComplexity;
     storeObject(schemes + idx, scheme);
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 void copySchemeToReducers(device ReducerU &u, device ReducerV &v, device ReducerW &w, thread const SchemeInteger &scheme) {
@@ -236,7 +240,7 @@ kernel void initializeReducersKernel(device ReducerU *reducersU [[buffer(0)]], d
     }
     states[idx].value = uint(seed) ^ (0x9e3779b9u * (idx + 1));
     if (states[idx].value == 0) states[idx].value = 1;
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void flipSchemesKernel(device SchemeInteger *schemes [[buffer(0)]], device RandomState *states [[buffer(1)]], constant int &schemesCount [[buffer(2)]], constant int &maxFlips [[buffer(3)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -250,7 +254,7 @@ kernel void flipSchemesKernel(device SchemeInteger *schemes [[buffer(0)]], devic
     for (int i = 0; i < flips; i++) if (!scheme.tryFlip(state)) break;
     storeObject(schemes + idx, scheme);
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 kernel void runReducersKernel(device ReducerU *reducersU [[buffer(0)]], device ReducerV *reducersV [[buffer(1)]], device ReducerW *reducersW [[buffer(2)]], device SchemeInteger *schemes [[buffer(3)]], device RandomState *states [[buffer(4)]], constant int &count [[buffer(5)]], constant int &schemesCount [[buffer(6)]], constant bool &independent [[buffer(7)]], device int *errors [[buffer(30)]], uint idx [[thread_position_in_grid]]) {
@@ -316,6 +320,7 @@ kernel void randomWalkCompactKernel(device Scheme *schemes [[buffer(0)]], device
         flips[idx] >= plusIterations - maxIterations) { errors[idx] = 2; return; }
     if (schemes[idx].m < 1 || schemes[idx].m > MAX_RANK) { errors[idx] = 3; return; }
     for (int p = 0; p < 3; p++) {
+        if (schemes[idx].flips[p].overflow) { errors[idx] = 4; return; }
         if (schemes[idx].nn[p] != 9 || schemes[idx].flips[p].size > MAX_PAIRS) { errors[idx] = 3; return; }
         for (int r = 0; r < schemes[idx].m; r++) {
             device const Addition &term = schemes[idx].uvw[p][r];
@@ -331,6 +336,7 @@ kernel void randomWalkCompactKernel(device Scheme *schemes [[buffer(0)]], device
     scheme.terms = terms + tile * (MAX_RANK * 3 * 32) + lane;
     for (int p = 0; p < 3; p++) {
         scheme.flips[p].pairs = pairs + tile * (MAX_PAIRS * 3 * 32) + p * MAX_PAIRS * 32 + lane;
+        scheme.flips[p].overflow = schemes[idx].flips[p].overflow;
         scheme.flips[p].size = schemes[idx].flips[p].size;
         for (size_t pair = 0; pair < scheme.flips[p].size; pair++)
             scheme.flips[p].pairs[pair * 32] = schemes[idx].flips[p].pairs[pair];
@@ -349,6 +355,7 @@ kernel void randomWalkCompactKernel(device Scheme *schemes [[buffer(0)]], device
     int iterations = randomIterations ? randint(1, maxIterations, state) : maxIterations;
 
     for (int iteration = 0; iteration < iterations; iteration++) {
+        if (candidateOverflow(scheme)) { errors[idx] = 4; return; }
         int rank = scheme.m;
 
         if (!scheme.tryFlip(state)) {
@@ -374,6 +381,7 @@ kernel void randomWalkCompactKernel(device Scheme *schemes [[buffer(0)]], device
                     schemesBest[idx].uvw[p][r].signs = packedOutput.signs;
                     schemesBest[idx].uvw[p][r].valid = packedOutput.valid;
                 }
+                schemesBest[idx].flips[p].overflow = scheme.flips[p].overflow;
                 schemesBest[idx].flips[p].size = scheme.flips[p].size;
                 for (size_t pair = 0; pair < scheme.flips[p].size; pair++)
                     schemesBest[idx].flips[p].pairs[pair] = scheme.flips[p].pairs[pair * 32];
@@ -415,13 +423,14 @@ kernel void randomWalkCompactKernel(device Scheme *schemes [[buffer(0)]], device
             schemes[idx].uvw[p][r].signs = packedOutput.signs;
             schemes[idx].uvw[p][r].valid = packedOutput.valid;
         }
+        schemes[idx].flips[p].overflow = scheme.flips[p].overflow;
         schemes[idx].flips[p].size = scheme.flips[p].size;
         for (size_t pair = 0; pair < scheme.flips[p].size; pair++)
             schemes[idx].flips[p].pairs[pair] = scheme.flips[p].pairs[pair * 32];
     }
 
     storeObject(states + idx, state);
-    errors[idx] = !scheme.validate();
+    errors[idx] = candidateOverflow(scheme) ? 4 : !scheme.validate();
 }
 
 #endif

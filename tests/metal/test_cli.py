@@ -21,6 +21,10 @@ class CommandLineTests(unittest.TestCase):
     def test_unsupported_dimensions(self):
         self.reject("flip_graph", ["-n1", "16", "-n2", "16", "-n3", "16"], "unsupported dimensions")
 
+    def test_naive_rank_bound_in_both_domains(self):
+        for program in ("flip_graph", "flip_graph_f2"):
+            self.reject(program, ["-n1", "8", "-n2", "8", "-n3", "8"], "naive rank exceeds 350")
+
     def test_integer_sandwiching(self):
         self.reject("flip_graph", ["-n1", "3", "-n2", "3", "-n3", "3", "--sandwiching-probability", "1"], "unsupported signed-ternary sandwiching")
 

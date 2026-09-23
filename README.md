@@ -6,7 +6,7 @@ FlipGraphMetal retains the upstream search and transformation functionality whil
 
 ## Build and run
 
-Requirements: Apple silicon, macOS 15 or later, and Xcode Command Line Tools. Python 3.9+ is needed for tests and developer tools, not for building or running the production programs. CUDA and third-party GPU libraries are not required.
+Requirements: Apple silicon, macOS 15 or later, Xcode Command Line Tools, and Python 3.9+ for the build and developer tools. The compiled programs do not require Python. CUDA and third-party GPU libraries are not required.
 
 From the checkout root:
 
@@ -36,13 +36,13 @@ A small bounded search:
 
 Use `--help` for each program's options. Positive `--rounds` bounds outer iterations; `--max-iterations` bounds inner search work. With `--rounds 0`, search is unbounded and the minimizer and reducer retain their own stopping conditions. Choose a new output path when retaining results.
 
-Shaders compile at runtime from the source directory embedded during the build. Keep the checkout available and rebuild after moving it. Copying an executable alone does not produce a standalone installation. An unavailable Apple GPU is an error; there is no CPU fallback.
+Shaders compile at runtime from the source directory embedded during the build. Keep the checkout available and run `make` after moving it. The build tracks its source location, compiler and flags. Copying an executable alone does not produce a standalone installation. An unavailable Apple GPU is an error; there is no CPU fallback.
 
 ## Supported functionality
 
 FlipGraphMetal ports FlipGraphGPU's signed and F2 search, scheme transformations, complexity minimizers and signed additions reducer. Projection, extension, direct sums, tensor products and randomized resizing are supported. F2 search also supports sandwiching; nonzero signed sandwiching is deliberately rejected. There is no F2 additions reducer.
 
-Dimensions are limited to 1 through 16, factors to 64 elements and rank to 350. Naive initialization additionally requires the product of the dimensions to fit within rank 350. Malformed inputs and unsupported configurations fail explicitly.
+Dimensions are limited to 1 through 16, factors to 64 elements and rank to 350. Naive initialization additionally requires the product of the dimensions to fit within rank 350. Candidate lists are limited to 500 equal-factor pairs per factor. Exceeding that capacity during initialization or a walk stops the run with an error, rather than accepting an incomplete neighborhood; for example, naive 6×6 and 7×7 inputs exceed it. File-loaded schemes use their own dimension and rank headers. Malformed inputs and unsupported configurations fail explicitly.
 
 Eligible signed 3×3 searches use a specialized packed path across ranks. Other supported dimensions and configurations use general Metal kernels. See [development](docs/development.md) for eligibility and numeric behavior, and [performance](docs/performance.md) for measured results and their limits.
 
