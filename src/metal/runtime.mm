@@ -6,9 +6,55 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <string>
+#include <vector>
+#include <limits>
+#include <mach-o/dyld.h>
+#include <CommonCrypto/CommonDigest.h>
+
+#if defined(METAL_SOURCE_DIR) && defined(METAL_LIBRARY_NAME)
+#error Select either source shaders or a packaged library, not both
+#elif !defined(METAL_SOURCE_DIR) && (!defined(METAL_LIBRARY_NAME) || !defined(METAL_LIBRARY_SHA256))
+#error Build with a generated Metal library header or explicitly set METAL_SOURCE_DIR
+#endif
 
 #ifndef METAL_SOURCE_DIR
-#define METAL_SOURCE_DIR "src/metal"
+static id<MTLLibrary> loadPackagedLibrary(id<MTLDevice> device) {
+    uint32_t length = 0;
+    _NSGetExecutablePath(nullptr, &length);
+    std::vector<char> executable(length);
+    if (!length || _NSGetExecutablePath(executable.data(), &length) != 0)
+        throw std::runtime_error("Metal: cannot locate executable for shader loading");
+    NSString *directory = [[[NSString stringWithUTF8String:executable.data()]
+                           stringByResolvingSymlinksInPath] stringByDeletingLastPathComponent];
+    NSString *path = [directory stringByAppendingPathComponent:@METAL_LIBRARY_NAME];
+    NSError *error = nil;
+    NSData *bytes = [NSData dataWithContentsOfFile:path options:0 error:&error];
+    if (!bytes)
+        throw std::runtime_error(std::string("Metal: cannot read packaged shader library ") +
+                                 path.UTF8String + "; keep the matching shaders directory with the executable");
+    if (!bytes.length || bytes.length > std::numeric_limits<CC_LONG>::max())
+        throw std::runtime_error("Metal: invalid packaged shader library size");
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes.bytes, static_cast<CC_LONG>(bytes.length), digest);
+    const char hex[] = "0123456789abcdef";
+    std::string checksum;
+    for (unsigned char byte : digest) {
+        checksum += hex[byte >> 4];
+        checksum += hex[byte & 15];
+    }
+    if (checksum != METAL_LIBRARY_SHA256)
+        throw std::runtime_error("Metal: packaged shader library does not match this executable; rebuild or reinstall the complete package");
+    // Load the verified bytes, avoiding another path read after the hash check.
+    dispatch_data_t data = dispatch_data_create(bytes.bytes, bytes.length, nullptr,
+                                                DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    if (!data) throw std::runtime_error("Metal: shader library allocation failed");
+    id<MTLLibrary> library = [device newLibraryWithData:data error:&error];
+    if (!library)
+        throw std::runtime_error(std::string("Metal: cannot load packaged shader library: ") +
+                                 (error ? error.localizedDescription.UTF8String : "unknown error"));
+    std::cout << "Metal library: " << METAL_LIBRARY_NAME << " SHA256 " << checksum << std::endl;
+    return library;
+}
 #endif
 
 class MetalRuntime {
@@ -26,6 +72,7 @@ public:
         queue = [device newCommandQueue];
         if (!queue) throw std::runtime_error("Metal: command queue allocation failed");
         std::cout << "Metal device: " << device.name.UTF8String << std::endl;
+#ifdef METAL_SOURCE_DIR
         NSMutableString *source = [NSMutableString string];
 #ifdef METAL_F2
         [source appendString:@"#define METAL_F2\n"];
@@ -52,6 +99,10 @@ public:
         options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
         library = [device newLibraryWithSource:source options:options error:&error];
         if (!library) throw std::runtime_error(error.localizedDescription.UTF8String);
+        std::cout << "Metal library: runtime source" << std::endl;
+#else
+        library = loadPackagedLibrary(device);
+#endif
     }
 };
 

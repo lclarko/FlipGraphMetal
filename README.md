@@ -6,7 +6,9 @@ FlipGraphMetal retains the upstream search and transformation functionality whil
 
 ## Build and run
 
-Requirements: Apple silicon, macOS 15 or later, Xcode Command Line Tools, and Python 3.9+ for the build and developer tools. The compiled programs do not require Python. CUDA and third-party GPU libraries are not required.
+Requirements: Apple silicon, macOS 15 or later, Xcode with the Metal Toolchain installed, and Python 3.9+ for the build and developer tools. The compiled programs require neither Xcode nor Python. CUDA and third-party GPU libraries are not required.
+
+Check that `xcrun -sdk macosx metal --version` works. If Xcode reports a missing Metal Toolchain, install that component through Xcode Settings > Components or `xcodebuild -downloadComponent MetalToolchain`.
 
 From the checkout root:
 
@@ -36,7 +38,15 @@ A small bounded search:
 
 Use `--help` for each program's options. Positive `--rounds` bounds outer iterations; `--max-iterations` bounds inner search work. With `--rounds 0`, search is unbounded and the minimizer and reducer retain their own stopping conditions. Choose a new output path when retaining results.
 
-Shaders compile at runtime from the source directory embedded during the build. Keep the checkout available and run `make` after moving it. The build tracks its source location, compiler and flags. Copying an executable alone does not produce a standalone installation. An unavailable Apple GPU is an error; there is no CPU fallback.
+The build compiles matching signed and F2 shader libraries into `build/metal/shaders/`. Programs locate these libraries beside the executable and check their hashes before loading. They do not need the source checkout. An unavailable Apple GPU is an error; there is no CPU fallback.
+
+To create a relocatable installation in a new directory:
+
+```sh
+make package-metal PACKAGE_DIR=build/metal/package
+```
+
+Move the complete directory, including `shaders/`. Copying only an executable is insufficient. The packaging target refuses an existing destination. See [development](docs/development.md#architecture-and-build) for build settings and explicit source-compilation mode.
 
 ## Supported functionality
 

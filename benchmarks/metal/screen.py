@@ -93,7 +93,7 @@ def execute(argv, directory, expected_exports, expected_rounds=None, expected_ke
     return record
 
 
-def check_manifest(build, expected_kernel):
+def check_manifest(build, expected_kernel, expected_library_mode=None):
     manifest = json.loads((build / 'build.json').read_text())
     if manifest.get('complete') is not True:
         raise ValueError('profiling build is incomplete')
@@ -106,11 +106,18 @@ def check_manifest(build, expected_kernel):
         raise ValueError('matched executable differs from completed build manifest')
     if not manifest.get('snapshot_files') or source_identity(build) != manifest['snapshot_files']:
         raise ValueError('source snapshots differ from completed build manifest')
+    mode = 'metallib' if 'metal_library' in manifest else 'source'
+    if expected_library_mode is not None and mode != expected_library_mode:
+        raise ValueError('build library mode differs from expected mode')
+    if mode == 'metallib':
+        from application import check_metal_library
+        check_metal_library(build / 'matched', manifest['metal_library'], manifest['commands'])
     return manifest
 
 
 def main():
     parser = argparse.ArgumentParser(description='Screen frozen CPU/Metal walks under process and memory bounds')
+    parser.add_argument('--expected-library-mode', choices=['source', 'metallib'])
     parser.add_argument('--builds', nargs='+', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--expected-kernel', choices=['randomWalkKernel', 'randomWalkCompactKernel'], required=True)
@@ -126,7 +133,7 @@ def main():
     if len(set(p.name for p in builds)) != len(builds):
         parser.error('build directory names must be unique')
     for build in builds:
-        check_manifest(build, args.expected_kernel)
+        check_manifest(build, args.expected_kernel, args.expected_library_mode)
     identities = {str(p): {'binary': digest(p / 'matched'), 'manifest': digest(p / 'build.json'),
                            'source': source_identity(p)} for p in builds}
     output = args.output.resolve()
@@ -139,6 +146,7 @@ def main():
         for seed in args.seeds:
             for repeat in range(args.repeats):
                 for build in builds if repeat % 2 == 0 else builds[::-1]:
+                    check_manifest(build, args.expected_kernel, args.expected_library_mode)
                     identity = identities[str(build)]
                     if identity != {'binary': digest(build / 'matched'), 'manifest': digest(build / 'build.json'), 'source': source_identity(build)}:
                         raise RuntimeError('benchmark source or executable changed')

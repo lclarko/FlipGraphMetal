@@ -14,6 +14,73 @@ sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 
 
 class ProfileBuildIsolation(unittest.TestCase):
+    def test_packaged_candidate_keeps_reference_in_source_mode(self):
+        from types import SimpleNamespace
+        from application import digest
+        from screen import check_manifest
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / 'profile'
+            def library(source, asset, header, **kwargs):
+                self.assertEqual(source, output / 'production')
+                asset.parent.mkdir()
+                asset.write_bytes(b'compiled candidate shader')
+                checksum = digest(asset)
+                header.write_text('#define METAL_LIBRARY_NAME "shaders/signed.metallib"\n'
+                                  '#define METAL_LIBRARY_SHA256 "' + checksum + '"\n')
+                return dict(mode='metallib', library='shaders/signed.metallib', sha256=checksum,
+                            header=str(header), commands=[['xcrun', 'metal', '-o', str(asset)]])
+            def compile(command, **kwargs):
+                content = b'fixture executable'
+                if '-include' in command:
+                    content += Path(command[command.index('-include') + 1]).read_bytes()
+                Path(command[command.index('-o') + 1]).write_bytes(content)
+                return subprocess.CompletedProcess(command, 0)
+            argv = ['build.py', '--output', str(output), '--source', str(ROOT / 'src/metal'),
+                    '--gpu-source', str(ROOT / 'src/metal'), '--gpu-kernel', 'randomWalkCompactKernel',
+                    '--rank-capacity', '350', '--gpu-library-mode', 'metallib']
+            with patch.object(sys, 'argv', argv), patch('subprocess.run', side_effect=compile), \
+                    patch.dict(sys.modules, {'metal_library': SimpleNamespace(build_library=library)}):
+                runpy.run_path(str(ROOT / 'benchmarks/metal/build.py'), run_name='__main__')
+            data = check_manifest(output, 'randomWalkCompactKernel', 'metallib')
+            self.assertTrue((output / 'scripts/metal_library.py').is_file())
+            self.assertTrue(any('METAL_SOURCE_DIR' in arg for command in data['commands'] for arg in command))
+            matched = data['commands'][-1]
+            self.assertIn('-include', matched)
+            self.assertFalse(any('METAL_SOURCE_DIR' in arg for arg in matched))
+            with self.assertRaisesRegex(ValueError, 'mode'):
+                check_manifest(output, 'randomWalkCompactKernel', 'source')
+            (output / 'shaders/signed.metallib').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                check_manifest(output, 'randomWalkCompactKernel', 'metallib')
+
+    def test_shader_failure_retains_mode_intent_and_actual_failed_command(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / 'failed-profile'
+            failed_command = ['xcrun', 'metal', '/temporary/library.metal', '-o', '/temporary/library.metallib']
+            def fail(*args, **kwargs):
+                manifest = json.loads((output / 'build.json').read_text())
+                self.assertFalse(manifest['complete'])
+                self.assertEqual(manifest['gpu_library_mode'], 'metallib')
+                self.assertEqual(manifest['library_build_intent']['source_dir'], str(output / 'production'))
+                self.assertEqual(manifest['library_build_intent']['variant'], 'signed')
+                self.assertEqual(len(manifest['commands']), 4)
+                self.assertIn('-include', manifest['commands'][-1])
+                raise subprocess.CalledProcessError(2, failed_command)
+            argv = ['build.py', '--output', str(output), '--source', str(ROOT / 'src/metal'),
+                    '--gpu-library-mode', 'metallib']
+            with patch.object(sys, 'argv', argv), patch('subprocess.run') as compile, \
+                    patch.dict(sys.modules, {'metal_library': SimpleNamespace(build_library=fail)}):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runpy.run_path(str(ROOT / 'benchmarks/metal/build.py'), run_name='__main__')
+            compile.assert_not_called()
+            manifest = json.loads((output / 'build.json').read_text())
+            self.assertFalse(manifest['complete'])
+            self.assertEqual(manifest['failed_shader_command'], failed_command)
+            self.assertEqual(manifest['shader_exit_code'], 2)
+            self.assertIn('error', manifest)
+            self.assertTrue((output / 'production/kernels.metal').is_file())
+
     def test_candidate_storage_and_kernel_selection_stay_out_of_reference(self):
         for lanes in (None, 1, 32):
             with self.subTest(lanes=lanes), tempfile.TemporaryDirectory() as temporary:

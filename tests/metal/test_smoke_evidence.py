@@ -64,6 +64,24 @@ class SmokeEvidence(unittest.TestCase):
             self.assertEqual(result["runs"], [])
             self.assertIn("receipt mismatch", result["error"])
 
+    def test_working_directory_is_forwarded_to_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            working = root / "unrelated location"
+            working.mkdir()
+            for name in ("input.json", "transform-0.json", "receipt.json"):
+                (root / name).write_text("{}")
+            with patch("smoke.check_fixtures"), patch("smoke.verify"), \
+                    patch("smoke.converted_f2", return_value=b"fixture"), \
+                    patch("smoke.execute", side_effect=RuntimeError("stop before launch")) as execute:
+                with self.assertRaisesRegex(RuntimeError, "stop before launch"):
+                    smoke.main(["--binary-dir", directory, "--signed-fixtures", directory,
+                                "--f2-fixtures", directory, "--fixture-receipt", str(root / "receipt.json"),
+                                "--output", str(root / "attempt"), "--working-dir", str(working)])
+            self.assertEqual(execute.call_args.args[1], working.resolve())
+            summary = json.loads((root / "attempt/results.json").read_text())
+            self.assertEqual(summary["working_directory"], str(working.resolve()))
+
     def test_gpu_evidence_requires_apple_and_positive_finite_timing(self):
         valid = "Metal device: Apple M1\nMetal dispatch example: 4 threads, 0.01 ms GPU\n"
         self.assertEqual(smoke.dispatch_evidence(valid)["dispatches"], [("example", 4, .01)])

@@ -1,9 +1,11 @@
 """Freeze one project's Metal application and its matching host parser."""
 
 import argparse
+import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from application import build_identity, digest, source_identity, write_json
 from guard import run
@@ -28,6 +30,7 @@ def parser_files(project):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--library-mode', choices=['auto', 'source', 'metallib'], default='auto')
     parser.add_argument('--project-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -54,6 +57,22 @@ def main():
                '-fobjc-arc', '-ffp-contract=off', '-framework', 'Foundation', '-framework', 'Metal',
                '-DMETAL_SOURCE_DIR="' + str(shader) + '"', '-DMETAL_PROGRAM=1',
                str(shader / 'main.cpp'), str(shader / 'runtime.mm'), '-o', str(binary)]
+    mode = args.library_mode
+    if mode == 'auto':
+        mode = 'metallib' if 'METAL_LIBRARY_SHA256' in (shader / 'runtime.mm').read_text() else 'source'
+    shader_command = None
+    if mode == 'metallib':
+        helper = snapshot / 'scripts'
+        helper.mkdir()
+        for name in ('metal_library.py', 'build_config.py'):
+            shutil.copy2(project / 'scripts' / name, helper / name)
+        shader_manifest = output / 'metal-library.json'
+        shader_command = [sys.executable, str(helper / 'metal_library.py'), 'build',
+                          '--source-dir', str(shader), '--output', str(output / 'shaders/signed.metallib'),
+                          '--header', str(snapshot / 'library.h'), '--variant', 'signed',
+                          '--library-name', 'shaders/signed.metallib', '--manifest', str(shader_manifest)]
+        command.remove('-DMETAL_SOURCE_DIR="' + str(shader) + '"')
+        command[2:2] = ['-include', str(snapshot / 'library.h')]
     # A source-only snapshot need not have Git metadata. File hashes are authoritative.
     revision = 'source-snapshot'
     if (project / '.git').exists():
@@ -64,8 +83,21 @@ def main():
                     input_project=str(project), input_source=str(source),
                     input_parser={str(p.relative_to(project)): digest(p) for p in shared},
                     generator_sha256=digest(Path(__file__)), complete=False)
+    if shader_command is not None:
+        manifest.pop('metal_source_dir')
+        manifest['library_mode'] = 'metallib'
+        manifest['shader_build_command'] = shader_command
     path = output / 'build.json'
     write_json(path, manifest)
+    if shader_command is not None:
+        record = run(shader_command, output / 'shader-compile')
+        if not record['complete']:
+            raise SystemExit('shader build incomplete; see ' + str(output / 'shader-compile'))
+        metal_library = json.loads(shader_manifest.read_text())
+        manifest['metal_library'] = metal_library
+        manifest['commands'] = metal_library['commands'] + [command]
+        manifest['source_files'] = source_identity(snapshot)
+        write_json(path, manifest)
     record = run(command, output / 'compile')
     if not record['complete']:
         raise SystemExit('application build incomplete; see ' + str(output / 'compile'))

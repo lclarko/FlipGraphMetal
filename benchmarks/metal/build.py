@@ -5,11 +5,13 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from application import source_identity
 parser = argparse.ArgumentParser(description="Build the signed CPU/Metal profiling executables")
 parser.add_argument('--rank-capacity', type=int, choices=[32, 350], default=350)
 parser.add_argument('--output', type=Path, help='directory for source snapshots and executables')
 parser.add_argument('--source', type=Path, help='Metal source directory for the CPU reference and diagnostics')
+parser.add_argument('--gpu-library-mode', choices=['source', 'metallib'], default='source')
 parser.add_argument('--gpu-source', type=Path, help='Metal source directory for the production GPU comparison')
 parser.add_argument('--gpu-kernel', choices=['randomWalkKernel', 'randomWalkCompactKernel'], default='randomWalkKernel')
 args = parser.parse_args()
@@ -185,8 +187,37 @@ matched_runtime = source / 'matched_runtime.mm'
 matched_runtime.write_text(matched_runtime_source)
 matched[matched.index(str(source / 'runtime.mm'))] = str(matched_runtime)
 matched[-1] = str(output / 'matched')
+metal_library = None
+if args.gpu_library_mode == 'metallib':
+    matched.remove('-DMETAL_SOURCE_DIR="'+str(production)+'"')
+    matched[2:2] = ['-include', str(output / 'library.h')]
 commands.extend([matched_object, matched])
-manifest = {'complete': False, 'gpu_kernel': args.gpu_kernel, 'runtime_input': str(runtime_input), 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source), 'commands': commands, 'inputs': {str(p.relative_to(root)) if p.is_relative_to(root) else str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [*inputs, *gpu_inputs, *Path(__file__).parent.glob('*')] if p.is_file()}}
+manifest = {'complete': False, 'gpu_library_mode': args.gpu_library_mode, 'gpu_kernel': args.gpu_kernel, 'runtime_input': str(runtime_input), 'rank_capacity': args.rank_capacity, 'source': str(input_source), 'gpu_source': str(gpu_source), 'commands': commands, 'inputs': {str(p.relative_to(root)) if p.is_relative_to(root) else str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in [*inputs, *gpu_inputs, *Path(__file__).parent.glob('*')] if p.is_file()}}
+if args.gpu_library_mode == 'metallib':
+    helper = output / 'scripts'
+    helper.mkdir()
+    for name in ('metal_library.py', 'build_config.py'):
+        shutil.copy2(root / 'scripts' / name, helper / name)
+    sys.path.insert(0, str(helper))
+    from metal_library import build_library
+    intent = {'source_dir': str(production), 'output': str(output / 'shaders/signed.metallib'),
+              'header': str(output / 'library.h'), 'variant': 'signed',
+              'library_name': 'shaders/signed.metallib'}
+    manifest['library_build_intent'] = intent
+    (output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
+    try:
+        metal_library = build_library(production, output / 'shaders/signed.metallib',
+                                      output / 'library.h', variant='signed',
+                                      library_name='shaders/signed.metallib')
+    except Exception as error:
+        manifest['error'] = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            manifest['failed_shader_command'] = error.cmd
+            manifest['shader_exit_code'] = error.returncode
+        (output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
+        raise
+    manifest['metal_library'] = metal_library
+    manifest['commands'] = metal_library['commands'] + commands
 (output / 'build.json').write_text(json.dumps(manifest, indent=2)+'\n')
 
 for command in commands:

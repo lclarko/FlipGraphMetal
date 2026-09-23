@@ -4,7 +4,7 @@ These optional tools support correctness comparisons, source snapshots and perfo
 
 ## Prerequisites and supervision
 
-Use Apple silicon with accessible Metal hardware, macOS 15 or later, Xcode Command Line Tools and Python 3.9+. Matched CPU profiling also needs OpenMP (`libomp`); the current profiling build expects its Homebrew prefix at `/opt/homebrew/opt/libomp`. Instruments captures require Xcode's tracing tools. External CPU application comparisons need an explicitly selected source tree, executable and build manifest; that repository is not included here.
+Use Apple silicon with accessible Metal hardware, macOS 15 or later, Xcode with the Metal Toolchain and Python 3.9+. Matched CPU profiling also needs OpenMP (`libomp`); the current profiling build expects its Homebrew prefix at `/opt/homebrew/opt/libomp`. Instruments captures require Xcode's tracing tools. External CPU application comparisons need an explicitly selected source tree, executable and build manifest; that repository is not included here.
 
 Run GPU work serially. The guards use a 45-second process-group timeout and sampled 3 GiB system wired-memory cutoff, followed by TERM and KILL after two seconds. Do not nest another process-group supervisor around `screen.py` or `application.py`, which already own their supervision. Retain incomplete attempts and choose a new output directory for retries.
 
@@ -18,22 +18,22 @@ From the checkout root, with `REFERENCE_METAL_SOURCE` set to a reviewed compatib
 python3 benchmarks/metal/guard.py --output "$ATTEMPT/build-guard" -- \
   python3 benchmarks/metal/build.py \
     --source "$REFERENCE_METAL_SOURCE" --gpu-source "$PWD/src/metal" \
-    --gpu-kernel randomWalkCompactKernel --rank-capacity 350 \
+    --gpu-kernel randomWalkCompactKernel --rank-capacity 350 --gpu-library-mode metallib \
     --output "$ATTEMPT/profile"
 
 python3 benchmarks/metal/screen.py \
   --builds "$ATTEMPT/profile" --output "$ATTEMPT/naive" \
-  --expected-kernel randomWalkCompactKernel \
+  --expected-kernel randomWalkCompactKernel --expected-library-mode metallib \
   --populations 33 512 --seeds 7 19 --repeats 1 --mode matched
 
 python3 benchmarks/metal/screen.py \
   --builds "$ATTEMPT/profile" --output "$ATTEMPT/rank23" \
-  --expected-kernel randomWalkCompactKernel \
+  --expected-kernel randomWalkCompactKernel --expected-library-mode metallib \
   --populations 33 512 --seeds 7 19 --repeats 1 --mode matched \
   --fixture "$PWD/tests/metal/fixtures/rank23_3x3.txt"
 ```
 
-Verify reference hashes before building. The manifest must identify reference source, GPU source, runtime, kernel and rank capacity. `--expected-kernel` is required by the screen and checks the manifest and every walk dispatch. Output directories must be new.
+Verify reference hashes before building. The manifest must identify reference source, GPU source, runtime, kernel and rank capacity. `--expected-kernel` is required by the screen and checks the manifest and every walk dispatch. Select `--gpu-library-mode metallib` and `--expected-library-mode metallib` to validate the production library path. The reference diagnostics continue to use their independently frozen source. Library digests and executable bindings are rechecked before every case. Output directories must be new.
 
 Matched mode runs six rounds of 1000 iterations. Acceptance requires all rounds, exact current/best state, ordered candidates, RNG and counters, successful tensor checks, independently verified exports and positive finite GPU timings. A successful general-kernel comparison cannot stand in for the packed path. Frozen sources must use compatible layouts; the tool does not translate arbitrary revisions.
 
@@ -46,7 +46,7 @@ python3 benchmarks/metal/freeze_application.py \
   --project-root "$PWD" --output "$ATTEMPT/application"
 ```
 
-The snapshot resolves the parser only within the selected project root, supporting the original or current layout and rejecting ambiguous dependencies. It records source identities, build arguments and executable hashes. Its executable uses the snapshot's absolute shader directory; keep that directory intact.
+The snapshot resolves the parser only within the selected project root, supporting the original or current layout and rejecting ambiguous dependencies. It records source identities, build arguments and executable hashes. Current project snapshots compile a matching library and bind its digest into the executable. Keep its sibling `shaders/` directory with it. The generated header and frozen build helper remain part of the verification evidence. Older projects retain source mode and their absolute shader-directory requirement; `--library-mode source` explicitly selects that mode for experiments. Shader and host compilation each retain guarded logs and an incomplete manifest on failure.
 
 `application.py` compares external CPU and baseline/candidate Metal applications. Supply explicit binary, source and build-manifest arguments for each selected backend; inspect `--help` for their names. Use `--timing source-elapsed` for source-clock timing, and a new output directory. Custom fixtures require `--fixtures custom --fixture-path PATH` with one raw signed scheme and no scheme-count prefix. Dimensions must be 1..16, each factor width at most 64, and rank 1..350. The runner checks the exact coefficient count, restricts coefficients to −1, 0 or 1, independently verifies the tensor, records the hash and rechecks it before cases. Use `--expected-kernel` to bind GPU evidence to the intended search kernel.
 
@@ -66,13 +66,13 @@ Use the general kernel for 4×4. With the same explicit frozen reference and fre
 python3 benchmarks/metal/guard.py --output "$ATTEMPT/general-build-guard" -- \
   python3 benchmarks/metal/build.py \
     --source "$REFERENCE_METAL_SOURCE" --gpu-source "$PWD/src/metal" \
-    --gpu-kernel randomWalkKernel --rank-capacity 350 \
+    --gpu-kernel randomWalkKernel --rank-capacity 350 --gpu-library-mode metallib \
     --output "$ATTEMPT/general-profile"
 
 for fixture in naive_4x4 strassen_4x4; do
   python3 benchmarks/metal/screen.py \
     --builds "$ATTEMPT/general-profile" --output "$ATTEMPT/check-$fixture" \
-    --expected-kernel randomWalkKernel \
+    --expected-kernel randomWalkKernel --expected-library-mode metallib \
     --populations 33 512 --seeds 7 19 --repeats 1 --mode matched \
     --fixture "$PWD/tests/metal/fixtures/$fixture.txt" || exit 1
 done

@@ -56,6 +56,64 @@ class BenchmarkEvidence(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'not present'):
                 application.build_identity('baseline', binary, source, manifest)
 
+    def test_packaged_library_binding_tampering_and_relocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / 'source'
+            source.mkdir()
+            (source / 'kernels.metal').write_text('kernel fixture')
+            asset = root / 'shaders/signed.metallib'
+            asset.parent.mkdir()
+            asset.write_bytes(b'compiled library fixture')
+            checksum = application.digest(asset)
+            header = source / 'library.h'
+            header.write_text('#define METAL_LIBRARY_NAME "shaders/signed.metallib"\n'
+                              '#define METAL_LIBRARY_SHA256 "' + checksum + '"\n')
+            binary = root / 'program'
+            binary.write_bytes(('shaders/signed.metallib ' + checksum).encode())
+            manifest = root / 'build.json'
+            data = dict(version=1, source_root=str(source), source_files=application.source_identity(source),
+                        binary=str(binary), binary_sha256=application.digest(binary), source_revision='fixture',
+                        commands=[['clang++', '-include', str(header), '-o', str(binary)]],
+                        metal_library=dict(mode='metallib', library='shaders/signed.metallib',
+                                           sha256=checksum, header=str(header)))
+            manifest.write_text(json.dumps(data))
+            application.build_identity('candidate', binary, source, manifest)
+            asset.write_bytes(b'replaced')
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                application.build_identity('candidate', binary, source, manifest)
+            asset.write_bytes(b'compiled library fixture')
+            for field, value in [('mode', 'source'), ('library', '../escape.metallib'), ('sha256', '0'*64)]:
+                changed = dict(data, metal_library={**data['metal_library'], field: value})
+                manifest.write_text(json.dumps(changed))
+                with self.assertRaises(ValueError):
+                    application.build_identity('candidate', binary, source, manifest)
+            changed = dict(data, commands=[['clang++', '-DMETAL_SOURCE_DIR="' + str(source) + '"',
+                                           '-include', str(header), '-o', str(binary)]])
+            manifest.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, 'substitute'):
+                application.build_identity('candidate', binary, source, manifest)
+            manifest.write_text(json.dumps(data))
+            import shutil
+            from archive import ArchiveResolver
+            relocated = root / 'bundle'
+            relocated.mkdir()
+            shutil.copytree(source, relocated / 'source')
+            shutil.copytree(asset.parent, relocated / 'shaders')
+            shutil.copy2(binary, relocated / 'program')
+            shutil.copy2(manifest, relocated / 'build.json')
+            mapping = relocated / 'archive-map.json'
+            mapping.write_text(json.dumps(dict(version=1, campaigns={}, paths={
+                str(source): 'source', str(header): 'source/library.h',
+                str(binary): 'program', str(manifest): 'build.json'})))
+            asset.unlink()
+            application.build_identity('candidate', binary, source, manifest,
+                                       resolver=ArchiveResolver(mapping))
+            (relocated / 'shaders/signed.metallib').write_bytes(b'corrupted relocated asset')
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                application.build_identity('candidate', binary, source, manifest,
+                                           resolver=ArchiveResolver(mapping))
+
     def test_artifact_inventory_detects_additions(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

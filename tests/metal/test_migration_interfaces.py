@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
@@ -52,6 +53,38 @@ class MigrationInterfaces(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(marker.read_text(), 'retained')
             self.assertFalse((output / 'source').exists())
+
+    def test_failed_frozen_shader_build_retains_intent_and_log(self):
+        import freeze_application
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            project, output = root / 'project', root / 'attempt'
+            (project / 'src/metal').mkdir(parents=True)
+            (project / 'src/common').mkdir()
+            (project / 'scripts').mkdir()
+            (project / 'src/metal/main.cpp').write_text('#include "../common/arg_parser.cpp"')
+            (project / 'src/metal/runtime.mm').write_text('METAL_LIBRARY_SHA256')
+            for name in ('arg_parser.cpp', 'arg_parser.h'):
+                (project / 'src/common' / name).write_text('fixture parser')
+            for name in ('metal_library.py', 'build_config.py'):
+                (project / 'scripts' / name).write_text('fixture helper')
+            def failed_compile(command, evidence):
+                manifest = json.loads((output / 'build.json').read_text())
+                self.assertFalse(manifest['complete'])
+                self.assertEqual(manifest['shader_build_command'], command)
+                self.assertEqual(manifest['library_mode'], 'metallib')
+                evidence.mkdir()
+                (evidence / 'run.log').write_text('retained compiler failure')
+                (evidence / 'result.json').write_text(json.dumps(dict(argv=command, complete=False)))
+                return {'complete': False}
+            argv = ['freeze_application.py', '--project-root', str(project), '--output', str(output)]
+            with patch.object(sys, 'argv', argv), patch.object(freeze_application, 'run', side_effect=failed_compile) as run:
+                with self.assertRaisesRegex(SystemExit, 'shader build incomplete'):
+                    freeze_application.main()
+                self.assertEqual(run.call_count, 1)
+            self.assertEqual((output / 'shader-compile/run.log').read_text(), 'retained compiler failure')
+            self.assertFalse((output / 'compile').exists())
+            self.assertFalse(json.loads((output / 'build.json').read_text())['complete'])
 
     def test_snapshot_parser_must_belong_to_selected_project(self):
         with tempfile.TemporaryDirectory() as temporary:

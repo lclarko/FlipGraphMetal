@@ -185,6 +185,45 @@ def artifacts(directory):
             if p.is_file() and p.relative_to(directory).as_posix() not in {'result.json', 'result.sha256'}}
 
 
+def check_metal_library(binary, library, commands, *, resolver=None, recorded_binary=None):
+    """Verify the packaged asset, generated header and executable binding."""
+    if not isinstance(library, dict) or library.get('mode') != 'metallib':
+        raise ValueError('Metal library requires explicit metallib mode')
+    name, checksum = library.get('library'), library.get('sha256')
+    if (not isinstance(name, str) or not name or Path(name).is_absolute()
+            or '..' in Path(name).parts or str(Path(name)) != name
+            or not isinstance(checksum, str) or not re.fullmatch('[0-9a-f]{64}', checksum)):
+        raise ValueError('invalid Metal library name or digest')
+    binary = Path(binary)
+    asset = binary.parent / name
+    if any(p.is_symlink() for p in (asset, *asset.parents)) or not asset.is_file():
+        raise ValueError('Metal library must be an ordinary installed file')
+    if resolver:
+        resolver.check_tree(asset)
+    if digest(asset) != checksum:
+        raise ValueError('Metal library digest mismatch')
+    header_name = library.get('header')
+    if not isinstance(header_name, str) or not Path(header_name).is_absolute():
+        raise ValueError('Metal library header must be recorded explicitly')
+    header = resolver.resolve(Path(header_name)) if resolver else Path(header_name).resolve(strict=True)
+    contents = header.read_text()
+    for macro, value in [('METAL_LIBRARY_NAME', name), ('METAL_LIBRARY_SHA256', checksum)]:
+        if not re.search(r'^\s*#\s*define\s+' + macro + r'\s+"' + re.escape(value) + r'"\s*$', contents, re.M):
+            raise ValueError('Metal library header binding mismatch')
+    executable = binary.read_bytes()
+    if name.encode() not in executable or checksum.encode() not in executable:
+        raise ValueError('Metal library binding is not present in executable')
+    bound = [command for command in commands if any(
+        arg == '-include' and index + 1 < len(command) and command[index + 1] == header_name
+        for index, arg in enumerate(command))]
+    target = str(recorded_binary or binary)
+    if not any('-o' in command and command[command.index('-o') + 1] == target for command in bound):
+        raise ValueError('build argv does not bind the Metal library header to executable')
+    if any('METAL_SOURCE_DIR' in arg for command in bound for arg in command):
+        raise ValueError('packaged build cannot substitute runtime source')
+    return {'library': name, 'sha256': checksum}
+
+
 def build_identity(backend, binary, source, manifest_path, *, resolver=None):
     original_binary, original_source, original_manifest = binary, source, manifest_path
     resolve = resolver.resolve if resolver else lambda path: path.resolve(strict=True)
@@ -204,7 +243,10 @@ def build_identity(backend, binary, source, manifest_path, *, resolver=None):
             or not files or manifest.get('binary') != recorded_binary
             or manifest.get('binary_sha256') != digest(binary)):
         raise ValueError('build manifest does not match source and executable')
-    if backend != 'cpu':
+    if backend != 'cpu' and 'metal_library' in manifest:
+        check_metal_library(binary, manifest['metal_library'], commands, resolver=resolver,
+                            recorded_binary=recorded_binary)
+    elif backend != 'cpu':
         recorded_shader = Path(manifest.get('metal_source_dir', ''))
         shader = resolve(recorded_shader)
         if (not shader.is_dir() or not shader.is_relative_to(source)

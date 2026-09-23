@@ -6,7 +6,13 @@
 
 `src/common` contains the shared C++ argument parser. Its former CUDA suffixes did not indicate a CUDA dependency. The root build includes parser changes in its dependencies. `reference/cuda` preserves upstream source and its build recipe for reference; CUDA is neither a supported backend nor covered by the Metal validation results.
 
-The runtime compiles shader source with `newLibraryWithSource`. The build embeds the absolute shader-source directory. Run `make` after relocating the checkout, and keep source with the executable. Build receipts track effective compiler settings, source location and source contents; unchanged inputs do not trigger recompilation. Production builds use the existing macOS 15 deployment target, precise arithmetic settings and disabled floating-point contraction.
+Normal builds assemble the shared headers and kernels, then compile Metal 3.2 libraries for macOS 15 or later. `METAL_COMPILER` and `METAL_SHADER_FLAGS` select the offline compiler and its options. Shader compilation uses safe math and precise floating-point functions; host compilation disables floating-point contraction. Production signed/F2 libraries and their testing variants are distinct. The signed library contains both packed and general kernels.
+
+Each executable embeds its library's relative filename and SHA-256 digest. The runtime resolves resources from the executable's actual location, including symlink resolution, verifies the bytes and loads them with `newLibraryWithData`. Missing or mismatched libraries fail explicitly. GPU-specific pipeline creation still occurs at runtime.
+
+Build receipts track compiler settings, source location and source contents; unchanged inputs do not trigger recompilation. `make package-metal PACKAGE_DIR=NEW_DIRECTORY` copies the five production executables, their two libraries, the README's attribution and rights section, and a portable hash manifest. It excludes test programs, source snapshots and benchmark evidence. Move that directory intact; no rebuild is needed merely to run the relocated installation.
+
+For shader experiments without the offline compiler, use `make METAL_LIBRARY_MODE=source`. This explicitly selects runtime compilation through `newLibraryWithSource`, embeds the source checkout's absolute path and requires that source to remain available. Run `make METAL_LIBRARY_MODE=source` after moving that checkout. Running ordinary `make` switches back to compiled libraries and rebuilds the affected programs. There is no automatic fallback between modes.
 
 ## Search behavior
 
@@ -63,6 +69,8 @@ For advanced paired smoke checks, select explicit `--binary-dir`, `--signed-fixt
 ## Changes to execution
 
 For implementation-preserving refactors, compare complete walks against an independently selected frozen reference. Bind the reference source, candidate source, rank capacity and expected kernel explicitly. Require all rounds to match RNG state, ordered candidates, current state, best state, counters and outputs, then independently verify exports. See [the profiling workflow](../benchmarks/metal/README.md).
+
+For compiled-library changes, also select `--gpu-library-mode metallib` when building the matched profile and `--expected-library-mode metallib` when screening it. Source-only comparisons cannot validate the packaged loader or offline compiler. Use `tests/metal/packaging.py --help` for relocation checks with the same signed/F2 fixtures and receipt used by smoke tests. It checks all production programs from another working directory, symlink invocation and explicit failure for missing, corrupt or mismatched libraries.
 
 A passing general-kernel comparison does not establish packed-kernel equivalence. Keep fixtures and source/build identities with the results. Changes to search policy require separate correctness and quality evaluation; throughput alone cannot justify adopting them.
 

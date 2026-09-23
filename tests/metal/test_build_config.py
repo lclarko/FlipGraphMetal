@@ -21,7 +21,7 @@ class BuildConfigurationTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.root = self.base / "checkout with spaces and 'quote'"
         self.root.mkdir()
-        for name in ("makefile", "scripts/build_config.py"):
+        for name in ("makefile", "scripts/build_config.py", "scripts/metal_library.py"):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, destination)
@@ -32,6 +32,9 @@ class BuildConfigurationTests(unittest.TestCase):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.touch()
+        for name in (ROOT / "src/metal").iterdir():
+            if name.suffix in (".h", ".metal"):
+                shutil.copy2(name, self.root / "src/metal" / name.name)
         self.log = self.base / "compiler-log.jsonl"
         self.compiler = self.base / "fake compiler.py"
         self.compiler.write_text("""import json, os, pathlib, sys
@@ -45,7 +48,7 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
     def make(self, *settings, success=True):
         result = subprocess.run(
             ["make", *["build/metal/" + name for name in TARGETS],
-             "METAL_CXX=" + self.command, *settings], cwd=self.root,
+             "METAL_CXX=" + self.command, "METAL_COMPILER=" + self.command + " --shader", *settings], cwd=self.root,
             env={**os.environ, "FAKE_COMPILER_LOG": str(self.log)},
             text=True, capture_output=True)
         if success:
@@ -55,7 +58,8 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         return result
 
     def calls(self):
-        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        return [json.loads(line) for line in self.log.read_text().splitlines()
+                if "--shader" not in json.loads(line)] if self.log.exists() else []
 
     def age_outputs(self):
         # Ensure strict timestamp ordering even with older make/filesystem resolution.
@@ -78,7 +82,7 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         self.assertEqual(len(self.calls()), 16)
         self.assertIn("-O0", self.calls()[-1])
 
-    def test_relocated_checkout_rebuilds_and_quotes_shader_path(self):
+    def test_relocated_checkout_rebuilds_without_absolute_runtime_paths(self):
         self.make()
         old = self.root
         self.root = self.base / "relocated checkout 'still quoted'"
@@ -86,9 +90,10 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         self.make()
         self.assertTrue(old.exists())
         self.assertEqual(len(self.calls()), 16)
-        expected = '-DMETAL_SOURCE_DIR="' + str((self.root / "src/metal").resolve()) + '"'
         for args in self.calls()[8:15]:
-            self.assertIn(expected, args)
+            self.assertIn('-include', args)
+            self.assertTrue(args[args.index('-include') + 1].startswith('build/metal/shaders/'))
+            self.assertFalse(any('METAL_SOURCE_DIR' in arg for arg in args))
             self.assertFalse(any(str(old) in arg for arg in args))
         self.make()
         self.assertEqual(len(self.calls()), 16)
@@ -114,6 +119,29 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         before = source.stat()
         source.write_text("// changed source\n")
         os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.make()
+        self.assertEqual(len(self.calls()), 15)
+        self.make()
+        self.assertEqual(len(self.calls()), 15)
+
+    def test_explicit_source_mode_and_return_to_packaged(self):
+        self.make()
+        self.make("METAL_LIBRARY_MODE=source")
+        self.assertEqual(len(self.calls()), 15)
+        expected = '-DMETAL_SOURCE_DIR="' + str((self.root / "src/metal").resolve()) + '"'
+        for args in self.calls()[8:]:
+            self.assertIn(expected, args)
+            self.assertNotIn('-include', args)
+        self.make("METAL_LIBRARY_MODE=source")
+        self.assertEqual(len(self.calls()), 15)
+        self.make()
+        self.assertEqual(len(self.calls()), 22)
+        self.assertTrue(all('-include' in args for args in self.calls()[15:]))
+
+    def test_shader_change_rebinds_programs(self):
+        self.make()
+        path = self.root / 'src/metal/kernels.metal'
+        path.write_text(path.read_text() + '\n// shader change\n')
         self.make()
         self.assertEqual(len(self.calls()), 15)
         self.make()

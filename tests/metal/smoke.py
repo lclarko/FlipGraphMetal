@@ -86,13 +86,14 @@ def main(argv=None):
     parser.add_argument("--f2-fixtures", type=Path, required=True)
     parser.add_argument("--fixture-receipt", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--working-dir", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args(argv)
-    root = Path(__file__).resolve().parents[2]
+    root = args.working_dir.resolve(strict=True)
     binary, signed, f2 = (path.resolve() for path in
                           (args.binary_dir, args.signed_fixtures, args.f2_fixtures))
     output = args.output.resolve()
     output.mkdir()  # Parent must exist; an existing attempt is never reused.
-    summary = {"complete": False, "runs": [], "verified": []}
+    summary = {"complete": False, "runs": [], "verified": [], "working_directory": str(root)}
     save_summary(output, summary)
     try:
         receipt_bytes = args.fixture_receipt.read_bytes()
