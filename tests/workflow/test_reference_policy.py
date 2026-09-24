@@ -165,6 +165,11 @@ class GoldenTests(unittest.TestCase):
 class HostBoundaryGoldenTests(unittest.TestCase):
     def test_frozen_host_boundary_and_checked_ceiling_traces(self):
         golden = json.loads((HERE/'golden/host_boundaries_v1.json').read_text())
+        self.assertEqual(golden['review']['status'], 'reviewed')
+        payload = {key:value for key,value in golden.items() if key != 'review'}
+        self.assertEqual(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                                   allow_nan=False).encode()).hexdigest(),
+                         golden['review']['payload_sha256'])
         self.assertEqual(golden['specification_sha256'], hashlib.sha256(
             (ROOT/'docs/specifications/FGM-CONTRACT-v1.md').read_bytes()).hexdigest())
         self.assertEqual(golden['arithmetic_reference'], ARITHMETIC_REFERENCE)

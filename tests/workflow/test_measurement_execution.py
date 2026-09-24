@@ -184,27 +184,15 @@ class MeasurementExecutionTests(unittest.TestCase):
 
 
 class NativeHostMeasurementTests(unittest.TestCase):
-    def test_unapproved_host_plan_cannot_launch(self):
-        from test_performance import absolute_case
-        document=absolute_case()
-        document['budget'].update(status='unapproved',approval=None)
-        document['budget_sha256']=b.content_hash(document['budget'])
-        plan={'schema':'fgm-host-plan-v1','parent':None,
-              'evaluations':{name:document for name in b.HOST_WORKLOADS}}
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);binary=root/'native';binary.write_text('placeholder')
-            source=root/'plan.json';source.write_text(json.dumps(plan))
-            with mock.patch.object(b,'host_candidate_identity',return_value={}), \
-                    mock.patch.object(b,'hardware_inventory',return_value={}), \
-                    mock.patch.object(b,'guarded_run') as guard:
-                with self.assertRaises(ValueError):b.execute_host(binary,root/'out',source)
+    def test_host_repetition_limits_precede_execution(self):
+        for repeats in (0,13,True):
+            with self.subTest(repeats=repeats),mock.patch.object(b,'guarded_run') as guard:
+                with self.assertRaises(ValueError):
+                    b.execute_host(Path('/unused/native'),Path('/unused/output'),repeats)
                 guard.assert_not_called()
-                self.assertFalse((root/'out').exists())
 
-    def test_host_preflight_and_final_identity_failures_invalidate_acquisition(self):
-        from test_performance import absolute_case
-        import performance
-        for failure in ('work-identity','final-source'):
+    def test_host_measurement_freezes_work_and_retains_identity_failures(self):
+        for failure in (None,'initial-source','fixture-change','final-source'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
                 root=Path(temporary);binary=root/'native';binary.write_bytes(b'not executable')
                 build=binary.with_name(binary.name+'.build.json');build.write_text('{}')
@@ -214,44 +202,42 @@ class NativeHostMeasurementTests(unittest.TestCase):
                 source=root/'fixed.txt';source.write_bytes(b'fixture')
                 fixture_hash=b.content_hash({source.name:b.digest(source)})
                 work={name:{'fixture_sha256':fixture_hash,'input_files':[source]} for name in b.HOST_WORKLOADS}
-                family=[dict(workload=name,endpoint='workflow_seconds',units='seconds',
-                             estimand='arithmetic mean complete workflow elapsed') for name in b.HOST_WORKLOADS]
-                documents={}
-                for name in b.HOST_WORKLOADS:
-                    doc=absolute_case();doc['observations']=[];doc['acquisition_complete']=False
-                    doc['budget'].update(workload=name,**candidate)
-                    doc['budget_sha256']=b.content_hash(doc['budget'])
-                    identity=dict(fixture=fixture_hash,config=b.content_hash(b.HOST_LIMITS),seed='7',work=name,
-                                  build_settings=candidate['candidate_build'],shader_mode='not-applicable',
-                                  hardware=b.content_hash(machine))
-                    if failure=='work-identity':identity['fixture']='different'
-                    doc['protocol'].update(mandatory_endpoints=family,
-                        prospective_trials=[{'trial_id':str(i),'identity':identity.copy()} for i in range(12)])
-                    doc['protocol_sha256']=b.content_hash(doc['protocol'])
-                    documents[name]=doc
-                path=root/'plan.json';path.write_text(json.dumps(
-                    {'schema':'fgm-host-plan-v1','evaluations':documents,'parent':None}))
                 calls=[0]
                 def identity(_):
                     calls[0]+=1
-                    return dict(candidate,candidate_source='changed') if calls[0]==32 else candidate
+                    changed=(failure=='initial-source' and calls[0]==2 or
+                             failure=='final-source' and calls[0]==32)
+                    return dict(candidate,candidate_source='changed') if changed else candidate
                 def attempt(binary,name,work,directory,record,save):
+                    protocol=json.loads((root/'out/protocol.json').read_text())
+                    self.assertEqual(protocol['workloads'],list(b.HOST_WORKLOADS))
+                    self.assertEqual(protocol['repetitions'],6)
+                    retained=json.loads((root/'out/measurement.json').read_text())
+                    self.assertFalse(retained['complete'])
+                    self.assertFalse(retained['attempts'][-1]['complete'])
                     directory.mkdir()
                     record.update(complete=True,workflow_seconds=1.,peak_process_rss_bytes=1024,
                                   resource_violation=False,error=None)
+                    if failure=='fixture-change':source.write_bytes(b'changed')
                     save()
                 with mock.patch.object(b,'host_candidate_identity',side_effect=identity), \
                         mock.patch.object(b,'host_machine_identity',return_value=machine), \
                         mock.patch.object(b,'prepare_host_inputs',return_value=work), \
                         mock.patch.object(b,'run_host_attempt',side_effect=attempt) as run:
-                    with self.assertRaises(ValueError):b.execute_host(binary,root/'out',path)
-                retained=json.loads((root/'out/qualification.json').read_text())
-                self.assertFalse(retained['complete'])
-                self.assertEqual(run.call_count,0 if failure=='work-identity' else 30)
-                for document in retained['evaluations'].values():
-                    self.assertFalse(document['acquisition_complete'])
-                    self.assertTrue(document['acquisition_error'])
-                    self.assertEqual(performance.evaluate(document)['verdict'],'INCONCLUSIVE')
+                    if failure:
+                        with self.assertRaises(ValueError):b.execute_host(binary,root/'out')
+                    else:
+                        b.execute_host(binary,root/'out')
+                retained=json.loads((root/'out/measurement.json').read_text())
+                self.assertEqual(retained['complete'],failure is None)
+                self.assertEqual(run.call_count,{'initial-source':0,'fixture-change':1}.get(failure,30))
+                self.assertEqual((root/'out/native-build.json').read_bytes(),build.read_bytes())
+                self.assertEqual(retained['protocol_sha256'],b.content_hash(retained['protocol']))
+                self.assertEqual((root/'out/measurement.sha256').read_text().strip(),b.digest(root/'out/measurement.json'))
+                for row in retained['attempts']:
+                    path=root/'out'/f"{row['repeat']:02d}-{row['workload']}"/'trial.json'
+                    self.assertEqual(row['evidence_sha256'],b.digest(path))
+                if failure:self.assertTrue(retained['error'])
                 if failure=='final-source':
                     self.assertTrue(all(row['complete'] for row in retained['attempts']))
 
@@ -300,19 +286,26 @@ class NativeHostMeasurementTests(unittest.TestCase):
                         self.assertEqual(argv[argv.index(flag)+1],str(value))
 
     def test_native_failure_retains_partial_evidence(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);source=root/'input';source.write_text('input')
-            record={'error':None};saves=[]
-            def guard(argv,directory):
-                directory.mkdir();(directory/'run.log').write_text('partial output')
-                return {'complete':False,'error':'time limit','memory':[]}
-            with mock.patch.object(b,'guarded_run',side_effect=guard),self.assertRaises(RuntimeError):
-                b.run_host_attempt(root/'native','report-100',{'input':source,'expected':[]},
-                                   root/'attempt',record,lambda:saves.append(dict(record)))
-            self.assertFalse(record['complete'])
-            self.assertTrue(record['resource_violation'])
-            self.assertEqual((root/'attempt/guard-0/run.log').read_text(),'partial output')
-            self.assertTrue(saves[-1]['error'])
+        cases=(('time limit',-15,'partial output',True),
+               ('wired memory exceeded 3 GiB',-15,'partial output',True),
+               ('exit 2',2,'partial output\nresource_limit: scan budget exhausted\n',True),
+               ('exit 2',2,'error: other failure',False),
+               ('exit 1',1,'resource_limit: unexpected exit code',False),
+               ('exit 2',2,'error: resource_limit: embedded text',False))
+        for reason,exit_code,log,resource in cases:
+            with self.subTest(reason=reason,exit_code=exit_code,log=log),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);source=root/'input';source.write_text('input')
+                record={'error':None};saves=[]
+                def guard(argv,directory):
+                    directory.mkdir();(directory/'run.log').write_text(log)
+                    return {'complete':False,'error':reason,'exit_code':exit_code,'memory':[]}
+                with mock.patch.object(b,'guarded_run',side_effect=guard),self.assertRaises(RuntimeError):
+                    b.run_host_attempt(root/'native','report-100',{'input':source,'expected':[]},
+                                       root/'attempt',record,lambda:saves.append(dict(record)))
+                self.assertFalse(record['complete'])
+                self.assertEqual(record['resource_violation'],resource)
+                self.assertEqual((root/'attempt/guard-0/run.log').read_text(),log)
+                self.assertTrue(saves[-1]['error'])
 
     def test_independent_host_factors_and_identity_checks(self):
         oracle=b.host_oracle();scheme=oracle.schoolbook((1,1,1))

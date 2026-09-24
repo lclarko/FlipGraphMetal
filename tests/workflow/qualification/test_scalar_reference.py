@@ -316,10 +316,14 @@ class NativeTests(unittest.TestCase):
         verify(golden['mandatory_scheme'])
         self.assertEqual(policy.mandatory['rank'], golden['mandatory_scheme']['m'])
 
-    def test_frozen_boundary_trace_candidates(self):
-        # Candidate fixtures freeze complete observations for separate review.
-        # Passing this comparison alone does not approve their expected values.
+    def test_reviewed_boundary_traces(self):
+        # Replay checks reviewed expectations; it is not their independent derivation.
         golden = json.loads((HERE / 'golden/scalar_boundaries_v1.json').read_text())
+        self.assertEqual(golden['review']['status'], 'reviewed')
+        payload = {key:value for key,value in golden.items() if key != 'review'}
+        self.assertEqual(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                                   allow_nan=False).encode()).hexdigest(),
+                         golden['review']['payload_sha256'])
         spec = ROOT / 'docs/specifications/FGM-CONTRACT-v1.md'
         self.assertEqual(hashlib.sha256(spec.read_bytes()).hexdigest(), golden['specification_sha256'])
         receipt = json.loads((self.binary.parent / 'receipt.json').read_text())
@@ -544,8 +548,8 @@ class NativeTests(unittest.TestCase):
 
     def test_controlled_single_proposal_exhaustion_records_exact_draws(self):
         # Fixed public fixtures and seed witnesses. Expected proposal words are
-        # independently xorshift-replayed below; these are qualification cases,
-        # not newly promoted full-state goldens.
+        # independently xorshift-replayed below; additional seeds supplement
+        # the frozen full-state traces.
         for f2, seed, op, outcome, words in (
                 (False, 1, 'random', 'coefficient_rejection',
                  [2129252540,3677366947,316708785,46153978,1363130165]),

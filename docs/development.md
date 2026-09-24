@@ -64,7 +64,7 @@ Only selected schemes are admitted and exactly verified. Their source hashes, lo
 
 The scalar adapter performs bounded arithmetic calls in C++, including proposal retries and per-proposal outcomes. Its Python bridge checks build identities, transports ordered state and independently replays RNG records. The separate policy reference owns scheduling, captures and restarts; it does not reuse a production controller. Reviewed trace fixtures cover their named cases and are not a claim of complete controlled-kernel validation.
 
-The performance tools in `benchmarks/workflow` retain a pinned production baseline, qualify separate profiling builds and evaluate prospective paired comparisons or absolute budgets for new host workflows. Repeatability estimates describe measurement precision, not permitted regression. A budget must be approved independently of candidate observations. An incomplete comparison is not a pass; a measured slowdown within an approved tolerance remains a reported slowdown.
+The performance tools in `benchmarks/workflow` retain a pinned production baseline, qualify separate profiling builds and evaluate prospective paired comparisons for changed production paths. Repeatability estimates describe measurement precision, not permitted regression. Regression budgets must be approved independently of candidate observations; a measured slowdown within an approved tolerance remains a reported slowdown. New host utilities instead use repeatable timings, memory measurements and independently verified outputs to assess usability and scaling and establish a baseline. They have no preapproved absolute latency gate. Incomplete or incorrect runs remain failures.
 
 ## Search behavior
 

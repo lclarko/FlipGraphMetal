@@ -698,7 +698,12 @@ def run_host_attempt(binary, name, work, attempt, record, save):
             guard=guarded_run(['/usr/bin/time','-l','-p',*argv],guard_path)
             if not guard['complete']:
                 reason=str(guard.get('error'))
-                record['resource_violation']='time limit' in reason or 'wired memory exceeded' in reason
+                log_path=guard_path/'run.log'
+                native_resource=(guard.get('exit_code')==2 and log_path.is_file()
+                                 and any(line.startswith('resource_limit:')
+                                         for line in log_path.read_text().splitlines()))
+                record['resource_violation']=('time limit' in reason or
+                                              'wired memory exceeded' in reason or native_resource)
                 raise RuntimeError('incomplete guarded host process: '+reason)
             log=(guard_path/'run.log').read_text()
             elapsed=re.findall(r'^real\s+([0-9.]+)$',log,re.M)
@@ -736,116 +741,67 @@ def run_host_attempt(binary, name, work, attempt, record, save):
     return record
 
 
-def execute_host(binary, output, plan_path):
-    """Acquire six new trials only after explicit prospective approvals are present."""
-    import performance
+def execute_host(binary, output, repetitions=6):
+    """Record repeatable native workflows with exact checks, without performance verdicts."""
+    if type(repetitions) is not int or not 1 <= repetitions <= 12:
+        raise ValueError('host repetitions must be 1..12')
     binary=binary.resolve(strict=True)
-    plan_bytes=plan_path.read_bytes();plan=json.loads(plan_bytes)
-    if set(plan)!= {'schema','evaluations','parent'} or plan['schema']!='fgm-host-plan-v1':
-        raise ValueError('invalid host plan')
-    evaluations=plan['evaluations']
-    if set(evaluations)!=set(HOST_WORKLOADS):raise ValueError('host plan requires all five workloads')
     candidate=host_candidate_identity(binary)
-    hardware=host_machine_identity();hardware_hash=content_hash(hardware)
-    active=[]
-    for name,document in evaluations.items():
-        verdict=performance.evaluate(document)  # Validate declared prior evidence; launch nothing.
-        budget=document['budget']
-        if budget['status']!='approved' or budget['workload']!=name or any(budget[key]!=value for key,value in candidate.items()):
-            raise ValueError('host approval or candidate identity mismatch')
-        family=document['protocol']['mandatory_endpoints']
-        if (document['protocol']['alpha']!=.05 or len(family)!=5
-                or {item['workload'] for item in family}!=set(HOST_WORKLOADS)
-                or any(item['endpoint']!='workflow_seconds' for item in family)):
-            raise ValueError('host latency family must include all five endpoints at alpha .05')
-        if document['look']==1 and len(document['observations'])==6:
-            if verdict['verdict']!='PASS':raise ValueError('retained first look must pass or declare a second look')
-        else:
-            expected_count=0 if document['look']==1 else 6
-            if len(document['observations'])!=expected_count:
-                raise ValueError('host acquisition requires zero or six retained observations')
-            active.append(name)
-    if not active:raise ValueError('host plan has no pending acquisition')
-    if plan['parent'] is not None:
-        parent=plan['parent']
-        if set(parent)!= {'path','sha256'} or digest(Path(parent['path']))!=parent['sha256']:
-            raise ValueError('host parent receipt identity mismatch')
-        previous=json.loads(Path(parent['path']).read_text())
-        if previous.get('complete') is not True or previous.get('error'):
-            raise ValueError('host parent acquisition incomplete')
-        for name,document in evaluations.items():
-            if document['observations']!=previous['evaluations'][name]['observations']:
-                raise ValueError('host parent observations changed')
-            for index,observation in enumerate(document['observations']):
-                artifact=Path(parent['path']).parent/f'{index:02d}-{name}'/'trial.json'
-                if digest(artifact)!=observation['evidence_sha256']:
-                    raise ValueError('host parent trial evidence changed')
-    elif any(document['observations'] or document['look']!=1 for document in evaluations.values()):
-        raise ValueError('retained observations require a parent receipt')
+    hardware=host_machine_identity()
     output.mkdir(parents=True,exist_ok=False)
-    (output/'plan.json').write_bytes(plan_bytes)
     build_receipt=output/'native-build.json'
     build_receipt.write_bytes(binary.with_name(binary.name+'.build.json').read_bytes())
     binary_hash=digest(binary)
     if content_hash({'binary_sha256':binary_hash,'receipt_sha256':digest(build_receipt)})!=candidate['candidate_build']:
         raise ValueError('host build changed while retaining receipt')
-    work=prepare_host_inputs(ROOT,output/'inputs')
     harness={str(path.relative_to(ROOT)):digest(path) for path in
-             (Path(__file__),ROOT/'benchmarks/workflow/performance.py',ROOT/'benchmarks/metal/guard.py',
-              ROOT/'benchmarks/metal/application.py',ROOT/'tests/metal/verify.py',ROOT/'tests/workflow/identity_oracle.py')}
-    receipt=dict(schema='fgm-host-qualification-v1',complete=False,plan_sha256=hashlib.sha256(plan_bytes).hexdigest(),
-                 parent=plan['parent'],candidate=candidate,hardware=hardware,harness=harness,
-                 source_files=source_identity(ROOT),binary_sha256=binary_hash,
-                 build_receipt='native-build.json',build_receipt_sha256=digest(build_receipt),
+             (Path(__file__),ROOT/'benchmarks/metal/guard.py',ROOT/'benchmarks/metal/application.py',
+              ROOT/'tests/metal/verify.py',ROOT/'tests/workflow/identity_oracle.py')}
+    receipt=dict(schema='fgm-host-measurement-v1',complete=False,candidate=candidate,
+                 hardware=hardware,harness=harness,source_files=source_identity(ROOT),
+                 binary_sha256=binary_hash,build_receipt='native-build.json',
+                 build_receipt_sha256=digest(build_receipt),
                  revision=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip(),
-                 attempts=[],evaluations=copy.deepcopy(evaluations),performance_acceptance='NOT EVALUATED')
-    for name in active:
-        receipt['evaluations'][name].update(acquisition_complete=False,acquisition_error=None)
-    def save():write_json(output/'qualification.json',receipt)
+                 attempts=[],measurement_scope='descriptive host baseline; no statistical performance verdict')
+    def save():write_json(output/'measurement.json',receipt)
     save()
     try:
-        for name,document in receipt['evaluations'].items():
-            for trial in document['protocol']['prospective_trials']:
-                identity=trial['identity']
-                expected=dict(fixture=work[name]['fixture_sha256'],config=content_hash(HOST_LIMITS),seed='7',work=name,
-                              build_settings=candidate['candidate_build'],shader_mode='not-applicable',hardware=hardware_hash)
-                if identity!=expected:raise ValueError('host prospective input/configuration identity mismatch')
-        for offset in range(6):
+        work=prepare_host_inputs(ROOT,output/'inputs')
+        clock=time.get_clock_info('monotonic')
+        protocol=dict(schema='fgm-host-measurement-protocol-v1',workloads=list(HOST_WORKLOADS),
+                      repetitions=repetitions,ordering='repeat then listed workload',seed=7,
+                      native_resource_limits=HOST_LIMITS,fixtures={name:item['fixture_sha256'] for name,item in work.items()},
+                      clock={'implementation':clock.implementation,'resolution':clock.resolution,'monotonic':clock.monotonic},
+                      timings={'native_process_seconds':'sum of child process elapsed times reported by time -p',
+                               'independent_verification_seconds':'output reading, exact tensor and identity checks',
+                               'workflow_seconds':'monotonic elapsed through all native commands and independent checks'},
+                      candidate=candidate,hardware=hardware,harness=harness)
+        write_json(output/'protocol.json',protocol)
+        receipt.update(protocol=protocol,protocol_sha256=content_hash(protocol))
+        save()
+        for index in range(repetitions):
             for name in HOST_WORKLOADS:
-                if name not in active:continue
-                index=offset+(0 if receipt['evaluations'][name]['look']==1 else 6)
                 if host_candidate_identity(binary)!=candidate:raise ValueError('host source/build changed')
-                document=receipt['evaluations'][name]
                 if content_hash({path.name:digest(path) for path in work[name]['input_files']})!=work[name]['fixture_sha256']:
                     raise ValueError('host fixture changed')
-                record={'workload':name,'trial_id':document['protocol']['prospective_trials'][index]['trial_id'],
-                        'complete':False,'error':None}
+                record={'workload':name,'repeat':index,'complete':False,'error':None}
                 receipt['attempts'].append(record);save()
                 attempt=output/f'{index:02d}-{name}'
                 try:run_host_attempt(binary,name,work[name],attempt,record,save)
                 finally:
-                    if record.get('peak_process_rss_bytes',0)>document['budget']['peak_process_rss_limit']:
-                        record['resource_violation']=True
-                    write_json(attempt/'trial.json',record)
-                    document['observations'].append(dict(trial_id=record['trial_id'],complete=record['complete'],
-                        value=record.get('workflow_seconds'),peak_process_rss_bytes=record.get('peak_process_rss_bytes'),
-                        **candidate,identity=document['protocol']['prospective_trials'][index]['identity'],
-                        evidence_sha256=digest(attempt/'trial.json'),resource_violation=record.get('resource_violation',False),
-                        error=record['error']))
+                    if attempt.is_dir():
+                        write_json(attempt/'trial.json',record)
+                        record['evidence_sha256']=digest(attempt/'trial.json')
                     save()
-                if record['resource_violation']:raise RuntimeError('host process memory budget exceeded')
                 if content_hash({path.name:digest(path) for path in work[name]['input_files']})!=work[name]['fixture_sha256']:
                     raise ValueError('host fixture changed')
         if host_candidate_identity(binary)!=candidate:raise ValueError('host source/build changed')
-        for name in active:receipt['evaluations'][name]['acquisition_complete']=True
         receipt['complete']=True
     except Exception as error:
         receipt['error']=str(error)
-        for name in active:
-            receipt['evaluations'][name].update(acquisition_complete=False,acquisition_error=str(error))
         raise
     finally:
-        save();(output/'qualification.sha256').write_text(digest(output/'qualification.json')+'\n')
+        save();(output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
     return receipt
 
 
@@ -855,7 +811,7 @@ def main():
     operation.add_argument('--freeze', type=Path, metavar='NEW_DIRECTORY',
                            help='Prepare pinned source only; no build or GPU execution')
     operation.add_argument('--source', type=Path, help='Frozen production source to measure')
-    operation.add_argument('--host', type=Path, metavar='NATIVE_BINARY', help='Acquire approved native-host workflow trials')
+    operation.add_argument('--host', type=Path, metavar='NATIVE_BINARY', help='Measure native-host workflows with independent correctness checks')
     operation.add_argument('--qualify-profile', type=Path, metavar='PROFILE_DIRECTORY')
     operation.add_argument('--summarize', type=Path, metavar='QUALIFICATION_JSON')
     parser.add_argument('--baseline', type=Path, help='Frozen baseline directory for profile qualification')
@@ -866,11 +822,11 @@ def main():
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
     if args.host is not None:
-        if args.output is None or args.protocol is None:
-            parser.error('--host requires --protocol and --output')
-        if any(value is not None for value in (args.rows,args.repetitions,args.baseline,args.production_run)):
-            parser.error('--host uses the frozen plan only')
-        execute_host(args.host,args.output,args.protocol)
+        if args.output is None:
+            parser.error('--host requires --output')
+        if any(value is not None for value in (args.rows,args.protocol,args.baseline,args.production_run)):
+            parser.error('--host uses fixed public workloads and accepts only --output and --repetitions')
+        execute_host(args.host,args.output,args.repetitions if args.repetitions is not None else 6)
         return
     if args.freeze is not None:
         if any(value is not None for value in (args.output, args.protocol, args.rows, args.repetitions, args.baseline, args.production_run)):

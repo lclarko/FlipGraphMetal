@@ -1,4 +1,4 @@
-"""Evaluate retained measurements against prospectively approved budgets.
+"""Evaluate retained paired measurements against prospectively approved budgets.
 
 No measurements are launched. Schema version 1 deliberately accepts no exclusions.
 The field constants describe the required schema. Receipts hash the entire input,
@@ -102,7 +102,7 @@ def t_critical(tail, df):
 # Family error allocation: https://www.itl.nist.gov/div898/handbook/prc/section4/prc463.htm
 def interval(values, alpha):
     if len(values) < 2:
-        raise ValueError('at least two observations required')
+        raise ValueError('at least two pairs required')
     center = statistics.mean(values)
     radius = t_critical(alpha/2, len(values)-1)*statistics.stdev(values)/math.sqrt(len(values))
     return center-radius, center+radius
@@ -115,162 +115,7 @@ MATCH_KEYS = 'fixture config seed work build_settings shader_mode hardware'
 ROW_KEYS = 'pair_id order complete baseline candidate baseline_source candidate_source baseline_build candidate_build baseline_identity candidate_identity resource_violation error'
 
 
-ABSOLUTE_BUDGET_KEYS = 'version workload endpoint units estimand limit status approval rationale candidate_source candidate_build peak_process_rss_limit'
-ABSOLUTE_ENDPOINT_KEYS = 'workload endpoint units estimand'
-ABSOLUTE_PROTOCOL_KEYS = 'version alpha mandatory_endpoints prospective_trials precision_criterion looks assumptions protocol_id'
-ABSOLUTE_ROW_KEYS = 'trial_id complete value peak_process_rss_bytes candidate_source candidate_build identity evidence_sha256 resource_violation error'
-
-
-def evaluate_absolute(document):
-    """Assess independent complete workflows against absolute latency/resource budgets."""
-    exact(document, 'version mode budget budget_sha256 protocol protocol_sha256 observations look previous precision_assessment acquisition_complete acquisition_error', 'absolute document')
-    if document['version'] != 2 or document['mode'] != 'absolute':
-        raise ValueError('unsupported absolute version or mode')
-    budget, protocol = document['budget'], document['protocol']
-    exact(budget, ABSOLUTE_BUDGET_KEYS, 'absolute budget')
-    exact(protocol, ABSOLUTE_PROTOCOL_KEYS, 'absolute protocol')
-    if document['budget_sha256'] != digest(budget) or document['protocol_sha256'] != digest(protocol):
-        raise ValueError('budget or protocol content hash mismatch')
-    integer(budget['version'], 'budget version')
-    for field in ('workload', 'endpoint', 'rationale', 'candidate_source', 'candidate_build'):
-        text(budget[field], field)
-    if budget['units'] != 'seconds' or budget['estimand'] != 'arithmetic mean complete workflow elapsed':
-        raise ValueError('absolute mode requires complete-workflow seconds')
-    number(budget['limit'], 'latency limit', True)
-    integer(budget['peak_process_rss_limit'], 'process memory limit')
-    if budget['status'] not in ('approved', 'unapproved'):
-        raise ValueError('invalid approval status')
-    if budget['status'] == 'approved':
-        exact(budget['approval'], 'reference version', 'approval')
-        text(budget['approval']['reference'], 'approval reference')
-        text(budget['approval']['version'], 'approval version')
-    elif budget['approval'] is not None:
-        raise ValueError('unapproved budget must not claim approval')
-    if protocol['version'] != 2 or protocol['looks'] != [6, 12]:
-        raise ValueError('absolute protocol requires version 2 and looks [6,12]')
-    number(protocol['alpha'], 'alpha', True)
-    if not 0 < protocol['alpha'] < 1:
-        raise ValueError('invalid alpha')
-    endpoints = protocol['mandatory_endpoints']
-    if not isinstance(endpoints, list) or not endpoints:
-        raise ValueError('mandatory endpoints absent')
-    names = set()
-    for endpoint in endpoints:
-        exact(endpoint, ABSOLUTE_ENDPOINT_KEYS, 'absolute endpoint')
-        for key, value in endpoint.items():
-            text(value, key)
-        if endpoint['units'] != 'seconds' or endpoint['estimand'] != budget['estimand']:
-            raise ValueError('unsupported absolute endpoint')
-        name = (endpoint['workload'], endpoint['endpoint'])
-        if name in names:
-            raise ValueError('duplicate endpoint')
-        names.add(name)
-    if {key: budget[key] for key in ABSOLUTE_ENDPOINT_KEYS.split()} not in endpoints:
-        raise ValueError('endpoint absent from mandatory family')
-    prospective = protocol['prospective_trials']
-    if not isinstance(prospective, list) or len(prospective) != 12:
-        raise ValueError('exactly twelve prospective trials required')
-    ids = set()
-    for row in prospective:
-        exact(row, 'trial_id identity', 'prospective trial')
-        text(row['trial_id'], 'trial id')
-        if row['trial_id'] in ids:
-            raise ValueError('duplicate prospective trial')
-        ids.add(row['trial_id'])
-        exact(row['identity'], MATCH_KEYS, 'work identity')
-        for key, value in row['identity'].items():
-            text(value, key)
-    text(protocol['protocol_id'], 'protocol id')
-    text(protocol['precision_criterion'], 'precision criterion')
-    if type(protocol['assumptions']) is not bool:
-        raise ValueError('assumptions must be explicitly assessed')
-    precision = document['precision_assessment']
-    exact(precision, 'adequate evidence', 'precision assessment')
-    if type(precision['adequate']) is not bool:
-        raise ValueError('precision must be explicitly assessed')
-    text(precision['evidence'], 'precision evidence')
-    if type(document['look']) is not int or document['look'] not in (1, 2):
-        raise ValueError('only two looks allowed')
-    rows = document['observations']
-    if not isinstance(rows, list) or len(rows) > protocol['looks'][document['look']-1]:
-        raise ValueError('invalid observation count')
-    if document['look'] == 1:
-        if document['previous'] is not None:
-            raise ValueError('first look has no previous receipt')
-    else:
-        previous = document['previous']
-        exact(previous, 'verdict budget_sha256 protocol_sha256 observations_sha256 precision_assessment acquisition_complete acquisition_error', 'previous')
-        if (previous['verdict'] != 'INCONCLUSIVE' or previous['budget_sha256'] != document['budget_sha256']
-                or previous['protocol_sha256'] != document['protocol_sha256']
-                or previous['observations_sha256'] != digest(rows[:6])):
-            raise ValueError('second look requires unchanged inconclusive first six trials')
-        first = dict(document, look=1, previous=None, observations=rows[:6],
-                     precision_assessment=previous['precision_assessment'],
-                     acquisition_complete=previous['acquisition_complete'],
-                     acquisition_error=previous['acquisition_error'])
-        if evaluate_absolute(first)['verdict'] != 'INCONCLUSIVE':
-            raise ValueError('first six trials do not independently yield INCONCLUSIVE')
-    if type(document['acquisition_complete']) is not bool:
-        raise ValueError('acquisition completion must be explicit')
-    if document['acquisition_error'] is not None:
-        text(document['acquisition_error'], 'acquisition error')
-    values, incomplete, violation = [], False, False
-    for index, row in enumerate(rows):
-        exact(row, ABSOLUTE_ROW_KEYS, 'absolute observation')
-        planned = prospective[index]
-        if row['trial_id'] != planned['trial_id'] or row['identity'] != planned['identity']:
-            raise ValueError('observation differs from prospective work/order')
-        for key in ('candidate_source', 'candidate_build'):
-            if row[key] != budget[key]:
-                raise ValueError('candidate identity mismatch')
-        text(row['evidence_sha256'], 'evidence digest')
-        if type(row['complete']) is not bool or type(row['resource_violation']) is not bool:
-            raise ValueError('invalid completion/resource status')
-        if row['error'] is not None:
-            text(row['error'], 'error')
-        if row['value'] is not None:
-            number(row['value'], 'elapsed time', True)
-        if row['peak_process_rss_bytes'] is not None:
-            integer(row['peak_process_rss_bytes'], 'observed process memory', 0)
-            violation |= row['peak_process_rss_bytes'] > budget['peak_process_rss_limit']
-        violation |= row['resource_violation']
-        if row['complete'] and (row['value'] is None or row['peak_process_rss_bytes'] is None):
-            raise ValueError('complete observation missing measurement')
-        incomplete |= not row['complete'] or row['error'] is not None
-        if row['complete'] and row['error'] is None:
-            values.append(row['value'])
-    result = dict(version=2, mode='absolute', input_sha256=digest(document),
-                  acquisition_complete=document['acquisition_complete'], acquisition_error=document['acquisition_error'],
-                  budget_sha256=digest(budget), protocol_sha256=digest(protocol),
-                  observations_sha256=digest(rows), look=document['look'],
-                  trials_retained=len(rows), verdict='INCONCLUSIVE', interval=None,
-                  reason='', resource_violation=violation,
-                  budget_readiness=budget['status']=='approved', family_size=len(endpoints),
-                  precision_assessment=precision, precision_criterion=protocol['precision_criterion'])
-    if violation:
-        result.update(verdict='FAIL', reason='absolute resource budget violated')
-    elif budget['status'] != 'approved':
-        result['reason'] = 'practical budget unapproved'
-    elif not document['acquisition_complete'] or document['acquisition_error'] is not None:
-        result['reason'] = 'incomplete or failed acquisition'
-    elif incomplete or len(rows) != protocol['looks'][document['look']-1]:
-        result['reason'] = 'incomplete or insufficient retained observations'
-    elif not protocol['assumptions'] or not precision['adequate']:
-        result['reason'] = 'unresolved assumptions or prospective precision criterion'
-    else:
-        alpha = protocol['alpha']/(len(endpoints)*len(protocol['looks']))
-        lower, upper = interval(values, alpha)
-        result.update(verdict='PASS' if upper <= budget['limit'] else 'FAIL' if lower > budget['limit'] else 'INCONCLUSIVE',
-                      interval=[lower, upper], mean=statistics.mean(values),
-                      approved_limit=budget['limit'], endpoint_alpha=alpha,
-                      reason='absolute mean interval compared with approved workload budget')
-    result['receipt_sha256'] = digest(result)
-    return result
-
-
 def evaluate(document):
-    if isinstance(document, dict) and document.get('version') == 2:
-        return evaluate_absolute(document)
     exact(document, 'version budget budget_sha256 protocol protocol_sha256 observations look previous precision_assessment', 'document')
     if document['version'] != 1:
         raise ValueError('unsupported document version')
