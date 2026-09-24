@@ -881,6 +881,8 @@ static void select(const std::map<std::string,std::string>&args,Output&output) {
     if(!manifestFile)throw std::runtime_error("cannot open manifest");
     HashBuffer manifestBuffer(manifestFile.rdbuf());
     std::istream input(&manifestBuffer);
+    // Preserve resource exceptions from the counting stream buffer.
+    input.exceptions(std::ios::badbit);
     if(!input)throw std::runtime_error("cannot read collection manifest");
     std::string manifestDigest=fileHash(manifest);
     std::string line;
@@ -944,6 +946,8 @@ static void select(const std::map<std::string,std::string>&args,Output&output) {
     });
     for(auto&e:selected) {
         auto &row=e.row;
+        auto domain=row.at("domain").str();
+        if(domain!="ZT"&&domain!="F2")throw std::runtime_error("selected manifest domain must be ZT or F2");
         fs::path relative=row.at("path").str();
         if(relative.empty()||relative.is_absolute())throw std::runtime_error("source path must be relative");
         for(const auto&p:relative)if(p=="..")throw std::runtime_error("source traversal forbidden");
@@ -953,7 +957,7 @@ static void select(const std::map<std::string,std::string>&args,Output&output) {
         regularInput(path,sourceFormat!="jsonl"&&sourceFormat!="json-array");
         auto originalHash=fileHash(path);
         if(originalHash!=row.at("sha256").str())throw std::runtime_error("source artifact hash mismatch");
-        auto format=row.at("format").str(),domain=row.at("domain").str();
+        auto format=row.at("format").str();
         uint64_t wanted=0;
         if(row.has("locator")) {
             auto&loc=row.at("locator");

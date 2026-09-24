@@ -206,6 +206,28 @@ class SchemeToolTests(unittest.TestCase):
         self.assertEqual(run.returncode,2)
         self.assertFalse(output.exists())
 
+    def test_selection_exact_manifest_scan_limit_is_resource_failure(self):
+        manifest, _ = self.collection(['selected'])
+        output = self.root/'selection'
+        run = subprocess.run(
+            [str(BINARY), 'select', '--input', str(manifest), '--output', str(output),
+             '--count', '1', '--scan-bytes', str(manifest.stat().st_size)],
+            capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2, run.stderr)
+        self.assertIn('resource_limit:', run.stderr)
+        self.assertFalse(output.exists())
+
+    def test_selected_manifest_requires_nonempty_domain(self):
+        manifest, rows = self.collection(['selected'])
+        rows[0]['domain'] = ''
+        manifest.write_text(json.dumps(rows[0])+'\n')
+        output = self.root/'selection'
+        run = subprocess.run(
+            [str(BINARY), 'select', '--input', str(manifest), '--output', str(output),
+             '--count', '1'], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertFalse(output.exists())
+
     def test_legacy_json_and_row_major_orientation(self):
         import sys
         sys.path.insert(0,str(ROOT/'tests/metal'))
