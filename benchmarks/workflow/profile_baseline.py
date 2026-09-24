@@ -8,12 +8,11 @@ qualification before they may support performance conclusions.
 import argparse
 import difflib
 import hashlib
-import io
 import json
-from pathlib import Path, PurePosixPath
-import tarfile
+from pathlib import Path
 
-BASELINE = '2f91a882dab71cd94de1897f397fe96271920797'
+from baseline import BASELINE, archive_files, extract_source
+
 RUNTIME = 'src/metal/runtime.mm'
 
 
@@ -97,25 +96,6 @@ def instrument(source):
     return source
 
 
-def archive_files(data):
-    result = {}
-    with tarfile.open(fileobj=io.BytesIO(data), mode='r:') as archive:
-        for member in archive.getmembers():
-            path = PurePosixPath(member.name)
-            if (path.is_absolute() or '..' in path.parts or str(path) != member.name.rstrip('/')
-                    or not path.parts or path.parts[0] in ('build', '.git')):
-                raise ValueError('unsafe or non-source archive path')
-            if member.isdir():
-                continue
-            if not member.isfile() or member.name in result:
-                raise ValueError('archive contains links, special files or duplicate entries')
-            stream = archive.extractfile(member)
-            result[member.name] = (stream.read(), member.mode & 0o777)
-    if RUNTIME not in result or 'makefile' not in result:
-        raise ValueError('missing required baseline sources')
-    return result
-
-
 def prepare(baseline, output):
     baseline, output = Path(baseline), Path(output)
     if output.resolve().is_relative_to(baseline.resolve()):
@@ -140,17 +120,13 @@ def prepare(baseline, output):
     # Check all prerequisites before creating the new directory. Never copy builds.
     output.mkdir(parents=True, exist_ok=False)
     source = output/'source'
-    source.mkdir()
-    for name, (content, mode) in files.items():
-        path = source/name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('xb') as stream:
-            stream.write(content)
-        path.chmod(mode)
+    extract_source(files, source)
     (output/'runtime.patch').write_bytes(patch)
     receipt = dict(schema='fgm-baseline-profile-v1', baseline_commit=BASELINE,
                    baseline_archive_sha256=sha(data), freeze_sha256=sha(freeze_bytes),
-                   generator_sha256=sha(Path(__file__).read_bytes()), patch_sha256=sha(patch),
+                   generator_sha256=sha(Path(__file__).read_bytes()),
+                   archive_helper_sha256=sha(Path(__file__).with_name('baseline.py').read_bytes()),
+                   patch_sha256=sha(patch),
                    original_files=original_inventory,
                    diagnostic_files={name:sha(value[0]) for name,value in sorted(files.items())},
                    build_cwd=str(source.resolve()),

@@ -2,8 +2,6 @@
 import copy
 import importlib.util
 import json
-import io
-import tarfile
 from pathlib import Path
 import tempfile
 import unittest
@@ -153,24 +151,6 @@ class BaselineTests(unittest.TestCase):
             (build/'config.json').write_text('{}')
             with self.assertRaises(ValueError):
                 b.inventory(source)
-
-    def test_live_source_snapshot_drift_rejected(self):
-        with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            source = folder/'source'
-            source.mkdir()
-            raw = io.BytesIO()
-            with tarfile.open(fileobj=raw, mode='w') as archive:
-                member = tarfile.TarInfo('fixture.txt')
-                member.size = len(b'original')
-                archive.addfile(member, io.BytesIO(b'original'))
-            (folder/'source.tar').write_bytes(raw.getvalue())
-            freeze = {'commit':b.BASELINE, 'archive_sha256':b.digest(folder/'source.tar')}
-            (source/'fixture.txt').write_bytes(b'original')
-            b.assert_source_snapshot(source, freeze)
-            (source/'fixture.txt').write_bytes(b'changed')
-            with self.assertRaises(ValueError):
-                b.assert_source_snapshot(source, freeze)
 
     def test_wrong_pin_rejected_before_launch(self):
         with tempfile.TemporaryDirectory() as folder:

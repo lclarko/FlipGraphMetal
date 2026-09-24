@@ -1,8 +1,8 @@
 """Compare the independent host engine to the native standard engine."""
+import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).parent))
 from host_rng import HostRNG,U64
@@ -15,17 +15,9 @@ class HostRNGTests(unittest.TestCase):
                          [14514284786278117030,4620546740167642908,13109570281517897720])
 
     def test_native_standard_engine(self):
-        code='''#include <random>
-#include <iostream>
-int main() { for (unsigned s : {0u,7u,4294967295u}) {
-std::mt19937_64 r(s); for (int i=0;i<700;i++) std::cout << r() << "\\n";
-} }
-'''
-        with tempfile.TemporaryDirectory() as directory:
-            source=Path(directory)/'rng.cpp'; exe=Path(directory)/'rng'
-            source.write_text(code)
-            subprocess.run(['xcrun','clang++','-std=c++17',str(source),'-o',str(exe)],check=True,capture_output=True)
-            actual=list(map(int,subprocess.check_output([str(exe)],text=True).split()))
+        binary = Path(os.environ.get('FGM_HOST_RNG_DRIVER',
+                                     Path(__file__).resolve().parents[2]/'build/workflow/test_host_rng'))
+        actual = list(map(int, subprocess.check_output([str(binary)], text=True, timeout=5).split()))
         expected=[]
         for seed in (0,7,(1<<32)-1):
             r=HostRNG(seed);expected.extend(r.next() for _ in range(700))

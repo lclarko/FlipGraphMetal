@@ -62,6 +62,14 @@ def main():
     build_receipt = binary.with_name(binary.name + ".build.json")
     if not binary.is_file() or not build_receipt.is_file():
         raise RuntimeError("make scheme-tool first")
+    drivers = {
+        "FGM_RUN_CONFIG_DRIVER": ROOT / "build/workflow/test_run_config",
+        "FGM_HOST_RNG_DRIVER": ROOT / "build/workflow/test_host_rng",
+    }
+    driver_artifacts = [path for binary_path in drivers.values()
+                        for path in (binary_path, binary_path.with_name(binary_path.name + ".build.json"))]
+    if any(not path.is_file() for path in driver_artifacts):
+        raise RuntimeError("make test-workflow or qualify-workflow to build native test drivers")
     directory = ROOT / "build/parity"
     directory.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="host-check-", dir=directory))
@@ -72,6 +80,7 @@ def main():
         "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "scheme_tool_sha256": digest(binary),
         "build_receipt_sha256": digest(build_receipt),
+        "native_test_artifacts": {str(path.relative_to(ROOT)): digest(path) for path in driver_artifacts},
         "sources": source_inventory(),
         "specification_sha256": digest(ROOT / "docs/specifications/FGM-CONTRACT-v1.md"),
     }
@@ -84,6 +93,7 @@ def main():
     save()
     try:
         environment = dict(os.environ, FGM_SCHEME_TOOL=str(binary))
+        environment.update({name: str(path) for name, path in drivers.items()})
         reference = None
         if args.qualification:
             reference = build(attempt / "scalar-reference")
@@ -113,6 +123,8 @@ def main():
             raise RuntimeError("native tool changed during tests")
         if digest(build_receipt) != receipt["build_receipt_sha256"]:
             raise RuntimeError("native build receipt changed during tests")
+        if any(digest(ROOT / name) != expected for name, expected in receipt["native_test_artifacts"].items()):
+            raise RuntimeError("native test driver or build receipt changed during tests")
         if source_inventory() != receipt["sources"]:
             raise RuntimeError("test inputs changed during execution")
         receipt["complete"] = True

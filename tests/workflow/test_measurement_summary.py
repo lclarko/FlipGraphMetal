@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec=importlib.util.spec_from_file_location('summary',Path(__file__).resolve().parents[2]/'benchmarks/workflow/summarize_baseline.py')
+spec=importlib.util.spec_from_file_location('summary',Path(__file__).resolve().parents[2]/'benchmarks/workflow/baseline.py')
 summary=importlib.util.module_from_spec(spec);spec.loader.exec_module(summary)
 
 
@@ -16,7 +16,7 @@ class SummaryTests(unittest.TestCase):
             for key in ('gpu_work_seconds','gpu_all_seconds','process_seconds','workflow_seconds','verification_seconds','peak_process_rss_bytes','peak_system_wired_bytes'):
                 row[key]=1+i*.01
             rows.append(row)
-        return {'complete':True,'attempts':rows,'protocol':{'mandatory_rows':['test']},'protocol_sha256':'test'}
+        return {'schema':'fgm-baseline-qualification-v1','complete':True,'attempts':rows,'protocol':{'mandatory_rows':['test']},'protocol_sha256':'test'}
 
     def call(self,data):
         with tempfile.TemporaryDirectory() as d:

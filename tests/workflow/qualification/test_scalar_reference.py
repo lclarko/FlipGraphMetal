@@ -76,15 +76,7 @@ def f2_boundary_fixture(width):
     if width == 33:
         blocks = [fixture(True) for _ in range(3)] + [naive((3,2,3), True)]
     elif width == 64:
-        values = list(map(int, (ROOT / 'tests/metal/fixtures/strassen_4x4.txt').read_text().split()))
-        a,b,c,m = values[:4]
-        block = {'n':[a,b,c], 'm':m, 'z2':True}
-        offset = 4
-        for key,size in zip('uvw',(a*b,b*c,c*a)):
-            block[key] = [[v % 2 for v in values[offset+r*size:offset+(r+1)*size]] for r in range(m)]
-            offset += m*size
-        if offset != len(values):
-            raise ValueError('fixture token count')
+        block = fixture(True, 4)
         blocks = [block for _ in range(4)]
     else:
         raise ValueError('only declared boundary widths33 and64')

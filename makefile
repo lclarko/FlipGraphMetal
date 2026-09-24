@@ -111,8 +111,16 @@ build/metal/scheme_tool: $(WORKFLOW_SOURCES) makefile scripts/build_config.py $(
 	@mkdir -p build/metal
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) src/workflow/scheme_tool.cpp -o $@
 
-test-workflow: scheme-tool
+WORKFLOW_TEST_DRIVERS = build/workflow/test_run_config build/workflow/test_host_rng
+
+build/workflow/test_run_config: tests/workflow/run_config.cpp src/workflow/run_config.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow tests/workflow/run_config.cpp -o $@
+
+build/workflow/test_host_rng: tests/workflow/host_rng.cpp makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) tests/workflow/host_rng.cpp -o $@
+
+test-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
 	python3 tests/workflow/run.py
 
-qualify-workflow: scheme-tool
+qualify-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
 	python3 tests/workflow/run.py --qualification

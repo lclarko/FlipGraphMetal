@@ -1,9 +1,8 @@
 """Host-only native policy-settings contracts; no search dispatch is available."""
-import hashlib
+import os
 import json
 from pathlib import Path
 import subprocess
-import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,28 +19,10 @@ def settings():
 class RunConfigTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        parent = ROOT/'build/parity'
-        parent.mkdir(parents=True, exist_ok=True)
-        cls.directory = Path(tempfile.mkdtemp(prefix='run-config-', dir=parent))
-        cls.binary = cls.directory/'run_config'
-        sources = [ROOT/'src/workflow/json.h', ROOT/'src/workflow/run_config.h',
-                   ROOT/'tests/workflow/run_config.cpp']
-        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
-        receipt = {'complete': False, 'gpu_execution': 'NOT RUN',
-                   'sources': {str(path.relative_to(ROOT)): digest(path) for path in sources}}
-        command = ['xcrun', 'clang++', '-std=c++17', '-O2',
-                   '-I'+str(ROOT/'src/workflow'), str(sources[-1]), '-o', str(cls.binary)]
-        receipt['command'] = command
-        receipt['compiler'] = subprocess.check_output(['xcrun', 'clang++', '--version'], text=True)
-        try:
-            with (cls.directory/'compile.log').open('xb') as log:
-                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=45)
-            if any(digest(path) != receipt['sources'][str(path.relative_to(ROOT))] for path in sources):
-                raise RuntimeError('configuration sources changed during compilation')
-            receipt['executable_sha256'] = digest(cls.binary)
-            receipt['complete'] = True
-        finally:
-            (cls.directory/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
+        cls.binary = Path(os.environ.get('FGM_RUN_CONFIG_DRIVER',
+                                         ROOT/'build/workflow/test_run_config'))
+        if not cls.binary.is_file():
+            raise RuntimeError('build native test_run_config before running its tests')
 
     def invoke(self, value, domain='ZT', helper=None):
         command = [str(self.binary), domain] + ([] if helper is None else [helper])
