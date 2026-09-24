@@ -1,0 +1,55 @@
+{
+  "model": "scripted-arithmetic-policy-reference-v1",
+  "specification": "FGM-CONTRACT-v1",
+  "specification_sha256": "b0ecaf3ae1e6da9eb0cfb36bee4454262be5f414eec15e3251f51af5bda54d34",
+  "arithmetic_reference": "9ea5bfc144b528184c32c178cae0b49bc60e8e3d",
+  "evidence_scope": "Hand-written controller expectations. Arithmetic outcomes are supplied, not calculated. No complete scalar or GPU equivalence claim.",
+  "derivation": "Seed 2654435769 at worker zero repairs XOR state zero to one. First xorshift words are 270369 and 67634689. Fixed interval one still consumes one word. Applied target and lifetime exhaustion prevent all later decision draws. Blocked recovery draws only its completed-event replacement interval.",
+  "cases": [
+    {
+      "name": "starting_target_before_rng",
+      "config": {"seed": 2654435769, "anchor": 5, "target_rank": 5},
+      "parent_rank": 5,
+      "flips": [],
+      "steps": 0,
+      "expected": {"rank": 5, "best": 5, "countdown": null, "rng": null, "draws": 0, "flips": 0, "controls": 0, "terminal": "existing_target_pending", "mandatory": null, "optional": []},
+      "event_rng": [["existing_target_pending", null]]
+    },
+    {
+      "name": "first_countdown_before_any_flip",
+      "config": {"seed": 2654435769, "anchor": 5},
+      "parent_rank": 5,
+      "flips": [],
+      "steps": 0,
+      "expected": {"rank": 5, "best": 5, "countdown": 1, "rng": 270369, "draws": 1, "flips": 0, "controls": 0, "terminal": null, "mandatory": null},
+      "event_rng": [["initial_countdown", 270369]]
+    },
+    {
+      "name": "last_flip_target_before_budget_stop",
+      "config": {"seed": 2654435769, "mode": "rank-reduction", "anchor": 5, "target_rank": 4, "flip_budget": 1, "control_budget": 1},
+      "parent_rank": 5,
+      "flips": [{"outcome": "applied", "rank": 4}],
+      "steps": 1,
+      "expected": {"rank": 4, "best": 4, "countdown": 0, "rng": 270369, "draws": 1, "flips": 1, "controls": 1, "terminal": "target_pending", "mandatory": {"rank": 4, "operation": "flip", "control": 1}, "optional": [{"rank": 4, "operation": "flip", "control": 1}], "optional_encounters": 1, "optional_drops": 0},
+      "event_rng": [["initial_countdown", 270369], ["flip", 270369], ["observed", 270369], ["target_pending", 270369]]
+    },
+    {
+      "name": "last_flip_no_optional_draws",
+      "config": {"seed": 2654435769, "anchor": 5, "flip_budget": 1},
+      "parent_rank": 5,
+      "flips": [{"outcome": "applied", "rank": 5}],
+      "steps": 1,
+      "expected": {"rank": 5, "best": 5, "countdown": 0, "rng": 270369, "draws": 1, "flips": 1, "controls": 1, "terminal": "budget_exhausted"},
+      "event_rng": [["initial_countdown", 270369], ["flip", 270369], ["observed", 270369], ["budget_exhausted", 270369]]
+    },
+    {
+      "name": "fully_blocked_recovery_redraw",
+      "config": {"seed": 2654435769, "anchor": 8, "dimensions": [2, 2, 2], "excursion": 0},
+      "parent_rank": 8,
+      "flips": [{"outcome": "unsuccessful"}],
+      "steps": 1,
+      "expected": {"rank": 8, "best": 8, "countdown": 1, "rng": 67634689, "draws": 2, "flips": 1, "controls": 1, "terminal": null, "pending_restart": true, "mandatory": null, "optional_encounters": 0},
+      "event_rng": [["initial_countdown", 270369], ["flip", 270369], ["rank_blocked", 270369], ["event_countdown", 67634689], ["restart_requested", 67634689]]
+    }
+  ]
+}

@@ -65,6 +65,8 @@ make smoke-metal
 
 These targets require Python 3.9+ and access to an actual Apple GPU. They retain isolated outputs and bounded execution logs. See the [testing guidance](docs/development.md#testing) before running other GPU work concurrently.
 
+The optional host-only `scheme_tool` verifies, converts, analyzes and selects signed/F2 schemes from read-only collections. Build it with `make scheme-tool`; see [interchange and analysis](docs/development.md#scheme-interchange-and-analysis) for formats and resource limits.
+
 ## Scope and future work
 
 Potential future work includes newer CPU pool, restart and meta-search strategies; Z3 support and lifting tools; and additional analysis tools and search metrics. These are separate from the existing projection, extension, tensor-product and resizing support. The initial project scope preserves current search behavior and focuses maintenance on Apple silicon Metal.

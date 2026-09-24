@@ -14,6 +14,56 @@ Build receipts track compiler settings, source location and source contents; unc
 
 For shader experiments without the offline compiler, use `make METAL_LIBRARY_MODE=source`. This explicitly selects runtime compilation through `newLibraryWithSource`, embeds the source checkout's absolute path and requires that source to remain available. Run `make METAL_LIBRARY_MODE=source` after moving that checkout. Running ordinary `make` switches back to compiled libraries and rebuilds the affected programs. There is no automatic fallback between modes.
 
+## Scheme interchange and analysis
+
+Build the host-only tool with `make scheme-tool`. It needs no Metal device. From the checkout root, verify a signed fixture and export it in the CPU coefficient format:
+
+```sh
+build/metal/scheme_tool verify \
+  --input tests/metal/fixtures/strassen_3x3.txt --format cpu-text --domain ZT \
+  --output build/metal/strassen-verified.jsonl
+build/metal/scheme_tool export \
+  --input build/metal/strassen-verified.jsonl --format jsonl \
+  --output-format cpu-text --output build/metal/strassen-export.txt
+```
+
+Every output must be a new file. `import`, `verify` and `analyze` emit verified scheme records; `export` selects an interchange format. Input formats are `json`, `jsonl`, a streaming `json-array`, `circuit-json`, `cpu-text`, count-prefixed `metal-search-text` and `metal-minimizer-text`. Text requires an explicit `--domain ZT` or `--domain F2`. JSON may declare the domain or use the existing Boolean `z2` field. Contradictory declarations and unsupported coefficient domains fail. Signed coefficients must be -1, 0 or 1 and satisfy the integer tensor equations; F2 coefficients must be 0 or 1 and satisfy the equations modulo two.
+
+The `fgm-scheme-v1` JSON representation contains `dimensions`, `rank`, `domain`, `orientation`, and dense `u`, `v`, `w` arrays. Its orientation is `cyclic-w`; an explicit `row-major-w` input is converted with a provenance record. `legacy-json` export provides the existing `n`, `m`, `z2`, `u`, `v`, `w` format for current JSON tools. CPU and Metal text exports preserve factor order and signed coefficients. Single-record export formats reject multiple records rather than silently selecting one.
+
+Records distinguish submitted factors, canonical scheme identity and the effective positive-first U/V normalization used for execution eligibility. Identity follows [FGM-CONTRACT-v1](specifications/FGM-CONTRACT-v1.md): sign/order aliases share a canonical identity, while zero terms and multiplicity remain significant. Import does not reduce rank. Tensor validity, search eligibility and signed-reducer eligibility are separate findings; candidate capacities are assessed after the documented execution normalization.
+
+Analysis reports naive addition cost, coefficient counts, zero-factor terms, equal-factor candidate pairs, factor-matrix ranks over Q or F2, and sign-normalization status. These descriptors do not establish scheme equivalence or an optimized addition circuit. Circuit inputs reconstruct their factors, verify the tensor in the declared domain and check the reported operation count. This verification interface does not add an F2 GPU additions reducer.
+
+Resource limits default to 1 MiB per record, 10 million accounted verification/analysis operations per record, 64 MiB of selection-content accounting and 256 MiB of cumulative input reads. Use `--record-bytes`, `--verification-work`, `--selection-memory` and `--scan-bytes` to change them. Input reads include hashing passes. Selection accounting is not a claim about process RSS. Exit code 2 means a resource limit prevented completion; it does not establish an invalid tensor. Exit code 1 reports malformed or invalid input; 0 reports completed verification and output.
+
+### Read-only external selections
+
+A collection is a JSONL manifest. Each row has schema `fgm-collection-v1`, a common namespace, source presentation ID, relative path, SHA-256, format and domain. Dimensions, rank, metadata and evidence references are optional. Paths must remain within the manifest directory. Multi-record sources require a locator: `{"line": 1}` for a one-based JSONL line, or `{"index": 0}` for a zero-based array/text record. Source IDs are case-sensitive; conflicting duplicate IDs fail.
+
+For example, a row referring to a local scalar fixture has this form. Replace the hash with the SHA-256 of the actual source bytes:
+
+```json
+{"schema":"fgm-collection-v1","namespace":"example","id":"scalar-1","path":"scalar.json","sha256":"SOURCE_SHA256","format":"json","domain":"ZT","dimensions":[1,1,1],"rank":1}
+```
+
+Select without modifying the collection:
+
+```sh
+build/metal/scheme_tool select --input collection/manifest.jsonl \
+  --count 8 --seed 7 --output build/metal/selection.jsonl
+```
+
+Seeded selection uses the contract's byte-level hash order, independent of manifest enumeration. `--ids ordered-ids.json` instead preserves an explicit JSON array of IDs and conflicts with `--seed`. Optional domain, dimension, rank and namespaced group filters apply before selection. Group filters use `--filter-group namespace:name=value` against a string array at `metadata.groups["namespace:name"]`.
+
+Only selected schemes are admitted and exactly verified. Their source hashes, locators, presentation bindings and optional metadata accompany the output, including aliases with the same canonical identity. Reimport preserves earlier bindings and adds the new artifact binding. Supplied classifications, bounds and evidence are provenance claims; the adapter does not certify them or transfer them to mutated schemes. An external selection is not a Metal journal resume.
+
+### Foundation checks
+
+`make test-workflow` runs routine host checks for formats, domains, identities, selection, policy boundaries and performance verdicts. `make qualify-workflow` additionally checks inventories of 1,000, 10,000 and 100,000 presentations, builds an isolated scalar adapter from the pinned arithmetic revision, and qualifies the frozen-baseline instrumentation fixtures. These longer checks are required when accepting changes to external selection, the arithmetic reference or baseline profiling, and at the foundation/release gates. Both targets retain a new receipt and log directory under `build/parity/`. The controller reference and its trace fixtures are separate from production kernels; these host checks do not establish GPU or packed/general agreement.
+
+The performance tools in `benchmarks/workflow` retain a pinned production baseline, qualify separate profiling builds and evaluate prospective paired comparisons. Repeatability estimates describe measurement precision, not permitted regression. A budget must be approved independently of candidate observations. An incomplete comparison is not a pass; a measured slowdown within an approved tolerance remains a reported slowdown.
+
 ## Search behavior
 
 The general kernels support signed and F2 arithmetic, both complexity minimizers, transformations and resizing. Candidate-list overflow is a persistent per-walk error, even if a later removal or rebuild would fit. A dispatch containing an overflow fails before the host accepts or exports its results. The capacity remains 500 pairs per factor in both general and packed paths. The signed additions reducer supports all seven selection modes, including prefix reuse. Nonzero signed sandwiching is rejected because the inherited implementation is absent; an F2-only tensor is not admitted to the integer reducer.
