@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parents[1]
 ROOT = HERE.parents[1]
@@ -33,8 +35,10 @@ def naive(dimensions, f2=False):
     return result
 
 
-def fixture(f2=False):
-    name = 'strassen_3x3_f2.txt' if f2 else 'strassen_3x3.txt'
+def fixture(f2=False, size=3):
+    if size not in (3,4):
+        raise ValueError('only public 3x3 and 4x4 fixtures')
+    name = 'strassen_3x3_f2.txt' if f2 and size == 3 else f'strassen_{size}x{size}.txt'
     values = list(map(int, (ROOT / 'tests/metal/fixtures' / name).read_text().split()))
     a, b, c, m = values[:4]
     out = {'n': [a,b,c], 'm': m, 'z2': f2}
@@ -43,6 +47,9 @@ def fixture(f2=False):
         out[key] = [values[offset+r*width:offset+(r+1)*width] for r in range(m)]
         offset += m*width
     assert offset == len(values)
+    if f2:
+        for key in 'uvw':
+            out[key] = [[value % 2 for value in row] for row in out[key]]
     return out
 
 
@@ -412,12 +419,15 @@ class NativeTests(unittest.TestCase):
                 with self.subTest(f2=f2, q=q):
                     data = fixture(f2)
                     config = Config(seed=7, anchor=data['m'], reduction_q=q,
-                                    flip_budget=4, interval_min=100, interval_max=100,
+                                    flip_budget=4, interval_min=100, interval_max=103,
                                     optional_quota=1)
                     walks = []
                     for split in (False, True):
                         policy = Policy(config, data['m'])
                         bridge = NativeArithmetic(policy, data, self.binary)
+                        # Direct xorshift32 KAT for seed7: first word1360045822.
+                        self.assertEqual((policy.rng.state,policy.rng.draws,policy.countdown),
+                                         (1360045822,1,102))
                         for step in range(4):
                             policy.step(bridge)
                             verify(bridge.scheme)
@@ -530,6 +540,66 @@ class NativeTests(unittest.TestCase):
             if expected == 'proposal_exhausted':
                 self.assertEqual(len(bounded['observations']), 3)
 
+    def test_actual_one_two_recoveries_and_second_primitive_ceiling(self):
+        cases = ((0,2,'alternatives',1), (0x9e3779b9,2,'rank-reduction',2),
+                 (0x9e3779b9,1,'alternatives',2), (0x9e3779b9,1,'rank-reduction',2))
+        for f2 in (False,True):
+            for seed,excursion,mode,requested in cases:
+                with self.subTest(f2=f2,seed=seed,excursion=excursion,mode=mode):
+                    data = fixture(f2,size=4)
+                    verify(data)
+                    policy = Policy(Config(seed=seed,anchor=49,dimensions=(4,4,4),
+                                           mode=mode,excursion=excursion),49)
+                    bridge = NativeArithmetic(policy,data,self.binary,proposal_limit=8)
+                    # Every factor is distinct, so the flip has no candidates
+                    # and consumes no arithmetic words before recovery selection.
+                    for key in 'uvw':
+                        self.assertEqual(len(set(map(tuple,data[key]))),49)
+                    self.assertTrue(all(not group['pairs'] for group in bridge.candidates))
+                    policy.step(bridge)
+                    verify(bridge.scheme)
+                    record = policy.comparison_record()
+                    events = record['events']
+                    recovery = next(e for e in events if e['event']=='expansion_event')
+                    self.assertTrue(recovery['recovery'])
+                    self.assertEqual(recovery['count'],requested)
+                    self.assertEqual(len(recovery['words']),1)
+                    self.assertEqual(1+recovery['words'][0]%2,requested)
+                    self.assertEqual(bridge.trace[0]['result']['words'],[])
+                    self.assertEqual(bridge.trace[0]['result']['outcome'],'unsuccessful')
+                    applied = min(requested,excursion)
+                    expansions = [e for e in events if e['event']=='expansion']
+                    self.assertEqual(len(expansions),applied)
+                    self.assertEqual(record['applied'],{'flip':0,'reduction':0,'expansion':applied})
+                    self.assertEqual(policy.rank,49+applied)
+                    expected = ['initial_countdown','flip','expansion_event']
+                    for index,event in enumerate(expansions):
+                        expected += ['expansion','observed']
+                        self.assertEqual(event['outcome'],'applied')
+                        self.assertEqual(event['rank'],50+index)
+                        proposals = event['native_observations']
+                        # One operator word precedes all native proposal words.
+                        self.assertEqual(event['operator'],event['words'][0]%3)
+                        self.assertEqual(event['words'][1:],
+                                         [w for attempt in proposals for w in attempt['result']['words']])
+                        self.assertEqual(proposals[-1]['result']['outcome'],'applied')
+                        verify(proposals[-1]['result']['scheme'])
+                    if requested>excursion:
+                        expected.append('rank_blocked')
+                        blocked = next(e for e in events if e['event']=='rank_blocked')
+                        self.assertEqual(blocked['operation'],'primitive')
+                        self.assertEqual(blocked['words'],[])
+                        self.assertEqual(blocked['rng_before'],blocked['rng'])
+                        self.assertEqual(blocked['attempted']['expansion'],1)
+                    expected.append('event_countdown')
+                    self.assertEqual([e['event'] for e in events],expected)
+                    self.assertEqual(len(events[-1]['words']),1)
+                    self.assertFalse(policy.pending_restart)
+                    self.assertEqual(policy.mandatory['rank'],50)
+                    self.assertEqual(policy.mandatory['state'],
+                                     {'scheme':expansions[0]['native_observations'][-1]['result']['scheme'],
+                                      'candidates':expansions[0]['native_observations'][-1]['result']['candidates']})
+
     def test_actual_midwalk_overflow_preserves_prior_committed_evidence(self):
         data = overflow_fixture()
         verify(data)
@@ -573,6 +643,57 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(event['event'],'capacity_error')
         self.assertEqual(event['native_observations'][0]['result'],result)
         verify(committed['state']['scheme'])
+
+    def test_bounded_transport_rejects_malformed_native_observations(self):
+        data = fixture(True)
+        policy = Policy(Config(seed=28,anchor=data['m'],flip_budget=3),data['m'])
+        bridge = NativeArithmetic(policy,data,self.binary,proposal_limit=1)
+        policy.step(bridge)
+        start, before = bridge.trace[-1], bridge.trace[0]['result']
+        args = (self.binary,before['scheme'],start['operation'],start['rng_before'],
+                policy.config.ceiling(),before['candidates'])
+        rejected = operation(*args,proposal_limit=1)
+        accepted = operation(*args,proposal_limit=3)
+        self.assertEqual(rejected['outcome'],'proposal_exhausted')
+        self.assertEqual(accepted['outcome'],'applied')
+        cases = []
+        # Real one-attempt exhaustion cannot satisfy a declared quota of two.
+        cases.append(('early exhaustion',copy.deepcopy(rejected),2))
+        extra = copy.deepcopy(accepted)
+        terminal = copy.deepcopy(extra['observations'][-1])
+        terminal['rng_before'] = terminal['result']['rng']
+        terminal['result'].update(words=[],draws=0)
+        extra['observations'].append(terminal)
+        cases.append(('after terminal',extra,len(extra['observations'])))
+        for field in ('scheme','candidates'):
+            changed = copy.deepcopy(rejected)
+            state = changed['observations'][0]['result'][field]
+            if field == 'scheme':
+                state['u'][0][0] ^= 1
+            else:
+                group = next(g for g in state if g['pairs'])
+                group['pairs'][0].reverse()
+            # Aggregate and final observation agree; the violation is specifically
+            # mutation by a rejected proposal, not a mismatched outer record.
+            changed[field] = copy.deepcopy(state)
+            cases.append(('rejected '+field,changed,1))
+        for field in ('scheme','candidates'):
+            changed = copy.deepcopy(accepted)
+            if field == 'scheme':
+                changed[field]['u'][0][0] ^= 1
+            else:
+                group = next(g for g in changed[field] if g['pairs'])
+                group['pairs'][0].reverse()
+            cases.append(('aggregate '+field,changed,3))
+        for label,malformed,quota in cases:
+            with self.subTest(case=label):
+                # Build/header identity checks remain real; only the process reply
+                # is replaced. All RNG records remain independently consistent.
+                reply = SimpleNamespace(returncode=0,stdout=json.dumps(malformed),stderr='')
+                with patch('scalar_bridge.subprocess.run',return_value=reply) as process:
+                    with self.assertRaises(ValueError):
+                        operation(*args,proposal_limit=quota)
+                    process.assert_called_once()
 
     def test_real_arithmetic_drives_independent_policy(self):
         for f2 in (False,True):

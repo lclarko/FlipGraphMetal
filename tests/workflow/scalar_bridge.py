@@ -167,12 +167,32 @@ def operation(binary, scheme, op, rng, ceiling, candidates=None, proposal_limit=
         if not isinstance(observations, list) or not 1 <= len(observations) <= proposal_limit:
             raise ValueError('invalid bounded native observation count')
         previous, words = rng, []
-        for item in observations:
+        previous_scheme, previous_candidates = scheme, candidates
+        rejections = ('tuple_rejection', 'coefficient_rejection')
+        for index, item in enumerate(observations):
             if item['operation'] != op or item['rng_before'] != previous:
                 raise ValueError('native observation order mismatch')
-            validate_rng(previous, item['result'])
-            words.extend(item['result']['words'])
-            previous = item['result']['rng']
+            observed = item['result']
+            validate_rng(previous, observed)
+            rejected = observed['outcome'] in rejections
+            if index + 1 < len(observations) and not rejected:
+                raise ValueError('native invocation continued after a terminal outcome')
+            if rejected and (observed['scheme'] != previous_scheme or
+                             (previous_candidates is not None and
+                              observed['candidates'] != previous_candidates)):
+                raise ValueError('rejected native proposal changed ordered state')
+            words.extend(observed['words'])
+            previous = observed['rng']
+            previous_scheme, previous_candidates = observed['scheme'], observed['candidates']
+        exhausted = observed['outcome'] in rejections
+        expected = 'proposal_exhausted' if exhausted else observed['outcome']
+        if exhausted and len(observations) != proposal_limit:
+            raise ValueError('native invocation exhausted before its proposal limit')
+        if decoded['outcome'] != expected:
+            raise ValueError('native invocation outcome differs from its observations')
+        for field in ('scheme', 'candidates', 'removed_terms', 'reduction_operations'):
+            if decoded[field] != observed[field]:
+                raise ValueError('native invocation state differs from its final observation')
         if previous != decoded['rng'] or words != decoded['words']:
             raise ValueError('native invocation/proposal RNG mismatch')
     return decoded
