@@ -1,5 +1,6 @@
 """Host-only tests of scripted policy ordering, not arithmetic correctness."""
 import hashlib
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -12,6 +13,92 @@ from reference_policy import (ARITHMETIC_REFERENCE, MODEL_KIND, ArithmeticEvent 
 
 ROOT = HERE.parents[1]
 REPAIR_SEED = 0x9e3779b9
+
+
+def host_boundary_record(case):
+    """Script host acknowledgments around the independent worker, not a journal."""
+    from host_rng import HostRNG
+    from identity_oracle import identity
+    sys.path.insert(0, str(ROOT / 'tests/metal'))
+    from verify import verify
+
+    def scheme_id(state):
+        data = state['scheme']
+        verify(data)
+        return identity(dict(domain='F2' if data['z2'] else 'ZT', orientation='cyclic-w',
+                             dimensions=data['n'], rank=data['m'],
+                             **{key:data[key] for key in 'uvw'}))
+
+    states = case['states']
+    identities = {name:scheme_id(state) for name,state in states.items()}
+    known = set(identities[name] for name in case['known'])
+    policy = Policy(Config(**case['config']), states['initial']['scheme']['m'])
+    policy.bind_state(states['initial'])
+    host = None
+    record = {'initial':policy.comparison_record(), 'actions':[]}
+    for action in case['actions']:
+        event = {'action':action['op']}
+        try:
+            if action['op'] == 'step':
+                def events(key):
+                    result = []
+                    for item in action.get(key, []):
+                        value = dict(item)
+                        if 'state' in value:
+                            value['state'] = states[value['state']]
+                        result.append(E(**value))
+                    return result
+                script = Scripts(events('flips'), events('reductions'), events('expansions'))
+                policy.step(script)
+                if any(script.remaining().values()):
+                    raise AssertionError('unused scripted arithmetic')
+            elif action['op'] == 'request_restart':
+                # Isolated host request tests installation preflight, not triggering.
+                policy.pending_restart = True
+            elif action['op'] == 'commit':
+                candidates = ([policy.pending_target_state] if policy.pending_target_state is not None
+                              else ([policy.mandatory['state']] if policy.mandatory else [])
+                              + [sample['state'] for sample in policy.optional])
+                ids = [scheme_id(state) for state in candidates]
+                policy.commit_observations(verified=action['verified'], durable=action['durable'])
+                event['new_identities'] = []
+                for key in ids:
+                    if key not in known:
+                        event['new_identities'].append(key)
+                        known.add(key)
+                event['committed_identities'] = list(dict.fromkeys(ids))
+            elif action['op'] == 'restart':
+                if not policy.dispatch_complete or not policy.mandatory_committed:
+                    raise ValueError('prior mandatory commitment required before host selection')
+                if host is None:
+                    host = HostRNG(policy.config.seed)
+                event['host_before'] = {'state':host.words.copy(), 'index':host.index, 'draws':host.draws}
+                words = []
+                original = host.next
+                def traced_next():
+                    word = original()
+                    words.append(word)
+                    return word
+                host.next = traced_next
+                try:
+                    selected = host.select(action['weights'])
+                finally:
+                    host.next = original
+                name = action['parents'][selected]
+                event.update(host_words=words, selected=name,
+                             host_after={'state':host.words.copy(), 'index':host.index, 'draws':host.draws})
+                policy.install_restart(states[name]['scheme']['m'], parent_state=states[name])
+            elif action['op'] == 'batch_boundary':
+                policy.batch_boundary()
+            else:
+                raise AssertionError('unknown fixture action')
+            event['outcome'] = 'accepted'
+        except ValueError:
+            event['outcome'] = 'rejected'
+        event['known_identities'] = sorted(known)
+        event['worker'] = policy.comparison_record()
+        record['actions'].append(event)
+    return record
 
 
 class RNGTests(unittest.TestCase):
@@ -73,6 +160,29 @@ class GoldenTests(unittest.TestCase):
                 self.assertEqual([[event['event'], event['rng']] for event in policy.events],
                                  case['event_rng'])
                 self.assertFalse(any(script.remaining().values()))
+
+
+class HostBoundaryGoldenTests(unittest.TestCase):
+    def test_frozen_host_boundary_and_checked_ceiling_traces(self):
+        golden = json.loads((HERE/'golden/host_boundaries_v1.json').read_text())
+        self.assertEqual(golden['specification_sha256'], hashlib.sha256(
+            (ROOT/'docs/specifications/FGM-CONTRACT-v1.md').read_bytes()).hexdigest())
+        self.assertEqual(golden['arithmetic_reference'], ARITHMETIC_REFERENCE)
+        for case in golden['cases']:
+            with self.subTest(case=case['name']):
+                submitted = {key:value for key,value in case.items() if key not in ('expected','input_sha256')}
+                payload = json.dumps(submitted,sort_keys=True,separators=(',',':')).encode()
+                self.assertEqual(hashlib.sha256(payload).hexdigest(),case['input_sha256'])
+                if case['kind'] == 'host-boundary':
+                    actual = host_boundary_record(case)
+                else:
+                    try:
+                        value = (add(*case['arguments']) if case['kind']=='rank-increment'
+                                 else Config(**case['config']).ceiling())
+                        actual = {'outcome':'accepted','value':value}
+                    except ValueError:
+                        actual = {'outcome':'eligibility_error'}
+                self.assertEqual(json.loads(json.dumps(actual)),case['expected'])
 
 
 class ControllerTests(unittest.TestCase):

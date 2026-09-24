@@ -3,9 +3,11 @@ import argparse
 import copy
 from collections import defaultdict
 import hashlib
+import heapq
 import io
 import json
 import math
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import statistics
@@ -18,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 sys.path.insert(0, str(ROOT / 'tests/metal'))
-from application import digest, hardware_inventory, write_json
+from application import digest, hardware_inventory, write_json, source_identity
 from guard import run as guarded_run
 from smoke import dispatch_evidence
 from verify import verify, reconstruct
@@ -581,12 +583,279 @@ def summarize(path):
 
 
 
+HOST_WORKLOADS = ('report-100', 'cpu-roundtrip-5', 'select-1000', 'select-10000', 'select-100000')
+HOST_LIMITS = {'--record-bytes': 1048576, '--verification-work': 10000000,
+               '--selection-memory': 67108864, '--scan-bytes': 268435456}
+
+
+def host_oracle():
+    sys.path.insert(0, str(ROOT/'tests/workflow'))
+    import identity_oracle
+    return identity_oracle
+
+
+def host_machine_identity():
+    return {'hardware': hardware_inventory(), 'os_version': platform.mac_ver()[0]}
+
+
+def host_candidate_identity(binary):
+    binary = Path(binary).resolve(strict=True)
+    receipt_path = binary.with_name(binary.name+'.build.json')
+    receipt = json.loads(receipt_path.read_text())
+    stat = binary.stat()
+    configuration=json.loads((ROOT/'build/workflow/config.json').read_text())
+    if receipt['inputs']['configuration']!=configuration:
+        raise ValueError('host build configuration changed')
+    if Path(configuration['source_dir']).resolve()!=ROOT/'src/workflow':
+        raise ValueError('host build source directory mismatch')
+    if receipt['output'] != {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}:
+        raise ValueError('host executable differs from build receipt')
+    for name, checksum in receipt['inputs']['dependencies'].items():
+        path = Path(name)
+        if digest(path if path.is_absolute() else ROOT/path) != checksum:
+            raise ValueError('host build dependency changed: '+name)
+    return {'candidate_source': content_hash(source_identity(ROOT)),
+            'candidate_build': content_hash({'binary_sha256':digest(binary),
+                                             'receipt_sha256':digest(receipt_path)})}
+
+
+def prepare_host_inputs(source, output):
+    """Generate public workload inputs and independent expected identities before timing."""
+    oracle = host_oracle()
+    output.mkdir(parents=True, exist_ok=False)
+    schemes=[]
+    for name, f2 in (('rank23_3x3.txt',False),('strassen_4x4.txt',False),('strassen_3x3_f2.txt',True)):
+        raw=read_raw(source/'tests/metal/fixtures'/name,f2)
+        schemes.append(dict(dimensions=raw['n'],rank=raw['m'],domain='F2' if f2 else 'ZT',
+                            orientation='cyclic-w',**{key:raw[key] for key in 'uvw'}))
+    schemes.extend(oracle.schoolbook((2,3,4),domain) for domain in ('ZT','F2'))
+    paths=[]
+    for index,scheme in enumerate(schemes):
+        path=output/f'scheme-{index}.json';write_json(path,scheme);paths.append(path)
+    report=output/'report.jsonl'
+    report.write_text(''.join(json.dumps(schemes[i%5],separators=(',',':'))+'\n' for i in range(100)))
+    scalar=output/'scalar.json';write_json(scalar,oracle.schoolbook((1,1,1)))
+    scalar_hash=digest(scalar)
+    workloads={'report-100':{'input':report,'expected':schemes*20},
+               'cpu-roundtrip-5':{'inputs':paths,'expected':schemes}}
+    for size in (1000,10000,100000):
+        manifest=output/f'inventory-{size}.jsonl'
+        with manifest.open('x') as stream:
+            for index in range(size):
+                row=dict(schema='fgm-collection-v1',namespace='synthetic',id=f'p{index}',
+                         path=scalar.name,sha256=scalar_hash,format='json',domain='ZT')
+                stream.write(json.dumps(row,separators=(',',':'))+'\n')
+        ids=heapq.nsmallest(3,(f'p{i}' for i in range(size)),
+                           key=lambda value:oracle.selection_key(7,'synthetic',value))
+        workloads[f'select-{size}']={'input':manifest,'expected':[oracle.schoolbook((1,1,1))]*3,
+                                   'selected_ids':ids}
+    for name,work in workloads.items():
+        inputs=work.get('inputs',[work.get('input')])
+        if name.startswith('select-'):inputs=inputs+[scalar]
+        work['input_files']=inputs
+        work['fixture_sha256']=content_hash({path.name:digest(path) for path in inputs})
+    return workloads
+
+
+def verify_host_record(record, expected):
+    oracle=host_oracle()
+    if any(record.get(key)!=expected[key] for key in ('dimensions','rank','domain','orientation','u','v','w')):
+        raise ValueError('host output changed submitted scheme')
+    for field,canonical in (('scheme_id',True),('factors_id',False)):
+        if record.get(field)!=oracle.identity(expected,canonical):
+            raise ValueError('host identity mismatch')
+    return verify(dict(n=record['dimensions'],m=record['rank'],z2=record['domain']=='F2',
+                       **{key:record[key] for key in 'uvw'}))
+
+
+def run_host_attempt(binary, name, work, attempt, record, save):
+    """One independent native workflow trial, including exact output checks."""
+    attempt.mkdir()
+    record.update(complete=False,commands=[],outputs=[],native_process_seconds=0.,
+                  independent_verification_seconds=0.,peak_process_rss_bytes=0,resource_violation=False)
+    limits=[item for key,value in HOST_LIMITS.items() for item in (key,str(value))]
+    start=time.monotonic()
+    try:
+        output_paths=[]
+        if name=='cpu-roundtrip-5':
+            commands=[]
+            for index,(source,scheme) in enumerate(zip(work['inputs'],work['expected'])):
+                text=attempt/f'cpu-{index}.txt';result=attempt/f'restored-{index}.jsonl'
+                commands.extend([
+                    ['export','--input',str(source),'--output',str(text),'--format','json','--output-format','cpu-text'],
+                    ['import','--input',str(text),'--output',str(result),'--format','cpu-text','--domain',scheme['domain']]])
+                output_paths.append(result)
+        else:
+            result=attempt/'result.jsonl';output_paths.append(result)
+            command=['select' if name.startswith('select-') else 'verify','--input',str(work['input']),
+                     '--output',str(result)]
+            command += ['--count','3','--seed','7'] if name.startswith('select-') else ['--format','jsonl']
+            commands=[command]
+        for index,args in enumerate(commands):
+            argv=[str(binary),*args,*limits]
+            record['commands'].append(argv);save()
+            guard_path=attempt/f'guard-{index}'
+            guard=guarded_run(['/usr/bin/time','-l','-p',*argv],guard_path)
+            if not guard['complete']:
+                reason=str(guard.get('error'))
+                record['resource_violation']='time limit' in reason or 'wired memory exceeded' in reason
+                raise RuntimeError('incomplete guarded host process: '+reason)
+            log=(guard_path/'run.log').read_text()
+            elapsed=re.findall(r'^real\s+([0-9.]+)$',log,re.M)
+            rss=re.findall(r'^\s*(\d+)\s+maximum resident set size\s*$',log,re.M)
+            if (len(elapsed)!=1 or len(rss)!=1 or not math.isfinite(float(elapsed[0]))
+                    or float(elapsed[0])<0 or int(rss[0])<=0):
+                raise ValueError('missing native process elapsed/RSS')
+            record['native_process_seconds']+=float(elapsed[0])
+            record['peak_process_rss_bytes']=max(record['peak_process_rss_bytes'],int(rss[0]))
+            record.setdefault('peak_system_wired_bytes',0)
+            record['peak_system_wired_bytes']=max(record['peak_system_wired_bytes'],
+                                                 max(sample['wired_bytes'] for sample in guard['memory']))
+        verify_start=time.monotonic()
+        records=[]
+        for path in output_paths:
+            records.extend(json.loads(line) for line in path.read_text().splitlines())
+            record['outputs'].append({'file':path.name,'sha256':digest(path)})
+        if len(records)!=len(work['expected']):raise ValueError('host result count mismatch')
+        for result,expected in zip(records,work['expected']):verify_host_record(result,expected)
+        if name.startswith('select-'):
+            ids=[row['source_binding']['id'] for row in records]
+            if ids!=work['selected_ids']:raise ValueError('independent selection order mismatch')
+            oracle=host_oracle()
+            for row,source_id in zip(records,ids):
+                if row['source_binding']['selection_key']!=oracle.selection_key(7,'synthetic',source_id)[0].hex():
+                    raise ValueError('independent selection digest mismatch')
+        record['independent_verification_seconds']=time.monotonic()-verify_start
+        record['workflow_seconds']=time.monotonic()-start
+        record['complete']=True
+    except Exception as error:
+        record['error']=str(error)
+        raise
+    finally:
+        save()
+    return record
+
+
+def execute_host(binary, output, plan_path):
+    """Acquire six new trials only after explicit prospective approvals are present."""
+    import performance
+    binary=binary.resolve(strict=True)
+    plan_bytes=plan_path.read_bytes();plan=json.loads(plan_bytes)
+    if set(plan)!= {'schema','evaluations','parent'} or plan['schema']!='fgm-host-plan-v1':
+        raise ValueError('invalid host plan')
+    evaluations=plan['evaluations']
+    if set(evaluations)!=set(HOST_WORKLOADS):raise ValueError('host plan requires all five workloads')
+    candidate=host_candidate_identity(binary)
+    hardware=host_machine_identity();hardware_hash=content_hash(hardware)
+    active=[]
+    for name,document in evaluations.items():
+        verdict=performance.evaluate(document)  # Validate declared prior evidence; launch nothing.
+        budget=document['budget']
+        if budget['status']!='approved' or budget['workload']!=name or any(budget[key]!=value for key,value in candidate.items()):
+            raise ValueError('host approval or candidate identity mismatch')
+        family=document['protocol']['mandatory_endpoints']
+        if (document['protocol']['alpha']!=.05 or len(family)!=5
+                or {item['workload'] for item in family}!=set(HOST_WORKLOADS)
+                or any(item['endpoint']!='workflow_seconds' for item in family)):
+            raise ValueError('host latency family must include all five endpoints at alpha .05')
+        if document['look']==1 and len(document['observations'])==6:
+            if verdict['verdict']!='PASS':raise ValueError('retained first look must pass or declare a second look')
+        else:
+            expected_count=0 if document['look']==1 else 6
+            if len(document['observations'])!=expected_count:
+                raise ValueError('host acquisition requires zero or six retained observations')
+            active.append(name)
+    if not active:raise ValueError('host plan has no pending acquisition')
+    if plan['parent'] is not None:
+        parent=plan['parent']
+        if set(parent)!= {'path','sha256'} or digest(Path(parent['path']))!=parent['sha256']:
+            raise ValueError('host parent receipt identity mismatch')
+        previous=json.loads(Path(parent['path']).read_text())
+        if previous.get('complete') is not True or previous.get('error'):
+            raise ValueError('host parent acquisition incomplete')
+        for name,document in evaluations.items():
+            if document['observations']!=previous['evaluations'][name]['observations']:
+                raise ValueError('host parent observations changed')
+            for index,observation in enumerate(document['observations']):
+                artifact=Path(parent['path']).parent/f'{index:02d}-{name}'/'trial.json'
+                if digest(artifact)!=observation['evidence_sha256']:
+                    raise ValueError('host parent trial evidence changed')
+    elif any(document['observations'] or document['look']!=1 for document in evaluations.values()):
+        raise ValueError('retained observations require a parent receipt')
+    output.mkdir(parents=True,exist_ok=False)
+    (output/'plan.json').write_bytes(plan_bytes)
+    build_receipt=output/'native-build.json'
+    build_receipt.write_bytes(binary.with_name(binary.name+'.build.json').read_bytes())
+    binary_hash=digest(binary)
+    if content_hash({'binary_sha256':binary_hash,'receipt_sha256':digest(build_receipt)})!=candidate['candidate_build']:
+        raise ValueError('host build changed while retaining receipt')
+    work=prepare_host_inputs(ROOT,output/'inputs')
+    harness={str(path.relative_to(ROOT)):digest(path) for path in
+             (Path(__file__),ROOT/'benchmarks/workflow/performance.py',ROOT/'benchmarks/metal/guard.py',
+              ROOT/'benchmarks/metal/application.py',ROOT/'tests/metal/verify.py',ROOT/'tests/workflow/identity_oracle.py')}
+    receipt=dict(schema='fgm-host-qualification-v1',complete=False,plan_sha256=hashlib.sha256(plan_bytes).hexdigest(),
+                 parent=plan['parent'],candidate=candidate,hardware=hardware,harness=harness,
+                 source_files=source_identity(ROOT),binary_sha256=binary_hash,
+                 build_receipt='native-build.json',build_receipt_sha256=digest(build_receipt),
+                 revision=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip(),
+                 attempts=[],evaluations=copy.deepcopy(evaluations),performance_acceptance='NOT EVALUATED')
+    for name in active:
+        receipt['evaluations'][name].update(acquisition_complete=False,acquisition_error=None)
+    def save():write_json(output/'qualification.json',receipt)
+    save()
+    try:
+        for name,document in receipt['evaluations'].items():
+            for trial in document['protocol']['prospective_trials']:
+                identity=trial['identity']
+                expected=dict(fixture=work[name]['fixture_sha256'],config=content_hash(HOST_LIMITS),seed='7',work=name,
+                              build_settings=candidate['candidate_build'],shader_mode='not-applicable',hardware=hardware_hash)
+                if identity!=expected:raise ValueError('host prospective input/configuration identity mismatch')
+        for offset in range(6):
+            for name in HOST_WORKLOADS:
+                if name not in active:continue
+                index=offset+(0 if receipt['evaluations'][name]['look']==1 else 6)
+                if host_candidate_identity(binary)!=candidate:raise ValueError('host source/build changed')
+                document=receipt['evaluations'][name]
+                if content_hash({path.name:digest(path) for path in work[name]['input_files']})!=work[name]['fixture_sha256']:
+                    raise ValueError('host fixture changed')
+                record={'workload':name,'trial_id':document['protocol']['prospective_trials'][index]['trial_id'],
+                        'complete':False,'error':None}
+                receipt['attempts'].append(record);save()
+                attempt=output/f'{index:02d}-{name}'
+                try:run_host_attempt(binary,name,work[name],attempt,record,save)
+                finally:
+                    if record.get('peak_process_rss_bytes',0)>document['budget']['peak_process_rss_limit']:
+                        record['resource_violation']=True
+                    write_json(attempt/'trial.json',record)
+                    document['observations'].append(dict(trial_id=record['trial_id'],complete=record['complete'],
+                        value=record.get('workflow_seconds'),peak_process_rss_bytes=record.get('peak_process_rss_bytes'),
+                        **candidate,identity=document['protocol']['prospective_trials'][index]['identity'],
+                        evidence_sha256=digest(attempt/'trial.json'),resource_violation=record.get('resource_violation',False),
+                        error=record['error']))
+                    save()
+                if record['resource_violation']:raise RuntimeError('host process memory budget exceeded')
+                if content_hash({path.name:digest(path) for path in work[name]['input_files']})!=work[name]['fixture_sha256']:
+                    raise ValueError('host fixture changed')
+        if host_candidate_identity(binary)!=candidate:raise ValueError('host source/build changed')
+        for name in active:receipt['evaluations'][name]['acquisition_complete']=True
+        receipt['complete']=True
+    except Exception as error:
+        receipt['error']=str(error)
+        for name in active:
+            receipt['evaluations'][name].update(acquisition_complete=False,acquisition_error=str(error))
+        raise
+    finally:
+        save();(output/'qualification.sha256').write_text(digest(output/'qualification.json')+'\n')
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     operation = parser.add_mutually_exclusive_group(required=True)
     operation.add_argument('--freeze', type=Path, metavar='NEW_DIRECTORY',
                            help='Prepare pinned source only; no build or GPU execution')
     operation.add_argument('--source', type=Path, help='Frozen production source to measure')
+    operation.add_argument('--host', type=Path, metavar='NATIVE_BINARY', help='Acquire approved native-host workflow trials')
     operation.add_argument('--qualify-profile', type=Path, metavar='PROFILE_DIRECTORY')
     operation.add_argument('--summarize', type=Path, metavar='QUALIFICATION_JSON')
     parser.add_argument('--baseline', type=Path, help='Frozen baseline directory for profile qualification')
@@ -596,6 +865,13 @@ def main():
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
+    if args.host is not None:
+        if args.output is None or args.protocol is None:
+            parser.error('--host requires --protocol and --output')
+        if any(value is not None for value in (args.rows,args.repetitions,args.baseline,args.production_run)):
+            parser.error('--host uses the frozen plan only')
+        execute_host(args.host,args.output,args.protocol)
+        return
     if args.freeze is not None:
         if any(value is not None for value in (args.output, args.protocol, args.rows, args.repetitions, args.baseline, args.production_run)):
             parser.error('--freeze accepts only a new directory')

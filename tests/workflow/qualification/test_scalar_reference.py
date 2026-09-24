@@ -316,6 +316,79 @@ class NativeTests(unittest.TestCase):
         verify(golden['mandatory_scheme'])
         self.assertEqual(policy.mandatory['rank'], golden['mandatory_scheme']['m'])
 
+    def test_frozen_boundary_trace_candidates(self):
+        # Candidate fixtures freeze complete observations for separate review.
+        # Passing this comparison alone does not approve their expected values.
+        golden = json.loads((HERE / 'golden/scalar_boundaries_v1.json').read_text())
+        spec = ROOT / 'docs/specifications/FGM-CONTRACT-v1.md'
+        self.assertEqual(hashlib.sha256(spec.read_bytes()).hexdigest(), golden['specification_sha256'])
+        receipt = json.loads((self.binary.parent / 'receipt.json').read_text())
+        self.assertEqual(receipt['arithmetic_reference'], golden['arithmetic_reference'])
+        self.assertEqual({name: row['original_sha256'] for name, row in receipt['headers'].items()},
+                         golden['arithmetic_headers'])
+
+        def expanded(value):
+            if isinstance(value, list):
+                return [expanded(item) for item in value]
+            if isinstance(value, dict):
+                for name in ('schemes', 'candidates'):
+                    if set(value) == {'$' + name}:
+                        return copy.deepcopy(golden['value_tables'][name][value['$' + name]])
+                return {key: expanded(item) for key, item in value.items()}
+            return value
+
+        for case in golden['cases']:
+            with self.subTest(case=case['name']):
+                declared = case['fixture']
+                if declared['kind'] == 'wide-f2':
+                    data = f2_boundary_fixture(declared['width'])
+                elif declared['kind'] == 'public':
+                    data = fixture(declared['f2'], declared['size'])
+                else:
+                    data = naive((1, 1, 1), declared['f2'])
+                    if declared['terms'] == 3:
+                        data.update(m=3, u=[[1], [1], [1 if declared['f2'] else -1]],
+                                    v=[[1], [1], [1]], w=[[1], [1], [1]])
+                payload = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), case['fixture_sha256'])
+                self.assertEqual('F2' if data['z2'] else 'ZT', case['domain'])
+                for name, expected in case['source_files'].items():
+                    self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
+                verify(data)
+                if case['kind'] == 'primitive':
+                    initial = self.execute(data)
+                    result = self.execute(data, case['invocation']['operation'],
+                                          case['invocation']['rng'], case['invocation']['ceiling'],
+                                          initial['candidates'])
+                    actual = {'initial': initial, 'result': result}
+                else:
+                    policy = Policy(Config(**case['config']), data['m'])
+                    bridge = NativeArithmetic(policy, data, self.binary,
+                                              proposal_limit=case['proposal_limit'])
+                    for step in range(case['steps']):
+                        policy.step(bridge)
+                        verify(bridge.scheme)
+                        if case['split_after'] == step + 1:
+                            policy.commit_observations(verified=True, durable=True)
+                            policy.batch_boundary()
+                    for action in case.get('actions', []):
+                        if action == 'step':
+                            policy.step(bridge)
+                            verify(bridge.scheme)
+                        elif action == 'commit':
+                            policy.commit_observations(verified=True, durable=True)
+                        elif action == 'request_restart':
+                            policy.pending_restart = True
+                        elif action == 'install_restart':
+                            bridge.install_restart(expanded(case['restart_scheme']))
+                        else:
+                            self.fail('unknown trace action: ' + action)
+                    if case.get('reject_commit'):
+                        with self.assertRaises(ValueError):
+                            policy.commit_observations(verified=True, durable=True)
+                    actual = policy.comparison_record()
+                self.assertEqual(actual, expanded(case['expected']))
+
     def test_restart_installs_different_same_rank_parent_and_retains_snapshots(self):
         for f2 in (False, True):
             data = naive((2,2,2), f2)
