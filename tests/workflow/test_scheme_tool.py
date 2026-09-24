@@ -57,6 +57,48 @@ class SchemeToolTests(unittest.TestCase):
             back = json.loads(self.run_tool(raw,'import','cpu-text',data['domain']).read_text())
             self.assertEqual(back['factors_id'],record['factors_id'])
 
+    def test_public_fixtures_cpu_text_roundtrip(self):
+        import sys
+        sys.path.insert(0, str(ROOT/'tests/metal'))
+        from verify import verify
+
+        fixtures = (
+            ('rank23_3x3.txt', 'ZT'),
+            ('strassen_4x4.txt', 'ZT'),
+            ('strassen_3x3_f2.txt', 'F2'),
+        )
+        for name, domain in fixtures:
+            with self.subTest(fixture=name, domain=domain):
+                raw = (ROOT/'tests/metal/fixtures'/name).read_bytes()
+                values = list(map(int, raw.split()))
+                a, b, c, rank = values[:4]
+                legacy = dict(n=[a, b, c], m=rank, z2=domain == 'F2')
+                offset = 4
+                for key, width in zip('uvw', (a*b, b*c, c*a)):
+                    legacy[key] = [values[offset+r*width:offset+(r+1)*width]
+                                   for r in range(rank)]
+                    offset += rank*width
+                self.assertEqual(offset, len(values))
+                self.assertEqual(verify(legacy)['domain'], domain)
+                oracle_input = dict(dimensions=legacy['n'], rank=rank,
+                                    domain=domain, orientation='cyclic-w',
+                                    **{key: legacy[key] for key in 'uvw'})
+
+                admitted = json.loads(self.run_tool(raw, format='cpu-text',
+                                                    domain=domain).read_text())
+                exported = self.run_tool(admitted, command='export',
+                                         extra=('--output-format', 'cpu-text')).read_bytes()
+                self.assertEqual(list(map(int, exported.split())), values)
+                restored = json.loads(self.run_tool(exported, command='import',
+                                                     format='cpu-text', domain=domain).read_text())
+                for field, canonical in (('scheme_id', True), ('factors_id', False)):
+                    self.assertEqual(admitted[field], oracle.identity(oracle_input, canonical))
+                    self.assertEqual(restored[field], admitted[field])
+                independent = dict(n=restored['dimensions'], m=restored['rank'],
+                                   z2=restored['domain'] == 'F2',
+                                   **{key: restored[key] for key in 'uvw'})
+                self.assertEqual(verify(independent)['domain'], domain)
+
     def test_zero_terms_repetitions_and_sign_gauges(self):
         cases=[]
         zero=oracle.schoolbook((1,1,1));zero['rank']=2

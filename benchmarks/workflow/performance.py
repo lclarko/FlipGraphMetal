@@ -98,6 +98,8 @@ def t_critical(tail, df):
     return (lo+hi)/2
 
 
+# Paired differences: https://www.itl.nist.gov/div898/handbook/prc/section3/prc311.htm
+# Family error allocation: https://www.itl.nist.gov/div898/handbook/prc/section4/prc463.htm
 def interval(values, alpha):
     if len(values) < 2:
         raise ValueError('at least two pairs required')

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -116,48 +117,70 @@ template<class S> static std::string proposal(S &s, RandomState &state, const st
     s=candidate;
     return "applied";
 }
-template<class S> static void output(const S &s, const RandomState &state, const std::string &outcome, int removedTerms) {
-    std::cout << "{\"outcome\":\""<<outcome<<"\",\"rng\":"<<state.value<<",\"draws\":"<<reference_draws<<",\"words\":[";
-    for(size_t i=0;i<reference_words.size();i++) std::cout<<(i?",":"")<<reference_words[i];
-    std::cout<<"],\"removed_terms\":";
-    if(removedTerms<0) std::cout<<"null"; else std::cout<<removedTerms;
-    std::cout<<",\"reduction_operations\":null,\"scheme\":{\"n\":["<<s.n[0]<<","<<s.n[1]<<","<<s.n[2]<<"],\"m\":"<<s.m<<",\"z2\":"<<(std::is_same_v<S,SchemeInteger>?"false":"true");
+template<class S> static void output(const S &s, const RandomState &state, const std::string &outcome, int removedTerms, std::ostream &out=std::cout, size_t wordStart=0, const std::string &observations="") {
+    out << "{\"outcome\":\""<<outcome<<"\",\"rng\":"<<state.value<<",\"draws\":"<<(reference_words.size()-wordStart)<<",\"words\":[";
+    for(size_t i=wordStart;i<reference_words.size();i++) out<<(i>wordStart?",":"")<<reference_words[i];
+    out<<"],\"removed_terms\":";
+    if(removedTerms<0) out<<"null"; else out<<removedTerms;
+    out<<",\"reduction_operations\":null,\"scheme\":{\"n\":["<<s.n[0]<<","<<s.n[1]<<","<<s.n[2]<<"],\"m\":"<<s.m<<",\"z2\":"<<(std::is_same_v<S,SchemeInteger>?"false":"true");
     const char* names[]={"u","v","w"};
     for(int p=0;p<3;p++) {
-        std::cout<<",\""<<names[p]<<"\":[";
-        for(int r=0;r<s.m;r++) { std::cout<<(r?",":"")<<"[";
-            for(int c=0;c<s.nn[p];c++) std::cout<<(c?",":"")<<coefficient(s,p,r,c);
-            std::cout<<"]";
-        } std::cout<<"]";
+        out<<",\""<<names[p]<<"\":[";
+        for(int r=0;r<s.m;r++) { out<<(r?",":"")<<"[";
+            for(int c=0;c<s.nn[p];c++) out<<(c?",":"")<<coefficient(s,p,r,c);
+            out<<"]";
+        } out<<"]";
     }
-    std::cout<<"},\"candidates\":[";
+    out<<"},\"candidates\":[";
     for(int p=0;p<3;p++) {
-        std::cout<<(p?",":"")<<"{\"overflow\":"<<s.flips[p].overflow<<",\"pairs\":[";
+        out<<(p?",":"")<<"{\"overflow\":"<<s.flips[p].overflow<<",\"pairs\":[";
         for(unsigned q=0;q<s.flips[p].size;q++)
-            std::cout<<(q?",":"")<<"["<<s.flips[p].index1(q)<<","<<s.flips[p].index2(q)<<"]";
-        std::cout<<"]}";
+            out<<(q?",":"")<<"["<<s.flips[p].index1(q)<<","<<s.flips[p].index2(q)<<"]";
+        out<<"]}";
     }
-    std::cout<<"]}\n";
+    out<<"]";
+    if(!observations.empty()) out<<",\"observations\":["<<observations<<"]";
+    out<<"}\n";
 }
-template<class S> static void run(const std::string &op, uint32_t rng, unsigned ceiling) {
+template<class S> static void run(const std::string &op, uint32_t rng, unsigned ceiling, uint32_t limit, bool bounded) {
     S s=input<S>(); const int initialRank=s.m; RandomState state{rng}; std::string outcome;
-    if(overflow(s)) outcome="capacity_error";
-    else if(op=="inspect") outcome="inspected";
-    else if(op=="flip") outcome=s.tryFlip(state)?"applied":"unsuccessful";
-    else if(op=="reduce") outcome=s.tryReduce()?"applied":"unsuccessful";
-    else if(uint64_t(s.m)+1>std::min<unsigned>({ceiling,unsigned(MAX_RANK),unsigned(s.n[0]*s.n[1]*s.n[2])})) outcome="rank_blocked";
-    else outcome=proposal(s,state,op);
-    if(overflow(s)) outcome="capacity_error";
-    if(!s.validate()) throw std::runtime_error("result tensor invalid");
-    output(s,state,outcome,(op=="flip" || op=="reduce") ? initialRank-s.m : -1);
+    std::ostringstream observations;
+    const bool expansion=op=="plus" || op=="random" || op=="existing";
+    const uint32_t attempts=expansion ? limit : 1;
+    for(uint32_t attempt=0; attempt<attempts; ++attempt) {
+        const uint32_t before=state.value;
+        const size_t wordStart=reference_words.size();
+        const int rankBefore=s.m;
+        if(overflow(s)) outcome="capacity_error";
+        else if(op=="inspect") outcome="inspected";
+        else if(op=="flip") outcome=s.tryFlip(state)?"applied":"unsuccessful";
+        else if(op=="reduce") outcome=s.tryReduce()?"applied":"unsuccessful";
+        else if(!expansion) throw std::runtime_error("unknown operation");
+        else if(uint64_t(s.m)+1>std::min<unsigned>({ceiling,unsigned(MAX_RANK),unsigned(s.n[0]*s.n[1]*s.n[2])})) outcome="rank_blocked";
+        else outcome=proposal(s,state,op);
+        if(overflow(s)) outcome="capacity_error";
+        if(!s.validate()) throw std::runtime_error("result tensor invalid");
+        if(bounded) {
+            observations<<(attempt ? "," : "")<<"{\"operation\":\""<<op<<"\",\"rng_before\":"<<before<<",\"result\":";
+            output(s,state,outcome,(op=="flip" || op=="reduce") ? rankBefore-s.m : -1,
+                   observations,wordStart);
+            observations<<"}";
+        }
+        if(!bounded || (outcome!="tuple_rejection" && outcome!="coefficient_rejection")) break;
+        if(attempt+1==attempts) outcome="proposal_exhausted";
+    }
+    output(s,state,outcome,(op=="flip" || op=="reduce") ? initialRank-s.m : -1,
+           std::cout,0,observations.str());
 }
 int main(int argc,char **argv) {
     try {
-        if(argc!=5) throw std::runtime_error("usage: scalar_reference ZT|F2 inspect|flip|reduce|plus|random|existing rng ceiling");
+        if(argc!=5 && argc!=6) throw std::runtime_error("usage: scalar_reference ZT|F2 inspect|flip|reduce|plus|random|existing rng ceiling [proposal_limit]");
         uint32_t rng=number(argv[3],UINT32_MAX); if(!rng) throw std::runtime_error("zero RNG state");
         unsigned ceiling=number(argv[4],MAX_RANK);
-        if(std::string(argv[1])=="ZT") run<SchemeInteger>(argv[2],rng,ceiling);
-        else if(std::string(argv[1])=="F2") run<SchemeZ2>(argv[2],rng,ceiling);
+        uint32_t limit=argc==6 ? number(argv[5],UINT32_MAX) : 1;
+        if(!limit) throw std::runtime_error("positive proposal limit required");
+        if(std::string(argv[1])=="ZT") run<SchemeInteger>(argv[2],rng,ceiling,limit,argc==6);
+        else if(std::string(argv[1])=="F2") run<SchemeZ2>(argv[2],rng,ceiling,limit,argc==6);
         else throw std::runtime_error("unsupported domain");
     } catch(const std::exception &e) { std::cerr<<e.what()<<"\n"; return 1; }
 }

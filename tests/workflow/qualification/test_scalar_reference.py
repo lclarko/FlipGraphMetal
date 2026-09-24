@@ -16,7 +16,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / 'tests/metal'))
 from verify import verify
-from reference_policy import Config, Policy
+from reference_policy import Config, Policy, U32, WorkerRNG
 from scalar_bridge import NativeArithmetic, check_build, instrument, operation, validate_rng
 
 
@@ -101,6 +101,36 @@ def f2_boundary_fixture(width):
             out['u'].append(u);out['v'].append(v);out['w'].append(block['w'][r].copy())
         offset += inner
     return out
+
+
+def overflow_fixture():
+    """Add cancelling F2 pairs to public rank196 input; no tensor change."""
+    data = f2_boundary_fixture(64)
+    used = {k:set(map(tuple,data[k])) for k in 'uvw'}
+    def fresh(key, start):
+        width = len(data[key][0])
+        for value in range(start, start+10000):
+            row = [(value >> i) & 1 for i in range(width)]
+            if tuple(row) not in used[key]:
+                used[key].add(tuple(row))
+                return row
+        raise ValueError('finite fixture construction exhausted')
+    common = fresh('w',40000)
+    a = fresh('w',20000)
+    b = [x^y for x,y in zip(a,common)]
+    if tuple(b) in used['w'] or not any(b):
+        raise ValueError('fixture factors overlap')
+    def pair(u,v,w):
+        for _ in range(2):
+            for key,row in zip('uvw',(u,v,w)):
+                data[key].append(row.copy())
+            data['m'] += 1
+    for i in range(10):
+        pair(fresh('u',1000+i*100), fresh('v',3000+i*100), common)
+    u = fresh('u',8000)
+    pair(u,fresh('v',9000),a)
+    pair(u,fresh('v',10000),b)
+    return data
 
 
 class TransformationTests(unittest.TestCase):
@@ -375,6 +405,174 @@ class NativeTests(unittest.TestCase):
             bridge.install_restart(malformed)
         self.assertEqual(policy.summary(), before)
         self.assertEqual(bridge.scheme, data)
+
+    def test_controlled_q_endpoints_and_split_batch_equivalence(self):
+        for f2 in (False, True):
+            for q in (0, U32):
+                with self.subTest(f2=f2, q=q):
+                    data = fixture(f2)
+                    config = Config(seed=7, anchor=data['m'], reduction_q=q,
+                                    flip_budget=4, interval_min=100, interval_max=100,
+                                    optional_quota=1)
+                    walks = []
+                    for split in (False, True):
+                        policy = Policy(config, data['m'])
+                        bridge = NativeArithmetic(policy, data, self.binary)
+                        for step in range(4):
+                            policy.step(bridge)
+                            verify(bridge.scheme)
+                            if split and step == 1:
+                                before = (policy.rng.state, policy.rng.draws, policy.countdown)
+                                policy.commit_observations(verified=True, durable=True)
+                                policy.batch_boundary()
+                                self.assertEqual(before, (policy.rng.state, policy.rng.draws, policy.countdown))
+                        record = policy.comparison_record()
+                        decisions = [e for e in record['events'] if e['event'] == 'reduction_decision']
+                        self.assertTrue(decisions)
+                        reductions = [e for e in record['events'] if e['event'] == 'reduction']
+                        self.assertEqual(len(reductions), 0 if q == 0 else len(decisions))
+                        self.assertEqual(record['attempted']['reduction'], len(reductions))
+                        self.assertEqual(record['attempted']['flip'], 4)
+                        self.assertEqual(record['remaining']['flips'], 0)
+                        self.assertEqual(record['summary']['terminal'], 'budget_exhausted')
+                        replay = WorkerRNG(config.seed, config.worker)
+                        self.assertEqual(record['worker_rng_words'], [replay.next() for _ in range(policy.rng.draws)])
+                        self.assertEqual([w for e in record['events'] for w in e['words']], record['worker_rng_words'])
+                        native = [n for e in record['events'] for n in e.get('native_observations', [])]
+                        self.assertEqual(native, bridge.trace)
+                        self.assertEqual(record['initial_state']['scheme'], data)
+                        self.assertEqual(record['native_call_count'], len(native))
+                        self.assertEqual(sum(record['native_outcome_counts'].values()), len(native))
+                        captures = record['completed_capture_batches'] + [{
+                            'optional': record['summary']['optional'],
+                            'encounters': record['summary']['optional_encounters'],
+                            'drops': record['summary']['optional_drops']}]
+                        eligible = sum(e['event'] == 'observed' and e['rank'] == config.anchor
+                                       for e in record['events'])
+                        self.assertEqual(sum(c['encounters'] for c in captures), eligible)
+                        self.assertEqual(sum(len(c['optional'])+c['drops'] for c in captures), eligible)
+                        self.assertEqual(sum(n['result']['removed_terms'] or 0 for n in native),
+                                         record['summary']['removed_terms']['total'])
+                        walks.append(record)
+                    whole, split = walks
+                    for key in ('worker_rng_words', 'timers', 'remaining', 'attempted', 'applied'):
+                        self.assertEqual(whole[key], split[key])
+                    for key in ('state', 'best_state', 'rank', 'best', 'removed_terms', 'terminal'):
+                        self.assertEqual(whole['summary'][key], split['summary'][key])
+                    # Capture counters reset at a committed batch boundary. All
+                    # arithmetic observations and their ordered states must agree.
+                    def walk_events(record):
+                        return [{k:v for k,v in e.items() if k not in ('optional_encounters','optional_drops')}
+                                for e in record['events']]
+                    self.assertEqual(walk_events(whole), walk_events(split))
+                    self.assertEqual(len(split['completed_capture_batches']), 1)
+
+    def test_controlled_single_proposal_exhaustion_records_exact_draws(self):
+        # Fixed public fixtures and seed witnesses. Expected proposal words are
+        # independently xorshift-replayed below; these are qualification cases,
+        # not newly promoted full-state goldens.
+        for f2, seed, op, outcome, words in (
+                (False, 1, 'random', 'coefficient_rejection',
+                 [2129252540,3677366947,316708785,46153978,1363130165]),
+                (True, 28, 'plus', 'tuple_rejection', [2017205331,2373333128])):
+            with self.subTest(f2=f2):
+                data = fixture(f2)
+                policy = Policy(Config(seed=seed, anchor=data['m'], flip_budget=3), data['m'])
+                bridge = NativeArithmetic(policy, data, self.binary, proposal_limit=1)
+                policy.step(bridge)
+                verify(bridge.scheme)
+                record = policy.comparison_record()
+                expansion = [e for e in record['events'] if e['event'] == 'expansion']
+                self.assertEqual(len(expansion), 1)
+                event = expansion[0]
+                self.assertEqual(event['outcome'], 'proposal_exhausted')
+                self.assertEqual(len(event['native_observations']), 1)
+                proposal = event['native_observations'][0]
+                self.assertEqual((proposal['operation'], proposal['result']['outcome']), (op, outcome))
+                self.assertEqual(proposal['result']['words'], words)
+                replay = WorkerRNG(0, 0)
+                replay.state = proposal['rng_before']
+                self.assertEqual(words, [replay.next() for _ in words])
+                # Failed proposal does not commit its temporary factor state.
+                self.assertEqual(proposal['result']['scheme'], bridge.trace[0]['result']['scheme'])
+                self.assertEqual(record['applied']['expansion'], 0)
+                self.assertEqual(record['attempted']['expansion'], 1)
+                self.assertFalse(record['summary']['pending_restart'])
+                self.assertEqual(record['events'][-1]['event'], 'event_countdown')
+                self.assertEqual(len(record['events'][-1]['words']), 1)
+
+    def test_native_bounded_invocation_matches_individual_proposals(self):
+        for f2, seed in ((False, 1), (True, 28)):
+            data = fixture(f2)
+            policy = Policy(Config(seed=seed, anchor=data['m'], flip_budget=3), data['m'])
+            bridge = NativeArithmetic(policy, data, self.binary, proposal_limit=1)
+            policy.step(bridge)
+            start = bridge.trace[-1]
+            before = bridge.trace[0]['result']
+            bounded = operation(self.binary, before['scheme'], start['operation'],
+                                start['rng_before'], policy.config.ceiling(),
+                                before['candidates'], proposal_limit=3)
+            verify(bounded['scheme'])
+            self.assertGreater(len(bounded['observations']), 1)
+            rng, scheme, candidates, expected_words = start['rng_before'], before['scheme'], before['candidates'], []
+            for entry in bounded['observations']:
+                one = operation(self.binary, scheme, start['operation'], rng,
+                                policy.config.ceiling(), candidates)
+                self.assertEqual(entry, {'operation': start['operation'], 'rng_before': rng, 'result': one})
+                expected_words.extend(one['words'])
+                rng, scheme, candidates = one['rng'], one['scheme'], one['candidates']
+            self.assertEqual(bounded['words'], expected_words)
+            self.assertEqual(bounded['scheme'], scheme)
+            self.assertEqual(bounded['candidates'], candidates)
+            last = bounded['observations'][-1]['result']['outcome']
+            expected = 'proposal_exhausted' if last in ('tuple_rejection','coefficient_rejection') else last
+            self.assertEqual(bounded['outcome'], expected)
+            if expected == 'proposal_exhausted':
+                self.assertEqual(len(bounded['observations']), 3)
+
+    def test_actual_midwalk_overflow_preserves_prior_committed_evidence(self):
+        data = overflow_fixture()
+        verify(data)
+        initial = self.execute(data)
+        def pairs(scheme):
+            return [[[i,j] for i in range(scheme['m']) for j in range(i+1,scheme['m'])
+                     if scheme[key][i] == scheme[key][j]] for key in 'uvw']
+        expected = pairs(data)
+        self.assertEqual([len(p) for p in expected], [16,12,486])
+        for actual, full in zip(initial['candidates'],expected):
+            self.assertFalse(actual['overflow'])
+            self.assertEqual({tuple(sorted(p)) for p in actual['pairs']},set(map(tuple,full)))
+        result = self.execute(data,'flip',2859722289,350,initial['candidates'])
+        self.assertEqual(result['words'],[11,2974059,738900491])
+        self.assertEqual(result['outcome'],'capacity_error')
+        self.assertEqual(len(pairs(result['scheme'])[2]),505)
+        self.assertEqual(result['candidates'][2]['overflow'],1)
+        self.assertEqual(len(result['candidates'][2]['pairs']),500)
+        # Seed obtained by inverting six xorshift steps before the known state:
+        # init, three F2 flip words, q=0 decision, restart countdown.
+        parent = f2_boundary_fixture(64)
+        config = Config(seed=2812048845, anchor=220, dimensions=(4,16,4),
+                        interval_min=100, interval_max=100)
+        policy = Policy(config,parent['m'])
+        bridge = NativeArithmetic(policy,parent,self.binary)
+        policy.step(bridge)
+        verify(bridge.scheme)
+        policy.commit_observations(verified=True,durable=True)
+        committed = copy.deepcopy(policy.mandatory)
+        self.assertIsNotNone(committed)
+        policy.pending_restart = True
+        bridge.install_restart(data)
+        self.assertEqual(policy.rng.state,2859722289)
+        policy.step(bridge)
+        self.assertEqual(policy.terminal,'capacity_error')
+        self.assertFalse(policy.dispatch_complete)
+        self.assertEqual(policy.mandatory,committed)
+        with self.assertRaises(ValueError):
+            policy.commit_observations(verified=True,durable=True)
+        event = policy.comparison_record()['events'][-1]
+        self.assertEqual(event['event'],'capacity_error')
+        self.assertEqual(event['native_observations'][0]['result'],result)
+        verify(committed['state']['scheme'])
 
     def test_real_arithmetic_drives_independent_policy(self):
         for f2 in (False,True):

@@ -12,12 +12,14 @@ import time
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 sys.path.insert(0, str(ROOT / 'tests/metal'))
 from application import digest, hardware_inventory, write_json
 from guard import run as guarded_run
 from smoke import dispatch_evidence
 from verify import verify, reconstruct
+from profile_baseline import archive_files
 
 BASELINE = '2f91a882dab71cd94de1897f397fe96271920797'
 PROGRAMS = ('flip_graph', 'flip_graph_f2', 'complexity_minimizer',
@@ -32,6 +34,54 @@ ROWS = (
     ('fixed-reducer', 'additions_reducer', 'rank23_3x3.txt', False, 'runReducersKernel'),
     ('mutation-reducer', 'additions_reducer', 'rank23_3x3.txt', False, 'runReducersKernel'),
 )
+
+
+def freeze_baseline(output):
+    """Archive the public pinned commit into a new, unbuilt source snapshot."""
+    output = Path(output).absolute()
+    output.mkdir(parents=True, exist_ok=False)
+    receipt = {
+        'schema': 'fgm-baseline-freeze-v1',
+        'commit': BASELINE,
+        'behavioral_reference': '9ea5bfc144b528184c32c178cae0b49bc60e8e3d',
+        'source': str(output / 'source'),
+        'created_utc': time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()),
+        'complete': False,
+        'source_preparation': 'incomplete',
+        'build_status': 'NOT RUN',
+        'measurement_status': 'NOT RUN',
+    }
+    write_json(output / 'freeze.json', receipt)
+    try:
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(ROOT), *args])
+
+        commit = git('rev-parse', '--verify', BASELINE + '^{commit}').decode().strip()
+        if commit != BASELINE:
+            raise ValueError('baseline commit identity mismatch')
+        receipt['tree'] = git('rev-parse', '--verify', BASELINE + '^{tree}').decode().strip()
+        archive = git('archive', '--format=tar', BASELINE)
+        (output / 'source.tar').write_bytes(archive)
+        receipt['archive_sha256'] = hashlib.sha256(archive).hexdigest()
+        files = archive_files(archive)
+        source = output / 'source'
+        source.mkdir()
+        for name, (payload, mode) in files.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('xb') as stream:
+                stream.write(payload)
+            path.chmod(mode)
+        assert_source_snapshot(source, receipt)
+        receipt['source_preparation'] = 'complete'
+        receipt['complete'] = True
+    except Exception as error:
+        receipt['error'] = str(error)
+        raise
+    finally:
+        write_json(output / 'freeze.json', receipt)
+        (output / 'freeze.sha256').write_text(digest(output / 'freeze.json') + '\n')
+    return receipt
 
 
 def content_hash(value):
@@ -202,6 +252,8 @@ def circuit_factors(data):
 
 def execute(source, output, config, names, repetitions):
     output.mkdir(parents=True, exist_ok=False)
+    write_json(output/'protocol.json', config)
+    (output/'protocol.sha256').write_text(digest(output/'protocol.json')+'\n')
     freeze = json.loads((source.parent / 'freeze.json').read_text())
     if freeze['commit'] != BASELINE or digest(source.parent/'source.tar') != freeze['archive_sha256']:
         raise ValueError('wrong or changed baseline snapshot')
@@ -290,12 +342,22 @@ def execute(source, output, config, names, repetitions):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument('--freeze', type=Path, metavar='NEW_DIRECTORY',
+                           help='Prepare pinned source only; no build or GPU execution')
+    operation.add_argument('--source', type=Path)
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--protocol', type=Path)
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS], default=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int, default=1)
     args=parser.parse_args()
+    if args.freeze is not None:
+        if args.output is not None or args.protocol is not None:
+            parser.error('--freeze does not accept --output or --protocol')
+        freeze_baseline(args.freeze)
+        return
+    if args.output is None:
+        parser.error('--source requires --output')
     if not 1 <= args.repetitions <= 12:
         parser.error('repetitions must be 1..12')
     config=json.loads(args.protocol.read_text()) if args.protocol else protocol({r[0]:6 for r in ROWS})

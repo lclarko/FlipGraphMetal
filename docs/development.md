@@ -58,9 +58,11 @@ Seeded selection uses the contract's byte-level hash order, independent of manif
 
 Only selected schemes are admitted and exactly verified. Their source hashes, locators, presentation bindings and optional metadata accompany the output, including aliases with the same canonical identity. Reimport preserves earlier bindings and adds the new artifact binding. Supplied classifications, bounds and evidence are provenance claims; the adapter does not certify them or transfer them to mutated schemes. An external selection is not a Metal journal resume.
 
-### Foundation checks
+### Host checks
 
 `make test-workflow` runs routine host checks for formats, domains, identities, selection, policy boundaries and performance verdicts. `make qualify-workflow` additionally checks inventories of 1,000, 10,000 and 100,000 presentations, builds an isolated scalar adapter from the pinned arithmetic revision, and qualifies the frozen-baseline instrumentation fixtures. These longer checks are required when accepting changes to external selection, the arithmetic reference or baseline profiling, and at the foundation/release gates. Both targets retain a new receipt and log directory under `build/parity/`. The controller reference and its trace fixtures are separate from production kernels; these host checks do not establish GPU or packed/general agreement.
+
+The scalar adapter performs bounded arithmetic calls in C++, including proposal retries and per-proposal outcomes. Its Python bridge checks build identities, transports ordered state and independently replays RNG records. The separate policy reference owns scheduling, captures and restarts; it does not reuse a production controller. Reviewed trace fixtures cover their named cases and are not a claim of complete controlled-kernel validation.
 
 The performance tools in `benchmarks/workflow` retain a pinned production baseline, qualify separate profiling builds and evaluate prospective paired comparisons. Repeatability estimates describe measurement precision, not permitted regression. A budget must be approved independently of candidate observations. An incomplete comparison is not a pass; a measured slowdown within an approved tolerance remains a reported slowdown.
 

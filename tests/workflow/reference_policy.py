@@ -7,7 +7,7 @@ GPU execution. The production controller must not import this test module.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from collections import deque
 from copy import deepcopy
 
@@ -38,6 +38,7 @@ class WorkerRNG:
         self.state = seed ^ ((0x9e3779b9 * ((worker + 1) & U32)) & U32)
         self.state = self.state or 1
         self.draws = 0
+        self.words = []
 
     def next(self):
         x = self.state
@@ -46,6 +47,7 @@ class WorkerRNG:
         x ^= (x << 5) & U32
         self.state = x & U32
         self.draws += 1
+        self.words.append(self.state)
         return self.state
 
     def bounded(self, bound):
@@ -131,6 +133,7 @@ class ArithmeticEvent:
     expected_operator: int | None = None
     state: dict | None = None
     removed_terms: int | None = None
+    native_observations: list | None = None
 
 
 class Scripts:
@@ -155,6 +158,7 @@ class Policy:
         self.rank = self._admit_rank(parent_rank)
         self.best = self.rank
         self.state = None
+        self.initial_state = None
         self.best_state = None
         self.removed_terms = None
         self.pending_target_state = None
@@ -173,6 +177,8 @@ class Policy:
         self.optional_drops = 0
         self.events = []
         self.applied = {"flip": 0, "reduction": 0, "expansion": 0}
+        self.attempted = {"flip": 0, "reduction": 0, "expansion": 0}
+        self.capture_batches = []
         if not parent_verified:
             raise ValueError("parent verification required")
         if self._target(self.rank):
@@ -189,6 +195,11 @@ class Policy:
 
     def _record(self, kind, **values):
         self.events.append({"event": kind, **values,
+                            "countdown": self.countdown, "stagnation": self.stagnation,
+                            "flips": self.flips, "controls": self.controls,
+                            "applied": self.applied.copy(), "attempted": self.attempted.copy(),
+                            "optional_encounters": self.optional_encounters,
+                            "optional_drops": self.optional_drops,
                             "rng": None if self.rng is None else self.rng.state,
                             "draws": 0 if self.rng is None else self.rng.draws})
 
@@ -213,6 +224,8 @@ class Policy:
         self.state = deepcopy(state)
         if self.terminal == "existing_target_pending":
             self.pending_target_state = deepcopy(state)
+        if self.initial_state is None:
+            self.initial_state = deepcopy(state)
         if self.best_state is None:
             self.best_state = deepcopy(state)
             self.removed_terms = {"flip": 0, "reduction": 0, "total": 0}
@@ -242,6 +255,7 @@ class Policy:
             self._record("target_pending", rank=self.rank)
 
     def _arithmetic(self, operation, script, operator=None):
+        self.attempted[operation] = add(self.attempted[operation], 1)
         event = script.take(operation)
         uint(event.draws, 1000000)
         if event.expected_operator is not None and event.expected_operator != operator:
@@ -255,7 +269,9 @@ class Policy:
         if event.outcome == "capacity_error":
             self.dispatch_complete = False
             self.terminal = "capacity_error"
-            self._record("capacity_error", operation=operation)
+            self._record("capacity_error", operation=operation,
+                         **({"native_observations": deepcopy(event.native_observations)}
+                            if event.native_observations is not None else {}))
             return False
         if event.outcome == "applied":
             if event.rank is None:
@@ -280,7 +296,9 @@ class Policy:
             self.removed_terms[operation] = add(self.removed_terms[operation], removed)
             self.removed_terms["total"] = add(self.removed_terms["total"], removed)
         self._record(operation, outcome=event.outcome, rank=self.rank, operator=operator,
-                     **({"removed_terms": event.removed_terms} if event.removed_terms is not None else {}))
+                     **({"removed_terms": event.removed_terms} if event.removed_terms is not None else {}),
+                     **({"native_observations": deepcopy(event.native_observations)}
+                        if event.native_observations is not None else {}))
         if event.outcome == "applied":
             self._observe(operation)
         return event.outcome == "applied"
@@ -350,6 +368,9 @@ class Policy:
         """Clear capture slots only after host commitment; preserve policy/RNG."""
         if not self.dispatch_complete or not self.mandatory_committed:
             raise ValueError("uncommitted or incomplete batch")
+        self.capture_batches.append({"mandatory": deepcopy(self.mandatory),
+                                     "optional": deepcopy(self.optional),
+                                     "encounters": self.optional_encounters, "drops": self.optional_drops})
         self.mandatory = None
         self.optional = []
         self.optional_encounters = 0
@@ -391,6 +412,38 @@ class Policy:
             raise ValueError("no stage control credit")
         self.controls += 1
         self._record("stage_credit")
+
+    def comparison_record(self):
+        """Versioned worker comparison; host pool/journal decisions are not modeled."""
+        words = [] if self.rng is None else self.rng.words
+        initial = None if self.rng is None else WorkerRNG(self.config.seed, self.config.worker).state
+        events, previous_draws, previous_rng = [], 0, initial
+        for event in self.events:
+            entry = deepcopy(event)
+            entry['rng_before'] = previous_rng
+            entry['words'] = words[previous_draws:entry['draws']]
+            events.append(entry)
+            previous_draws, previous_rng = entry['draws'], entry['rng']
+        native = [item for event in events for item in event.get('native_observations', [])]
+        native_outcomes = {}
+        for item in native:
+            key = item['result']['outcome']
+            native_outcomes[key] = native_outcomes.get(key, 0) + 1
+        return {'schema': 'fgm-controlled-worker-comparison-v1',
+                'arithmetic_reference': ARITHMETIC_REFERENCE,
+                'config': asdict(self.config), 'worker_rng_initial': initial,
+                'initial_state': deepcopy(self.initial_state),
+                'native_call_count': len(native), 'native_outcome_counts': native_outcomes,
+                'worker_rng_words': list(words), 'summary': self.summary(),
+                'timers': {'countdown': self.countdown, 'stagnation': self.stagnation},
+                'remaining': {'flips': self.config.flip_budget-self.flips,
+                              'controls': self.config.control_budget-self.controls},
+                'attempted': self.attempted.copy(), 'applied': self.applied.copy(),
+                'dispatch_complete': self.dispatch_complete,
+                'mandatory_committed': self.mandatory_committed,
+                'completed_capture_batches': deepcopy(self.capture_batches),
+                'events': events,
+                'host_selection_and_journal': 'not modeled'}
 
     def summary(self):
         return {**({"pending_target_state": deepcopy(self.pending_target_state)}

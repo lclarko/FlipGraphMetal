@@ -129,7 +129,7 @@ def validate_rng(initial, result):
         raise ValueError('native RNG state differs from independent replay')
 
 
-def operation(binary, scheme, op, rng, ceiling, candidates=None):
+def operation(binary, scheme, op, rng, ceiling, candidates=None, proposal_limit=None):
     if type(scheme.get('z2')) is not bool:
         raise ValueError('explicit domain required')
     if type(rng) is not int or not 1 <= rng <= U32:
@@ -151,13 +151,30 @@ def operation(binary, scheme, op, rng, ceiling, candidates=None):
                 values.extend(pair)
     if any(type(value) is not int for value in values):
         raise ValueError('integer input required')
-    result = subprocess.run([str(binary), 'F2' if scheme['z2'] else 'ZT', op,
-                             str(rng), str(ceiling)], input=' '.join(map(str, values))+'\n',
+    command = [str(binary), 'F2' if scheme['z2'] else 'ZT', op, str(rng), str(ceiling)]
+    if proposal_limit is not None:
+        if type(proposal_limit) is not int or not 1 <= proposal_limit <= U32:
+            raise ValueError('positive uint32 proposal limit required')
+        command.append(str(proposal_limit))
+    result = subprocess.run(command, input=' '.join(map(str, values))+'\n',
                             capture_output=True, text=True, timeout=10)
     if result.returncode:
         raise ValueError(result.stderr.strip())
     decoded = json.loads(result.stdout)
     validate_rng(rng, decoded)
+    if proposal_limit is not None:
+        observations = decoded.get('observations')
+        if not isinstance(observations, list) or not 1 <= len(observations) <= proposal_limit:
+            raise ValueError('invalid bounded native observation count')
+        previous, words = rng, []
+        for item in observations:
+            if item['operation'] != op or item['rng_before'] != previous:
+                raise ValueError('native observation order mismatch')
+            validate_rng(previous, item['result'])
+            words.extend(item['result']['words'])
+            previous = item['result']['rng']
+        if previous != decoded['rng'] or words != decoded['words']:
+            raise ValueError('native invocation/proposal RNG mismatch')
     return decoded
 
 
@@ -219,9 +236,7 @@ class NativeArithmetic:
     def take(self, kind):
         if self.snapshot() != self.policy.state:
             raise ValueError("policy and native ordered state diverged")
-        before = self.policy.rng.state
-        rng = before
-        draws = 0
+        rng = self.policy.rng.state
         operator = None
         if kind == 'expansion':
             # Policy has just consumed operator = next()%3, so current state
@@ -232,28 +247,21 @@ class NativeArithmetic:
         else:
             op = {'flip': 'flip', 'reduction': 'reduce'}[kind]
             count = 1
-        last = None
-        for _ in range(count):
-            if self.native_calls >= self.native_call_budget:
-                raise RuntimeError('reference native-call resource budget exhausted; not an arithmetic verdict')
-            self.native_calls += 1
-            result = operation(self.binary, self.scheme, op, rng,
-                               self.policy.config.ceiling(), self.candidates)
-            self.trace.append({'operation': op, 'rng_before': rng, 'result': result})
-            rng = result['rng']
-            draws += result['draws']
-            last = result['outcome']
-            if last in ('tuple_rejection', 'coefficient_rejection'):
-                continue
-            self.scheme, self.candidates = result['scheme'], result['candidates']
-            break
-        else:
-            last = 'proposal_exhausted'
+        if count > self.native_call_budget-self.native_calls:
+            raise RuntimeError('reference native-call resource budget cannot cover invocation')
+        result = operation(self.binary, self.scheme, op, rng,
+                           self.policy.config.ceiling(), self.candidates, proposal_limit=count)
+        observations = result['observations']
+        self.native_calls += len(observations)
+        self.trace.extend(deepcopy(observations))
+        self.scheme, self.candidates = result['scheme'], result['candidates']
+        last = result['outcome']
         if last == 'rank_blocked':
             raise AssertionError('controller called blocked arithmetic')
         return ArithmeticEvent(last, self.scheme['m'] if last == 'applied' else None,
-                               draws, operator, self.snapshot(),
-                               result["removed_terms"] if kind in ("flip", "reduction") else None)
+                               result['draws'], operator, self.snapshot(),
+                               result["removed_terms"] if kind in ("flip", "reduction") else None,
+                               deepcopy(observations))
 
 
 if __name__ == '__main__':

@@ -22,7 +22,8 @@ def digest(path):
 def source_inventory():
     paths = [ROOT / "makefile", ROOT / "scripts/build_config.py",
              ROOT / "tests/metal/verify.py"]
-    for name in ("strassen_3x3.txt", "strassen_3x3_f2.txt", "strassen_4x4.txt"):
+    for name in ("strassen_3x3.txt", "strassen_3x3_f2.txt", "strassen_4x4.txt",
+                 "rank23_3x3.txt"):
         paths.append(ROOT / "tests/metal/fixtures" / name)
     for directory in ("tests/workflow", "src/workflow", "benchmarks/workflow",
                       "docs/specifications"):
