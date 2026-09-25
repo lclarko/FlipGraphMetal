@@ -35,6 +35,57 @@ def log(kernel='minimizeKernel', rounds=2, mutation=False):
 
 
 class BaselineTests(unittest.TestCase):
+    def test_native_config_isolates_paths_and_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'input.json').write_text('{}')
+            attempt=root/'trial';attempt.mkdir()
+            original={'input':{'kind':'files','files':[{'path':'input.json'}]},'output':'old',
+                      'history':{'path':'old','storage_bytes':4096}}
+            resolved=b.native_attempt_config(original,root,attempt)
+            self.assertEqual(resolved['input']['files'][0]['path'],str((root/'input.json').resolve()))
+            self.assertEqual(resolved['history']['path'],str(attempt/'history'))
+            self.assertEqual(original['output'],'old')
+            source=root/'prior';source.mkdir();(source/'journal').write_text('retained')
+            original['input']={'kind':'resume','journal':'prior'}
+            resolved=b.native_attempt_config(original,root,attempt)
+            (attempt/'history/journal').write_text('changed copy')
+            self.assertEqual((source/'journal').read_text(),'retained')
+
+    def test_native_circuit_binding(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'circuit.jsonl';data=circuit()
+            path.write_text(json.dumps(data)+'\n')
+            source=dict(dimensions=[1,1,1],rank=1,domain='ZT',orientation='cyclic-w',
+                        u=[[1]],v=[[1]],w=[[1]])
+            source['effective_factors']={key:copy.deepcopy(source[key]) for key in 'uvw'}
+            source['factors_id']=b.host_oracle().identity(source,False)
+            source['scheme_id']=b.host_oracle().identity(source,True)
+            result=dict(circuit_record_index=0,result_factors_id=source['factors_id'],
+                        result_rank=1,verified_circuit_additions=0,mode='fixed',
+                        effective_input_factors_id=source['factors_id'],input_presentation_index=0)
+            receipt=dict(circuit_artifact={'sha256':b.digest(path),'records':1},
+                         results=[result],presentations=[source])
+            self.assertEqual(b.native_verify_circuits(path,receipt),1)
+            source['u']=source['v']=[[-1]]
+            source['factors_id']=b.host_oracle().identity(source,False)
+            source['scheme_id']=b.host_oracle().identity(source,True)
+            self.assertEqual(b.native_verify_circuits(path,receipt),1)
+            result['result_rank']=2
+            with self.assertRaises(ValueError):b.native_verify_circuits(path,receipt)
+            result['result_rank']=1;receipt['circuit_artifact']['records']=2
+            with self.assertRaises(ValueError):b.native_verify_circuits(path,receipt)
+
+    def test_native_dispatch_requires_timing_library_and_expected_kernel(self):
+        receipt=dict(counters={'flip_attempts':1},library_sha256='a'*64,actual_backend='general',
+                     configuration={'operation':'search','policy':{'mode':'alternatives'}})
+        text=log('controlledGeneralKernel',1)+'Metal library: signed.metallib SHA256 '+('a'*64)+'\n'
+        self.assertEqual(b.native_dispatch_evidence(text,receipt)['status'],'GPU_EXECUTED')
+        for bad in [text.replace('3 ms GPU','nan ms GPU'),text.replace('a'*64,'b'*64),
+                    text.replace('controlledGeneralKernel','otherKernel'),'']:
+            with self.assertRaises(ValueError):b.native_dispatch_evidence(bad,receipt)
+        receipt['counters']['flip_attempts']=0
+        self.assertEqual(b.native_dispatch_evidence('',receipt)['status'],'GPU_NOT_RUN')
+
     def test_adapter_headers(self):
         data = scalar()
         self.assertEqual(b.adapter_bytes(data, 'search').split(), [b'1', b'1',b'1',b'1',b'1', b'1',b'1',b'1'])

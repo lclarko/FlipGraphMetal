@@ -1,3 +1,5 @@
+#include "../workflow/reduction_execution.h"
+#include "../workflow/run_config.h"
 
 SchemeAdditionsReducer::SchemeAdditionsReducer(int count, int schemesCount, int maxFlips, int seed, int blockSize, const std::string &outputPath, int topCount) {
     this->count = count;
@@ -18,14 +20,20 @@ SchemeAdditionsReducer::SchemeAdditionsReducer(int count, int schemesCount, int 
     }
 
     std::cout << "Start memory allocating" << std::endl;
-    metalAllocate(&reducersU, (count + 1) * sizeof(AdditionsReducer<MAX_U_EXPRESSIONS, MAX_U_FRESH_VARIABLES, MAX_U_REAL_VARIABLES, MAX_U_SUBEXPRESSIONS>));
-    metalAllocate(&reducersV, (count + 1) * sizeof(AdditionsReducer<MAX_V_EXPRESSIONS, MAX_V_FRESH_VARIABLES, MAX_V_REAL_VARIABLES, MAX_V_SUBEXPRESSIONS>));
-    metalAllocate(&reducersW, (count + 1) * sizeof(AdditionsReducer<MAX_W_EXPRESSIONS, MAX_W_FRESH_VARIABLES, MAX_W_REAL_VARIABLES, MAX_W_SUBEXPRESSIONS>));
-    metalAllocate(&schemes, (count + 1) * sizeof(SchemeInteger));
-    metalAllocate(&states, count * sizeof(RandomState));
+    try {
+        metalAllocate(&reducersU, (count + 1) * sizeof(AdditionsReducer<MAX_U_EXPRESSIONS, MAX_U_FRESH_VARIABLES, MAX_U_REAL_VARIABLES, MAX_U_SUBEXPRESSIONS>));
+        metalAllocate(&reducersV, (count + 1) * sizeof(AdditionsReducer<MAX_V_EXPRESSIONS, MAX_V_FRESH_VARIABLES, MAX_V_REAL_VARIABLES, MAX_V_SUBEXPRESSIONS>));
+        metalAllocate(&reducersW, (count + 1) * sizeof(AdditionsReducer<MAX_W_EXPRESSIONS, MAX_W_FRESH_VARIABLES, MAX_W_REAL_VARIABLES, MAX_W_SUBEXPRESSIONS>));
+        metalAllocate(&schemes, (count + 1) * sizeof(SchemeInteger));
+        metalAllocate(&states, count * sizeof(RandomState));
+    } catch(...) {
+        for(void *pointer:{static_cast<void*>(reducersU),static_cast<void*>(reducersV),static_cast<void*>(reducersW),static_cast<void*>(schemes),static_cast<void*>(states)})
+            if(pointer) metalFree(pointer);
+        throw;
+    }
 }
 
-bool SchemeAdditionsReducer::read(std::ifstream &f) {
+bool SchemeAdditionsReducer::read(std::istream &f) {
     if (!(f >> n1 >> n2 >> n3 >> m) || n1 < 1 || n2 < 1 || n3 < 1 || n1 > 16 || n2 > 16 || n3 > 16 || m < 1 || m > MAX_RANK)
         throw std::runtime_error("invalid or unsupported input dimensions and rank");
     std::cout << "Start reading scheme " << n1 << "x" << n2 << "x" << n3 << " with " << m << " multiplications" << std::endl;
@@ -425,4 +433,88 @@ std::string SchemeAdditionsReducer::getDimensions() const {
     std::stringstream ss;
     ss << n1 << "x" << n2 << "x" << n3;
     return ss.str();
+}
+
+
+bool SchemeAdditionsReducer::read(const fgm::SchemeRecord &source) {
+    if(source.f2) throw std::runtime_error("signed addition reduction requires ZT");
+    std::ostringstream text;
+    text<<source.n[0]<<' '<<source.n[1]<<' '<<source.n[2]<<' '<<source.rank<<'\n';
+    for(const auto &matrix:source.f) for(const auto &row:matrix) {
+        for(auto value:row) text<<value<<' ';
+        text<<'\n';
+    }
+    std::istringstream input(text.str());
+    if(!read(input)) return false;
+    for(int p=0;p<3;++p) for(int r=0;r<m;++r) for(int c=0;c<schemes[0].nn[p];++c)
+        if(schemes[0].uvw[p][r][c]!=source.f[p][r][c]) throw std::runtime_error("admitted effective factors changed during reducer loading");
+    return true;
+}
+
+fgm::Json SchemeAdditionsReducer::reduceBounded(uint64_t rounds,uint64_t noImprovementLimit,uint64_t targetAdditions,const fgm::AdmissionLimits &limits,const fgm::SchemeRecord &effective) {
+    if(!rounds || rounds>INT32_MAX || !noImprovementLimit || noImprovementLimit>INT32_MAX ||
+       count<1 || schemesCount<1 || schemesCount>count || maxFlips<0 || maxFlips==INT32_MAX)
+        throw std::runtime_error("invalid bounded reduction settings");
+    const uint64_t maximumAttempts=fgm::configCheckedMultiply(fgm::configCheckedMultiply(rounds,uint64_t(maxFlips)),uint64_t(schemesCount-1));
+    if(maximumAttempts>INT64_MAX) throw fgm::Resource("reduction counters exceed JSON integer capacity");
+    struct CounterBuffer {
+        uint64_t *data=nullptr;
+        explicit CounterBuffer(size_t count) { if(count) metalAllocate(&data,count*sizeof(uint64_t)); }
+        ~CounterBuffer() { if(data) metalFree(data); }
+    } counters(maxFlips?size_t(schemesCount)*2:0);
+    initialize();
+    uint64_t completed=0,stagnant=0;
+    std::string terminal="round_budget_exhausted";
+    if(targetAdditions && uint64_t(reducedAdditions)<=targetAdditions) terminal="addition_target_met";
+    else for(uint64_t round=1;round<=rounds;++round) {
+        if(maxFlips>0 && round>1)
+            metalDispatch("directMutationKernel",size_t((schemesCount+blockSize-1)/blockSize)*blockSize,blockSize,schemes,states,counters.data,schemesCount,maxFlips);
+        if(maxFlips>0)
+            metalDispatch("runDirectReducersKernel",size_t(numBlocks)*blockSize,blockSize,reducersU,reducersV,reducersW,schemes,states,count,schemesCount);
+        else
+            metalDispatch("runReducersKernel",size_t(numBlocks)*blockSize,blockSize,reducersU,reducersV,reducersW,schemes,states,count,schemesCount,true);
+        bool improved=maxFlips?updateBestTogether():updateBestIndependent();
+        reducedAdditions=bestAdditions[0]+bestAdditions[1]+bestAdditions[2];
+        reducedFreshVars=bestFreshVars[0]+bestFreshVars[1]+bestFreshVars[2];
+        completed=round; stagnant=improved?0:stagnant+1;
+        std::cout<<"Native reduction progress: round "<<round<<" best_additions "<<reducedAdditions<<" stagnant "<<stagnant<<std::endl;
+        if(targetAdditions && uint64_t(reducedAdditions)<=targetAdditions) { terminal="addition_target_met"; break; }
+        if(stagnant>=noImprovementLimit) { terminal="no_improvement_limit"; break; }
+    }
+    if(!reducersU[count].isValid() || !reducersV[count].isValid() || !reducersW[count].isValid()) throw std::runtime_error("invalid retained best reducer state");
+    fgm::ReductionRecordBuffer buffer(limits.record);
+    std::ostream encoded(&buffer);
+    encoded.exceptions(std::ios::badbit | std::ios::failbit);
+    encoded<<'{'; reducersU[count].write(encoded,"u",""); encoded<<',';
+    reducersV[count].write(encoded,"v",""); encoded<<','; reducersW[count].write(encoded,"w",""); encoded<<'}';
+    fgm::Json circuit=fgm::Parser(buffer.str()).parse();
+    auto dimensions=fgm::Json::list(); for(int n:{n1,n2,n3}) dimensions.array.emplace_back(int64_t(n));
+    circuit.object["n"]=dimensions;
+    // Each retained U output is one multiplication. The best may precede the
+    // final walker and may have a different rank from the imported scheme.
+    circuit.object["m"]=fgm::Json(int64_t(circuit.at("u").array.size()));
+    circuit.object["z2"]=fgm::Json(false);
+    auto complexity=fgm::Json::dict();
+    complexity.object["naive"]=fgm::Json(int64_t(reducersU[count].getNaiveAdditions()+reducersV[count].getNaiveAdditions()+reducersW[count].getNaiveAdditions()));
+    complexity.object["reduced"]=fgm::Json(int64_t(reducedAdditions)); circuit.object["complexity"]=complexity;
+    fgm::AdmissionContext verifier(limits);
+    auto reconstructed=fgm::verifyReductionCircuit(circuit,effective,limits,maxFlips==0);
+    circuit.object["scheme_id"]=fgm::Json(verifier.identity(reconstructed,true));
+    circuit.object["factors_id"]=fgm::Json(verifier.identity(reconstructed,false));
+    uint64_t attempted=0,applied=0;
+    if(counters.data) for(int i=0;i<schemesCount;++i) {
+        attempted=fgm::configCheckedAdd(attempted,counters.data[2*i]);
+        applied=fgm::configCheckedAdd(applied,counters.data[2*i+1]);
+    }
+    if(attempted>maximumAttempts || applied>attempted) throw std::runtime_error("invalid mutation accounting");
+    auto result=fgm::Json::dict(); result.object["circuit"]=std::move(circuit);
+    result.object["result_scheme_id"]=fgm::Json(verifier.identity(reconstructed,true));
+    result.object["result_factors_id"]=fgm::Json(verifier.identity(reconstructed,false));
+    result.object["result_rank"]=fgm::Json(int64_t(reconstructed.rank));
+    result.object["rounds_completed"]=fgm::Json(int64_t(completed));
+    result.object["flip_attempts"]=fgm::Json(int64_t(attempted)); result.object["flips_applied"]=fgm::Json(int64_t(applied));
+    result.object["verified_circuit_additions"]=fgm::Json(int64_t(reconstructed.operations));
+    result.object["terminal_reason"]=fgm::Json(terminal);
+    result.object["verification"]=fgm::Json("exact-Z circuit reconstruction and tensor");
+    return result;
 }

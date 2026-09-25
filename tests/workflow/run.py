@@ -25,7 +25,7 @@ def source_inventory():
     for name in ("strassen_3x3.txt", "strassen_3x3_f2.txt", "strassen_4x4.txt",
                  "rank23_3x3.txt"):
         paths.append(ROOT / "tests/metal/fixtures" / name)
-    for directory in ("tests/workflow", "src/workflow", "benchmarks/workflow",
+    for directory in ("tests/workflow", "src/workflow", "src/metal", "benchmarks/workflow",
                       "docs/specifications"):
         paths.extend(path for path in (ROOT / directory).rglob("*")
                      if path.is_file() and "__pycache__" not in path.parts)
@@ -65,7 +65,13 @@ def main():
     drivers = {
         "FGM_RUN_CONFIG_DRIVER": ROOT / "build/workflow/test_run_config",
         "FGM_HOST_RNG_DRIVER": ROOT / "build/workflow/test_host_rng",
+        "FGM_EXECUTION_DRIVER": ROOT / "build/workflow/test_execution",
+        "FGM_JOURNAL_DRIVER": ROOT / "build/workflow/test_journal",
+        "FGM_POOL_DRIVER": ROOT / "build/workflow/test_pool",
+        "FGM_REDUCTION_RESULT_DRIVER": ROOT / "build/workflow/test_reduction_result",
     }
+    if args.qualification:
+        drivers["FGM_CONTROLLED_DRIVER"] = ROOT / "build/workflow/test_controlled"
     driver_artifacts = [path for binary_path in drivers.values()
                         for path in (binary_path, binary_path.with_name(binary_path.name + ".build.json"))]
     if any(not path.is_file() for path in driver_artifacts):

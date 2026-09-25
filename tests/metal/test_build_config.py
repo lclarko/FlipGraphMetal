@@ -35,6 +35,11 @@ class BuildConfigurationTests(unittest.TestCase):
         for name in (ROOT / "src/metal").iterdir():
             if name.suffix in (".h", ".metal"):
                 shutil.copy2(name, self.root / "src/metal" / name.name)
+        workflow = self.root / "src/workflow"
+        workflow.mkdir(parents=True)
+        for name in (ROOT / "src/workflow").iterdir():
+            if name.suffix in (".h", ".cpp"):
+                shutil.copy2(name, workflow / name.name)
         self.log = self.base / "compiler-log.jsonl"
         self.compiler = self.base / "fake compiler.py"
         self.compiler.write_text("""import json, os, pathlib, sys
@@ -123,6 +128,22 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         self.assertEqual(len(self.calls()), 15)
         self.make()
         self.assertEqual(len(self.calls()), 15)
+
+    def test_workflow_change_rebuilds_only_configured_programs(self):
+        self.make()
+        source = self.root / "src/workflow/execution.cpp"
+        before = source.stat()
+        source.write_text(source.read_text() + "\n// changed workflow source\n")
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.make()
+        calls = self.calls()[8:]
+        self.assertEqual({Path(args[args.index('-o') + 1]).name for args in calls},
+                         {'flip_graph', 'flip_graph_f2', 'additions_reducer'})
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all('src/workflow/scheme_io.cpp' in args and
+                            'src/workflow/execution.cpp' in args for args in calls))
+        self.make()
+        self.assertEqual(len(self.calls()), 11)
 
     def test_explicit_source_mode_and_return_to_packaged(self):
         self.make()

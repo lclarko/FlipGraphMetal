@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import unittest
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -95,6 +96,130 @@ class RunConfigTests(unittest.TestCase):
         self.assertNotEqual(self.invoke(config).returncode, 0)
         config = dict(settings(), interval_min=1, interval_max=(1 << 63)-1)
         self.assertEqual(self.accepted(config)['interval_span'], (1 << 63)-1)
+
+
+class ExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.binary = Path(os.environ.get('FGM_EXECUTION_DRIVER', ROOT/'build/workflow/test_execution'))
+        self.scheme = dict(dimensions=[1,1,1], rank=1, domain='ZT', orientation='cyclic-w',
+                           u=[[1]], v=[[1]], w=[[1]])
+        (self.root/'scheme.json').write_text(json.dumps(self.scheme))
+        self.config = dict(schema='fgm-run-v1', operation='search',
+            policy=dict(settings(), dimensions=[1,1,1], collection_rank=1),
+            input=dict(kind='files', files=[dict(path='scheme.json', format='json')]),
+            execution=dict(workers=2, batch_steps=3, block_size=32, backend='general', memory_bytes=16*1024*1024),
+            output='receipt.json')
+
+    def invoke(self, config=None, extra=()):
+        (self.root/'run.json').write_text(json.dumps(self.config if config is None else config))
+        return subprocess.run([str(self.binary), '--run-config', str(self.root/'run.json'),
+                               '--validate-only', *extra], capture_output=True, text=True, timeout=10,
+                              env={**os.environ, 'PATH':''}, cwd='/')
+
+    def test_native_preflight_without_python_or_metal(self):
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads((self.root/'receipt.json').read_text())
+        self.assertEqual(record['status'], 'validated')
+        self.assertFalse(record['execution_started'])
+        self.assertIsNone(record['actual_backend'])
+        self.assertEqual(record['admitted_inputs'], 1)
+        self.assertEqual(record['configuration']['policy']['proposal_limit'], 64)
+        self.assertEqual(record['presentations'][0]['verification'], 'exact-Z')
+        self.assertEqual(len(record['executable_sha256']), 64)
+        self.assertGreater(record['planned_buffer_bytes'], 0)
+        self.assertTrue(all(value == 0 for value in record['counters'].values()))
+
+    def test_seed_aliases_retain_presentations(self):
+        alternate = dict(self.scheme, u=[[-1]], v=[[-1]])
+        (self.root/'scheme.jsonl').write_text(json.dumps(self.scheme)+'\n'+json.dumps(alternate)+'\n')
+        self.config['input']['files'] = [dict(path='scheme.jsonl', format='jsonl')]
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads((self.root/'receipt.json').read_text())
+        self.assertEqual((record['admitted_inputs'], record['seed_duplicates']), (1, 1))
+        self.assertEqual(len(record['presentations']), 2)
+        self.assertNotEqual(record['presentations'][0]['factors_id'], record['presentations'][1]['factors_id'])
+
+    def test_above_ceiling_rank_is_admitted_without_cleanup(self):
+        (self.root/'scheme.json').write_text(json.dumps(dict(self.scheme, rank=3,
+            u=[[1],[1],[-1]], v=[[1],[1],[1]], w=[[1],[1],[1]])))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.root/'receipt.json').read_text())['presentations'][0]['rank'], 3)
+
+    def test_invalid_domain_tensor_and_config_do_not_publish(self):
+        for field, value in [('domain','F2'), ('u',[[0]])]:
+            (self.root/'scheme.json').write_text(json.dumps(dict(self.scheme, **{field:value})))
+            self.assertEqual(self.invoke().returncode, 1)
+            self.assertFalse((self.root/'receipt.json').exists())
+        (self.root/'scheme.json').write_text(json.dumps(self.scheme))
+        for change in (dict(extra=True), dict(operation='other'), dict(policy=dict(settings(), extra=1))):
+            self.assertEqual(self.invoke(dict(self.config, **change)).returncode, 1)
+            self.assertFalse((self.root/'receipt.json').exists())
+        self.assertEqual(self.invoke(extra=('--seed','7')).returncode, 1)
+
+    def test_memory_and_scan_exhaustion_are_resource_results(self):
+        for config in (dict(self.config, execution=dict(self.config['execution'], memory_bytes=1)),
+                       dict(self.config, limits=dict(scan_bytes=1))):
+            result = self.invoke(config)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn('resource_limit:', result.stderr)
+            self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_numeric_metadata_is_charged_as_owned_storage(self):
+        value = dict(self.scheme, metadata=dict(values=[0]*5000))
+        (self.root/'scheme.json').write_text(json.dumps(value))
+        self.config['execution']['memory_bytes'] = 600000
+        self.assertEqual(self.invoke().returncode, 2)
+        self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_execution_rejects_unrepresentable_anchor_without_truncation(self):
+        for rank in (351, (1 << 32)+1):
+            self.config['policy']['collection_rank']=rank
+            result=self.invoke()
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('execution representation', result.stderr)
+            self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_existing_output_preserved(self):
+        (self.root/'receipt.json').write_text('preserve me')
+        self.assertEqual(self.invoke().returncode, 1)
+        self.assertEqual((self.root/'receipt.json').read_text(), 'preserve me')
+
+    def test_reduction_reserves_verification_workspace_before_execution(self):
+        config = dict(self.config, operation='reduce', reduction=dict(domain='ZT', seed=7,
+            rounds=2, reducers=2, schemes=2, max_flips=1, no_improvements=2, target_additions=0))
+        del config['policy']
+        config['execution'] = dict(config['execution'], memory_bytes=64*1024*1024)
+        result = self.invoke(config)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('memory budget', result.stderr)
+        self.assertFalse((self.root/'receipt.json').exists())
+        self.assertFalse((self.root/'receipt.json.circuits.jsonl').exists())
+        config['execution']['memory_bytes'] = 256*1024*1024
+        result = self.invoke(config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads((self.root/'receipt.json').read_text())
+        self.assertGreater(record['reserved_host_bytes'], 64*1024*1024)
+        self.assertFalse(record['execution_started'])
+
+    def test_selection_is_not_resume(self):
+        import hashlib
+        checksum = hashlib.sha256((self.root/'scheme.json').read_bytes()).hexdigest()
+        row = dict(schema='fgm-collection-v1', namespace='public', id='one', path='scheme.json',
+                   sha256=checksum, format='json', domain='ZT', dimensions=[1,1,1])
+        (self.root/'manifest.jsonl').write_text(json.dumps(row)+'\n')
+        self.config['input'] = dict(kind='selection', manifest='manifest.jsonl', count=1, seed=7,
+                                    filters=dict(dimensions=[1,1,1]))
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads((self.root/'receipt.json').read_text())
+        self.assertEqual(record['configuration']['input']['kind'], 'selection')
+        self.assertEqual(record['presentations'][0]['source_binding']['id'], 'one')
 
 
 if __name__ == '__main__':

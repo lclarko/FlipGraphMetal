@@ -32,6 +32,17 @@ The pilot starts with six rounds per workload. Use baseline-only pilots to selec
 
 `baseline.py --host build/metal/scheme_tool --repetitions 6 --output NEW_RUN` measures verified reporting, CPU-text round trips and bounded selection from generated inventories. It retains fixtures, build settings, hardware, the ordered workload roster and every attempt. Complete-workflow time includes independent output verification; native process time, verification time and peak native RSS are reported separately. Input generation occurs before timing. These repeated measurements establish a usability and scaling baseline, without absolute latency budgets or statistical acceptance verdicts. Execution safeguards, exact verification and source/build checks remain required. Incomplete attempts are retained and reported as failures. This host-only mode does not initialize Metal or establish GPU performance.
 
+`baseline.py --native-config RUN.json --native-binary build/metal/flip_graph --output NEW_RUN`
+measures one explicitly configured native workflow. It defaults to one trial;
+repetitions must be requested. Each trial has separate outputs and history;
+resume measurements copy history before execution. The existing supervisor,
+resource measurements and independent verifiers are reused. Records include
+actual operations, captures, committed discoveries, native phase clocks, process
+time and verification-inclusive workflow time. Circuit artifacts and read-only
+journal exports are independently checked. This adapter reports `NOT EVALUATED`
+for performance and grants no regression budget. Controlled and legacy iteration
+counts are not equivalent work.
+
 ## Complete-walk comparison
 
 `build.py` compiles selected Metal source as the C++ reference and builds the selected GPU implementation. This reference is distinct from the separate `ternary_flip_graph` CPU application. Set both source directories explicitly: omitting them can select the same source for both sides. The general kernel is the build default, so packed validation must select `randomWalkCompactKernel` explicitly.

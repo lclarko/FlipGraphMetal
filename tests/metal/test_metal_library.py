@@ -22,7 +22,7 @@ class MetalLibraryTests(unittest.TestCase):
         self.source.mkdir()
         self.names = ['core.h', 'addition.h', 'flip_set.h', 'scheme_integer.h',
                       'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h',
-                      'compact.h', 'kernels.metal', 'test_kernels.metal']
+                      'compact.h', 'controlled.h', 'controlled_capture.h', 'controlled_packed.h', 'kernels.metal', 'controlled_kernels.metal', 'reduction_kernels.metal', 'test_kernels.metal']
         for name in self.names:
             (self.source / name).write_text('#pragma once\n' + name)
         self.compiler = self.root / 'fake_compiler.py'
@@ -53,6 +53,8 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
             if variant.endswith('testing'):
                 names += ['test_kernels.metal']
             expected = '#define METAL_F2\n' if variant.startswith('f2') else ''
+            if variant.endswith('testing'):
+                expected += '#define METAL_TESTING\n'
             expected += ''.join('\n' + name + '\n' for name in names)
             self.assertEqual(library.assemble(self.source, variant), expected)
         with self.assertRaises(ValueError):
@@ -98,6 +100,17 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
         self.build()
         self.assertEqual(len(self.calls()), 2)
 
+    def program_receipt(self, path, variant=None):
+        dependencies = {'src/workflow/scheme_tool.cpp': library.digest(b'source')}
+        if variant:
+            header = path.parent / 'shaders' / (variant + '.h')
+            dependencies[str(header)] = library.digest(header.read_bytes())
+        stat = path.stat()
+        path.with_name(path.name + '.build.json').write_text(json.dumps({
+            'inputs': {'command': ['fake-compiler'], 'configuration': {},
+                       'dependencies': dependencies},
+            'output': {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}}))
+
     def production_inputs(self):
         for variant in ('signed', 'f2'):
             output = self.output.with_name(variant + '.metallib')
@@ -109,6 +122,12 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
                     path.write_bytes(b'program\0' + result['library'].encode() + b'\0' +
                                      result['sha256'].encode() + b'\0')
                     path.chmod(0o755)
+                    self.program_receipt(path, variant)
+        for name in library.HOST_PRODUCTION:
+            path = self.root / 'bin' / name
+            path.write_bytes(b'native host utility')
+            path.chmod(0o755)
+            self.program_receipt(path)
         (self.root / 'bin/correctness').write_bytes(b'test-only')
         (self.root / 'bin/private-evidence.json').write_text('{}')
 
@@ -116,7 +135,7 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
         self.production_inputs()
         destination = self.root / 'package'
         manifest = library.package(self.root / 'bin', destination)
-        expected = set(library.PRODUCTION) | {'shaders/signed.metallib', 'shaders/f2.metallib', 'ATTRIBUTION.md'}
+        expected = set(library.PRODUCTION) | set(library.HOST_PRODUCTION) | {'shaders/signed.metallib', 'shaders/f2.metallib', 'ATTRIBUTION.md'}
         self.assertEqual(set(manifest['files']), expected)
         self.assertEqual({str(p.relative_to(destination)) for p in destination.rglob('*') if p.is_file()},
                          expected | {'manifest.json'})
@@ -150,6 +169,31 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
         with self.assertRaisesRegex(ValueError, 'program/shader'):
             library.package(self.root / 'bin', self.root / 'bad-package')
         self.assertFalse((self.root / 'bad-package').exists())
+
+    def test_package_requires_native_host_tool(self):
+        self.production_inputs()
+        path = self.root / 'bin/scheme_tool'
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, 'regular program: scheme_tool'):
+            library.package(self.root / 'bin', self.root / 'package')
+        self.assertFalse((self.root / 'package').exists())
+
+    def test_package_rejects_stale_host_build_receipt(self):
+        self.production_inputs()
+        (self.root / 'bin/scheme_tool').write_bytes(b'changed utility')
+        with self.assertRaisesRegex(ValueError, 'program/build receipt mismatch: scheme_tool'):
+            library.package(self.root / 'bin', self.root / 'package')
+        self.assertFalse((self.root / 'package').exists())
+
+    def test_package_rejects_wrong_header_build_receipt(self):
+        self.production_inputs()
+        receipt = self.root / 'bin/flip_graph.build.json'
+        data = json.loads(receipt.read_text())
+        data['inputs']['dependencies'][str(self.header)] = '0' * 64
+        receipt.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'shader header dependency differs'):
+            library.package(self.root / 'bin', self.root / 'package')
+        self.assertFalse((self.root / 'package').exists())
 
     def test_library_name_must_be_relative(self):
         for name in ('/absolute', '../outside', 'shaders/../outside', 'shaders/"bad'):

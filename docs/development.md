@@ -99,6 +99,111 @@ python3 tests/metal/verify.py --reference path/to/input.json path/to/reduced.jso
 
 The second command also requires exact equality with the reference factors, appropriate to reduction without scheme flips.
 
+## Native controlled workflows
+
+`flip_graph`, `flip_graph_f2` and `additions_reducer` accept `--run-config FILE`.
+Existing flags keep their legacy behavior. They cannot be mixed with a run
+configuration. `--validate-only` admits inputs, verifies tensors and reports
+planned allocations without initializing Metal or creating history. All paths
+inside a configuration are relative to that file. Outputs must be new.
+
+A minimal bounded signed search configuration is:
+
+```json
+{
+  "schema": "fgm-run-v1",
+  "operation": "search",
+  "policy": {
+    "schema": "fgm-controlled-config-v1", "policy": "controlled-v1",
+    "mode": "alternatives", "domain": "ZT", "seed": 7,
+    "dimensions": [3, 3, 3], "collection_rank": 23, "excursion": 2,
+    "interval_min": 4, "interval_max": 8, "reduction_q": 0,
+    "stagnation_limit": 100, "flip_budget": 100, "control_budget": 150,
+    "optional_quota": 2, "proposal_limit": 64, "target_rank": null
+  },
+  "input": {"kind": "files", "files": [
+    {"path": "scheme.txt", "format": "cpu-text", "domain": "ZT"}
+  ]},
+  "execution": {"workers": 1, "batch_steps": 10, "block_size": 32,
+    "backend": "auto", "memory_bytes": 268435456},
+  "output": "run.json"
+}
+```
+
+Use `mode: "rank-reduction"` and `stage_rank` instead of `collection_rank`
+for rank reduction. F2 uses the F2 executable and declared domain. Both modes
+use fixed dimensions and the versioned [controlled policy](specifications/FGM-CONTRACT-v1.md).
+`auto` selects packed execution for signed 3×3 with block size 32; other
+configurations use general execution. Explicit `packed` rejects ineligible
+configurations. Eligibility, tensor validity and storage capacity are separate.
+
+Optional `pool` settings are `capacity_per_rank`, `reserve_per_rank`,
+`memory_bytes`, `stage_threshold` and `selector`. Defaults are 16, 16, 1048576,
+1 and `uniform`. `flips` uses the checked sum of effective candidate counts;
+zero total weight falls back to uniform selection. Both consume the prescribed
+host draw even for one parent. Duplicates do not refresh FIFO order. A full
+pool evicts its oldest member. After deterministic input target preflight,
+initialization and restarts select active stage-rank parents for rank reduction
+or active requested-rank parents for alternatives. Off-rank imports remain
+retained inputs, and an empty eligible roster ends with `no_eligible_parent`.
+Empty eligible rosters refill from bounded
+stage-entry reserves, without discovery credit. Rank reduction advances at a
+completed batch boundary to the lowest lower rank meeting the threshold.
+There is no smaller-population fallback. Stage changes and installations use
+separate lifetime control credits.
+
+`history` accepts `path`, `storage_bytes`, `transaction_bytes` and
+`index_memory_bytes`. Defaults are `OUTPUT.journal`, 536870912, 1048576 and
+1048576. Reservations cover captures, durable frame completion and bounded
+index rebuilding. Resource exhaustion stops the run. `fgm-search-transaction-v1`
+stores verified admissions, exact captured presentations, provenance, pool
+snapshots, worker accounting and stage changes. The framed, checksummed journal
+is authoritative; its sorted identity index is a rebuildable view. A single
+writer acknowledges only synchronized commits. Recovery preserves incomplete
+tails and rejects corrupt committed history. Required `committed-head.json`
+records the acknowledged sequence, byte offset and frame hash. Recovery checks
+it before repair and rejects missing history, including a journal truncated at
+a valid frame boundary. The identity index can be missing and rebuilt. Restore
+the journal and its commit head together from backups; a consistent rollback
+of both needs an independently retained receipt to detect.
+
+For resume, replace `input` with `{"kind":"resume","journal":"run.json.journal"}`
+and choose a new output. Resume re-verifies history, restores pools and stages,
+and records new seeded RNG streams. It does not continue an interrupted walker.
+`discovery_target` is an optional cumulative alternatives target at the requested
+rank. Imports, aliases, reserve refills, rediscoveries and new run IDs add no
+discovery credit. Receipts separate current-run and historical counts.
+
+Read-only external selection instead uses `input.kind: "selection"`, with
+`manifest`, `count`, either `seed` or `ids`, and optional `filters` matching
+`scheme_tool select`. Search deduplicates canonical seeds while preserving
+presentation bindings. Reduction keeps presentation-level work items.
+
+Direct signed reduction sets `operation: "reduce"` and replaces `policy` with
+`reduction`: `domain: "ZT"`, `seed`, `rounds`, `reducers`, `schemes`,
+`max_flips`, `no_improvements` and `target_additions`. All work is finite;
+`execution.workers` equals `schemes`. Zero `max_flips` preserves effective input
+factors exactly. Positive `max_flips` enables bounded mutations and reports
+attempted and applied flips. Zero `target_additions` disables that stopping
+target. The best circuit is verified against its own reconstructed factors and
+rank. It is written to `OUTPUT.circuits.jsonl`; the receipt binds its hash and
+record indices. Supplied bounds, naive additions and verified circuit costs stay
+distinct. Parent classifications are not transferred to changed factors.
+
+Packaged native analysis and verification need no Python:
+
+```sh
+scheme_tool analyze --input run.json.journal --format journal --summary --output corpus.json
+scheme_tool verify --input reduction.json.circuits.jsonl --format jsonl --output verified.jsonl
+```
+
+Journal input is read-only corpus access, not resume. Summary groups use the
+existing descriptors and bounded memory. Metadata is optional. Run records bind
+configuration, input identities, executable/library digests, backend, terminal
+reasons, work and discovery counters. The complete process wall time includes
+verification and persistence; internal phase clocks identify their narrower
+scope. These records do not grant a performance regression allowance.
+
 ## Testing
 
 Run from the checkout root, with no concurrent GPU workload:

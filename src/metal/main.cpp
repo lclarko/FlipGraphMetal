@@ -1,6 +1,12 @@
 #include "host.h"
 #include "../common/arg_parser.cpp"
 #include "utils.cpp"
+#if METAL_PROGRAM != 2
+#include "../workflow/execution_layout.h"
+#endif
+#if METAL_PROGRAM == 1
+#include "../workflow/search_execution.h"
+#endif
 int metalRounds = 0;
 
 void validateOptions(const ArgParser &parser) {
@@ -58,7 +64,32 @@ void validateOptions(const ArgParser &parser) {
 
 int main(int argc, char *argv[]) {
     try {
+#if METAL_PROGRAM != 2
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--run-config" || std::string(argv[i]) == "--validate-only") {
+#if METAL_PROGRAM == 1
+                const std::string operation = "search";
+#else
+                const std::string operation = "reduce";
+#endif
+#ifdef METAL_F2
+                return fgm::runConfigured(argc, argv, operation, "F2", nativeExecutionLayout(),fgm::executeSearch<SchemeZ2>);
+#else
+#if METAL_PROGRAM == 1
+                return fgm::runConfigured(argc, argv, operation, "ZT", nativeExecutionLayout(),fgm::executeSearch<SchemeInteger>);
+#else
+                return fgm::runConfigured(argc, argv, operation, "ZT", nativeExecutionLayout(),fgm::executeReduction);
+#endif
+#endif
+            }
+        }
+#endif
         return runProgram(argc, argv);
+#if METAL_PROGRAM != 2
+    } catch (const fgm::Resource &error) {
+        std::cerr << "resource_limit: " << error.what() << '\n';
+        return 2;
+#endif
     } catch (const std::exception &error) {
         std::cerr << "Error: " << error.what() << '\n';
         return 1;
