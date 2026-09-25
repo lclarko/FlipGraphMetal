@@ -35,7 +35,7 @@ Records distinguish submitted factors, canonical scheme identity and the effecti
 
 Analysis reports naive addition cost, coefficient counts, zero-factor terms, equal-factor candidate pairs, factor-matrix ranks over Q or F2, and sign-normalization status. These descriptors do not establish scheme equivalence or an optimized addition circuit. Circuit inputs reconstruct their factors, verify the tensor in the declared domain and check the reported operation count. This verification interface does not add an F2 GPU additions reducer.
 
-`factor_ranks` describes the assembled rank-by-factor-width matrices. It is distinct from the CPU repository's type invariant, which uses the reshaped factors of individual multiplication terms. Buds-based structural signatures and structural/type diversity selection are not implemented. Canonical identity removes term-order and sign-gauge aliases; it is not a general equivalence test.
+`factor_ranks` describes assembled rank-by-factor-width matrices. The CPU repository's type invariant instead uses reshaped factors of individual multiplication terms. Buds-based structural signatures and structural/type diversity selection are not implemented. Canonical identity removes term-order and sign-gauge aliases but does not test general equivalence.
 
 Resource limits default to 1 MiB per record, 10 million accounted verification/analysis operations per record, 64 MiB of selection-content accounting and 256 MiB of cumulative input reads. Use `--record-bytes`, `--verification-work`, `--selection-memory` and `--scan-bytes` to change them. Input reads include hashing passes. Selection accounting is not a claim about process RSS. Exit code 2 means a resource limit prevented completion; it does not establish an invalid tensor. Exit code 1 reports malformed or invalid input; 0 reports completed verification and output.
 
@@ -109,7 +109,7 @@ configuration. `--validate-only` admits inputs, verifies tensors and reports
 planned allocations without initializing Metal or creating history. All paths
 inside a configuration are relative to that file. Outputs must be new.
 
-A minimal bounded signed search configuration is:
+For example, this configuration runs a bounded signed search:
 
 ```json
 {
@@ -147,26 +147,27 @@ host draw even for one parent. Duplicates do not refresh FIFO order. A full
 pool evicts its oldest member. After deterministic input target preflight,
 initialization and restarts select active stage-rank parents for rank reduction
 or active requested-rank parents for alternatives. Off-rank imports remain
-retained inputs, and an empty eligible roster ends with `no_eligible_parent`.
-Empty eligible rosters refill from bounded
-stage-entry reserves, without discovery credit. Rank reduction advances at a
+retained inputs. An empty eligible roster refills from bounded stage-entry
+reserves without discovery credit. If it is still empty, the run ends with
+`no_eligible_parent`. Rank reduction advances at a
 completed batch boundary to the lowest lower rank meeting the threshold.
 There is no smaller-population fallback. Stage changes and installations use
 separate lifetime control credits.
 
-These are CPU-inspired workflows governed by `FGM-CONTRACT-v1`, not a port of
-the CPU controller's timing, expansion or population policy. CPU parameter
-values do not imply matching search behavior. Reference/general/packed checks
-establish conformance to the controlled contract, not CPU search effectiveness.
+The workflows draw on the CPU implementation, but `FGM-CONTRACT-v1` specifies
+their timing, expansion and population policy. Matching CPU parameter values
+do not imply matching search behavior. Reference, general and packed checks
+establish conformance to the controlled contract; they do not compare search
+effectiveness with the CPU implementation.
 
 `batch_steps` and `optional_quota` affect retained output as well as runtime.
 Each worker keeps the first eligible optional encounters up to the quota and
 one mandatory lowest-rank encounter per batch. Captures can duplicate each
 other, and the mandatory encounter can be outside the requested alternatives
-rank. A quota of two therefore stores at most three captures, with potentially
-fewer distinct qualifying results. Later optional encounters count as drops.
-Increasing batch length does not increase the quota. Assess useful output from
-verified committed discoveries and capture drops alongside total workflow time.
+rank. A quota of two therefore stores at most three captures, possibly with fewer
+distinct qualifying results. Later optional encounters count as drops. Increasing
+batch length does not increase the quota. Compare verified committed discoveries
+and capture drops with total workflow time when assessing useful output.
 
 `history` accepts `path`, `storage_bytes`, `transaction_bytes` and
 `index_memory_bytes`. Defaults are `OUTPUT.journal`, 536870912, 1048576 and
@@ -174,14 +175,14 @@ verified committed discoveries and capture drops alongside total workflow time.
 index rebuilding. Resource exhaustion stops the run. `fgm-search-transaction-v1`
 stores verified admissions, exact captured presentations, provenance, pool
 snapshots, worker accounting and stage changes. The framed, checksummed journal
-is authoritative; its sorted identity index is a rebuildable view. A single
-writer acknowledges only synchronized commits. Recovery preserves incomplete
-tails and rejects corrupt committed history. Required `committed-head.json`
-records the acknowledged sequence, byte offset and frame hash. Recovery checks
-it before repair and rejects missing history, including a journal truncated at
-a valid frame boundary. The identity index can be missing and rebuilt. Restore
-the journal and its commit head together from backups; a consistent rollback
-of both needs an independently retained receipt to detect.
+is authoritative. A single writer acknowledges only synchronized commits.
+Recovery preserves incomplete tails and rejects corrupt committed history.
+Required `committed-head.json` records the acknowledged sequence, byte offset
+and frame hash. Recovery checks the commit head before repair. It rejects missing
+history, including a journal truncated at a valid frame boundary. A missing
+sorted identity index can be rebuilt. Restore the journal and its commit head
+together from backups; a consistent rollback of both needs an independently
+retained receipt to detect.
 
 For resume, replace `input` with `{"kind":"resume","journal":"run.json.journal"}`
 and choose a new output. Resume re-verifies history, restores pools and stages,
@@ -190,7 +191,7 @@ and records new seeded RNG streams. It does not continue an interrupted walker.
 rank. Imports, aliases, reserve refills, rediscoveries and new run IDs add no
 discovery credit. Receipts separate current-run and historical counts.
 
-Read-only external selection instead uses `input.kind: "selection"`, with
+Read-only external selection uses `input.kind: "selection"`, with
 `manifest`, `count`, either `seed` or `ids`, and optional `filters` matching
 `scheme_tool select`. Search deduplicates canonical seeds while preserving
 presentation bindings. Reduction keeps presentation-level work items.
@@ -218,12 +219,13 @@ scheme_tool analyze --input run.json.journal --format journal --summary --output
 scheme_tool verify --input reduction.json.circuits.jsonl --format jsonl --output verified.jsonl
 ```
 
-Journal input is read-only corpus access, not resume. Summary groups use the
-existing descriptors and bounded memory. Metadata is optional. Run records bind
-configuration, input identities, executable/library digests, backend, terminal
-reasons, work and discovery counters. The complete process wall time includes
-verification and persistence; internal phase clocks identify their narrower
-scope. These records do not grant a performance regression allowance.
+Journal input provides read-only corpus access without resuming the run. Summary
+groups use the existing descriptors and bounded memory. Metadata is optional.
+Run records bind configuration, input identities, executable/library digests,
+backend, terminal reasons, work and discovery counters. The complete process
+wall time includes verification and persistence. Internal phase clocks cover
+narrower parts of the workflow. These records grant no performance regression
+allowance.
 
 Search receipts retain `fgm-search-accounting-v1` snapshots on failure. `counters`
 and `workers` describe the latest fully verified dispatch and completed host
