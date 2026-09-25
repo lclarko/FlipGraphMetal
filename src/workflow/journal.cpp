@@ -21,6 +21,8 @@ const std::string zeroHash(64,'0'), journalMagic="FGMJNL1\n";
 #ifdef FGM_JOURNAL_TESTING
 int64_t failWrite=-1,failSync=-1;
 size_t capWrite=0;
+std::filesystem::path failSyncPath;
+std::vector<Journal::TestIoEvent> ioEvents;
 #endif
 [[noreturn]] void ioError(const std::string &what) { throw std::runtime_error(what+": "+std::strerror(errno)); }
 uint64_t add(uint64_t a,uint64_t b) { if(b>UINT64_MAX-a)throw Resource("journal size overflow");return a+b; }
@@ -51,12 +53,21 @@ void writeAll(int fd,const std::string &bytes) {
 }
 void syncFile(int fd) {
 #ifdef FGM_JOURNAL_TESTING
+    char descriptorPath[PATH_MAX];
+    if(::fcntl(fd,F_GETPATH,descriptorPath))ioError("resolve synchronized descriptor");
+    const fs::path path(descriptorPath);
+    const auto event=ioEvents.size();
+    ioEvents.push_back({"sync",path,false});
+    if(!failSyncPath.empty()&&path==failSyncPath){errno=EIO;ioError("injected file-specific journal sync");}
     if(failSync==0){errno=EIO;ioError("injected journal sync");}
     if(failSync>0)--failSync;
 #endif
     if(::fsync(fd))ioError("journal fsync");
 #ifdef __APPLE__
     if(::fcntl(fd,F_FULLFSYNC))ioError("journal full sync");
+#endif
+#ifdef FGM_JOURNAL_TESTING
+    ioEvents[event].succeeded=true;
 #endif
 }
 void syncDirectory(const fs::path &path) {
@@ -154,9 +165,12 @@ struct Journal::Impl {
         // They count toward storage and are never mistaken for acknowledged head.
         writeAll(fd.value,bytes);syncFile(fd.value);
         if(::rename(name.data(),(dir/"committed-head.json").c_str()))ioError("publish committed-head watermark");
+#ifdef FGM_JOURNAL_TESTING
+        ioEvents.push_back({"publish",dir/"committed-head.json",true});
+#endif
         syncDirectory(dir);
     }
-    void validateHead() {
+    Head validateHead() {
         const auto floor=readHead();bool found=!floor.sequence;
         scan([&](const Json&,const CommitReceipt &receipt){
             if(receipt.sequence==floor.sequence) {
@@ -167,6 +181,7 @@ struct Journal::Impl {
         },false,true);
         if(!found||current.sequence<floor.sequence||current.committedBytes<floor.offset)
             throw std::runtime_error("journal is missing acknowledged committed history");
+        return floor;
     }
     void scan(const Visitor &visitor,bool repair,bool allowIncomplete=false) {
         current={0,journalMagic.size(),0,0,zeroHash,{},false};uint64_t size=fileSize(file.value),offset=journalMagic.size();
@@ -218,10 +233,22 @@ struct Journal::Impl {
 };
 Journal::Journal(const fs::path&p,JournalLimits l,bool create):impl(std::make_unique<Impl>(p,l,create)){recover();}
 Journal::~Journal()=default;
-JournalRecovery Journal::recover(const Visitor &visitor){impl->healthy();try{impl->validateHead();impl->scan({},true);impl->rebuild();impl->publishHead(impl->current.sequence,impl->current.committedBytes,impl->current.hash);if(visitor)impl->scan(visitor,false);impl->current.derivedIndexCurrent=true;return impl->current;}catch(...){impl->poisoned=true;throw;}}
+const JournalRecovery &Journal::recover(const Visitor &visitor){
+    impl->healthy();
+    try{
+        impl->validateHead();impl->scan({},true);impl->rebuild();
+        // Complete frames beyond the acknowledged head may still be dirty
+        // filesystem-cache data after a failed append. Establish durability on
+        // the authoritative descriptor before publishing the recovered head.
+        syncFile(impl->file.value);
+        impl->publishHead(impl->current.sequence,impl->current.committedBytes,impl->current.hash);
+        if(visitor)impl->scan(visitor,false);
+        impl->current.derivedIndexCurrent=true;return impl->current;
+    }catch(...){impl->poisoned=true;throw;}
+}
 JournalRecovery Journal::replayReadOnly(const fs::path &path,JournalLimits limits,const Visitor &visitor,const std::function<void(uint64_t)> &accountRead){
     Impl read(path,limits,false,true,accountRead);const auto before=fileSize(read.file.value);
-    read.validateHead();const auto expected=read.current;bool indexMatches=read.indexValid();uint64_t historicalCount=0;
+    const auto floor=read.validateHead();const auto expected=read.current;bool indexMatches=read.indexValid();uint64_t historicalCount=0;
     // A derived view never establishes authority. Validate credit through
     // bounded prefix scans when writes/external sorting are forbidden.
     read.scan([&](const Json &j,const CommitReceipt &receipt){
@@ -240,18 +267,23 @@ JournalRecovery Journal::replayReadOnly(const fs::path &path,JournalLimits limit
             if(!seen){historicalCount=add(historicalCount,1);if(indexMatches&&!read.contains(candidate.first))indexMatches=false;}
         }
     },false,true);
-    if(visitor)read.scan(visitor,false,true);
+    if(visitor)read.scan([&](const Json &transaction,const CommitReceipt &receipt){
+        auto observed=receipt;observed.acknowledged=receipt.sequence<=floor.sequence;
+        visitor(transaction,observed);
+    },false,true);
     if(fileSize(read.file.value)!=before||read.current.sequence!=expected.sequence||read.current.hash!=expected.hash)
         throw std::runtime_error("journal changed during read-only replay");
     read.current.derivedIndexCurrent=indexMatches&&historicalCount==read.entries;
     return read.current;
 }
-JournalRecovery Journal::state()const{impl->healthy();return impl->current;}
+const JournalRecovery &Journal::state()const{impl->healthy();return impl->current;}
 bool Journal::contains(const std::string&id)const{impl->healthy();return impl->contains(id);}
 void Journal::rebuildIndex(){recover();}
 Journal::Reservation Journal::reserve(uint64_t bytes,uint64_t extra){impl->healthy();if(bytes>impl->limits.maxTransactionBytes)throw Resource("journal transaction reservation exceeds limit");auto newRows=bytes/64+1;auto scratch=add(mul(add(impl->entries,newRows),indexRowBytes),mul(add(impl->current.admissionCount,newRows),2*sortRowBytes));auto needed=add(add(mul(add(bytes,headerBytes+footerBytes),2),8192),add(scratch,extra));impl->headroom(needed);Reservation r;r.payloadBytes=bytes;r.storageBytes=needed;r.sequence=impl->current.sequence;r.owner=this;return r;}
 CommitReceipt Journal::append(const Json &transaction,const Reservation &reservation){impl->healthy();const auto floor=impl->readHead();if(floor.sequence!=impl->current.sequence||floor.offset!=impl->current.committedBytes||floor.hash!=impl->current.hash)throw std::runtime_error("committed-head watermark changed before append");if(reservation.owner!=this||reservation.sequence!=impl->current.sequence)throw std::runtime_error("invalid or stale journal reservation");if(transaction.kind!=Json::Object||transaction.has("_journal"))throw std::runtime_error("transaction must be object without reserved _journal field");auto admitted=admissions(transaction);CommitReceipt receipt;for(auto &entry:admitted)if(!impl->contains(entry.first)){receipt.novelIds.push_back(entry.first);if(entry.second)receipt.creditedIds.push_back(entry.first);}Json payload=transaction,account=Json::dict();account.object["schema"]=Json("fgm-journal-accounting-v1");account.object["novel_ids"]=list(receipt.novelIds);account.object["credited_ids"]=list(receipt.creditedIds);payload.object["_journal"]=std::move(account);auto bytes=dump(payload);if(bytes.size()>reservation.payloadBytes||bytes.size()>impl->limits.maxTransactionBytes)throw Resource("journal payload exceeds reservation");impl->headroom(reservation.storageBytes);receipt.sequence=impl->current.sequence+1;if(receipt.sequence>INT64_MAX)throw Resource("journal sequence exhausted");receipt.offset=impl->current.committedBytes;auto prefix="FGMTX001"+hex(receipt.sequence)+hex(bytes.size())+impl->current.hash;auto header=prefix+sha256Bytes(prefix);receipt.hash=sha256Bytes(header+sha256Bytes(bytes));auto frame=header+bytes+"FGMEND01"+sha256Bytes(bytes)+receipt.hash;receipt.bytes=frame.size();try{if(::lseek(impl->file.value,0,SEEK_END)!=off_t(receipt.offset))throw std::runtime_error("journal changed before append");writeAll(impl->file.value,frame);syncFile(impl->file.value);impl->current.sequence=receipt.sequence;impl->current.hash=receipt.hash;impl->current.committedBytes=add(receipt.offset,receipt.bytes);impl->current.admissionCount=add(impl->current.admissionCount,admitted.size());impl->mergeIndex(receipt.novelIds);impl->publishHead(receipt.sequence,impl->current.committedBytes,receipt.hash);impl->current.derivedIndexCurrent=true;return receipt;}catch(...){impl->poisoned=true;throw;}}
 #ifdef FGM_JOURNAL_TESTING
 void Journal::testFaults(int64_t write,int64_t sync,size_t cap){failWrite=write;failSync=sync;capWrite=cap;}
+void Journal::testIoReset(const fs::path &path){ioEvents.clear();failSyncPath=path.empty()?path:fs::canonical(path);}
+std::vector<Journal::TestIoEvent> Journal::testIoEvents(){return ioEvents;}
 #endif
 }

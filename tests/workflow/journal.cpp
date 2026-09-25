@@ -33,9 +33,42 @@ int main(int argc,char **argv){
             {Journal journal(path,limits,true);append(journal,transaction(1,"import"));Journal::testFaults(100);rejects([&]{append(journal,transaction(2));},"write injection ignored");Journal::testFaults();rejects([&]{journal.contains(id(1));},"failed writer not poisoned");}
             auto original=bytes(path/"journal.bin");auto inspection=Journal::replayReadOnly(path,limits);check(inspection.sequence==1&&inspection.incompleteTailBytes==100,"read-only tail description");check(bytes(path/"journal.bin")==original,"read-only trimmed tail");
             Journal recovered(path,limits);check(recovered.state().sequence==1,"torn tx committed");check(recovered.state().retainedTails.size()==1,"missing tail evidence");check(bytes(recovered.state().retainedTails[0])==original.substr(original.size()-100),"tail bytes changed");check(!recovered.contains(id(2)),"torn discovery indexed");check(append(recovered,transaction(2)).creditedIds.size()==1,"post-tail discovery lost");
-        }else if(scenario=="sync-failure"||scenario=="index-sync-failure"){
-            {Journal journal(path,limits,true);Journal::testFaults(-1,scenario=="sync-failure"?0:1);rejects([&]{append(journal,transaction(7));},"sync injection ignored");Journal::testFaults();}
-            check(!Journal::replayReadOnly(path,limits).derivedIndexCurrent,"stale index reported current");Journal recovered(path,limits);check(recovered.state().sequence==1&&recovered.contains(id(7)),"complete unacknowledged frame lost");check(append(recovered,transaction(7)).creditedIds.empty(),"unacknowledged frame credited twice");
+        }else if(scenario=="sync-failure"||scenario=="index-sync-failure"||scenario=="recovery-sync-failure"){
+            std::string floor;
+            {Journal journal(path,limits,true);floor=bytes(path/"committed-head.json");Journal::testFaults(-1,scenario=="index-sync-failure"?1:0);rejects([&]{append(journal,transaction(7));},"sync injection ignored");Journal::testFaults();}
+            check(bytes(path/"committed-head.json")==floor,"failed append advanced head");
+            check(!Journal::replayReadOnly(path,limits).derivedIndexCurrent,"stale index reported current");
+            const auto journalPath=fs::canonical(path/"journal.bin");
+            if(scenario=="recovery-sync-failure"){
+                Journal::testIoReset(journalPath);
+                rejects([&]{Journal recovered(path,limits);},"recovery journal sync injection ignored");
+                check(bytes(path/"committed-head.json")==floor,"failed recovery journal sync advanced head");
+                bool failedJournalSync=false;
+                for(const auto &event:Journal::testIoEvents()){
+                    check(event.operation!="publish","failed recovery published head");
+                    if(event.operation=="sync"&&event.path==journalPath){check(!event.succeeded,"targeted journal sync unexpectedly succeeded");failedJournalSync=true;}
+                }
+                check(failedJournalSync,"recovery did not attempt authoritative journal sync");
+            }
+            Journal::testIoReset();
+            Journal recovered(path,limits);
+            bool journalSynced=false,published=false;
+            for(const auto &event:Journal::testIoEvents()){
+                if(event.operation=="sync"&&event.path==journalPath&&event.succeeded)journalSynced=true;
+                if(event.operation=="publish"){
+                    check(event.path.filename()=="committed-head.json","unexpected publication target");
+                    check(journalSynced,"recovery published head before authoritative journal sync");published=true;
+                }
+            }
+            check(journalSynced&&published,"recovery sync/publication evidence missing");
+            check(bytes(path/"committed-head.json")!=floor,"recovery did not advance head");
+            check(recovered.state().sequence==1&&recovered.contains(id(7)),"complete unacknowledged frame lost");
+            size_t credits=0;Journal::replayReadOnly(path,limits,[&](const Json&,const CommitReceipt &receipt){credits+=receipt.creditedIds.size();});
+            check(credits==1,"recovered discovery credit mismatch");
+            // Check recovery on its own before a later append can synchronize
+            // journal.bin and mask the missing recovery durability barrier.
+            Journal::testIoReset();
+            if(scenario!="recovery-sync-failure")check(append(recovered,transaction(7)).creditedIds.empty(),"unacknowledged frame credited twice");
         }else if(scenario=="head-sync-failure"){
             std::string floor;
             {Journal journal(path,limits,true);floor=bytes(path/"committed-head.json");Journal::testFaults(-1,3);rejects([&]{append(journal,transaction(7));},"head sync injection ignored");Journal::testFaults();}

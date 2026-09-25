@@ -11,6 +11,9 @@ struct CommitReceipt {
     uint64_t sequence=0, offset=0, bytes=0;
     std::string hash;
     std::vector<std::string> novelIds, creditedIds;
+    // Read-only replay can inspect complete frames beyond the durable head.
+    // Those frames become acknowledged only after successful writable recovery.
+    bool acknowledged=true;
 };
 struct JournalRecovery {
     uint64_t sequence=0, committedBytes=0, incompleteTailBytes=0, admissionCount=0;
@@ -45,7 +48,8 @@ public:
     ~Journal();
     Journal(const Journal&)=delete;
     Journal& operator=(const Journal&)=delete;
-    JournalRecovery recover(const Visitor& visitor={});
+    // Returned state views remain valid until the next journal mutation.
+    const JournalRecovery &recover(const Visitor& visitor={});
     // No file creation, repair, index rebuilding or writable opens. Historical
     // credit is checked by bounded read-only passes over authoritative frames.
     static JournalRecovery replayReadOnly(const std::filesystem::path&,JournalLimits,
@@ -58,11 +62,16 @@ public:
     CommitReceipt append(const Json&,const Reservation&);
     bool contains(const std::string& schemeId) const;
     void rebuildIndex();
-    JournalRecovery state() const;
+    const JournalRecovery &state() const;
 #ifdef FGM_JOURNAL_TESTING
     // Test builds only. A positive write cap exercises short-write completion;
     // failAfterBytes and failSyncAfter count down before injecting EIO.
     static void testFaults(int64_t failAfterBytes=-1,int64_t failSyncAfter=-1,size_t writeCap=0);
+    struct TestIoEvent { std::string operation; std::filesystem::path path; bool succeeded; };
+    // Paths are resolved from the actual synchronized descriptor. Publication
+    // events follow the rename, so tests can inspect file-specific ordering.
+    static void testIoReset(const std::filesystem::path &failSyncPath={});
+    static std::vector<TestIoEvent> testIoEvents();
 #endif
 private:
     struct Impl;

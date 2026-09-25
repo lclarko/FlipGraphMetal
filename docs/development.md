@@ -204,6 +204,19 @@ reasons, work and discovery counters. The complete process wall time includes
 verification and persistence; internal phase clocks identify their narrower
 scope. These records do not grant a performance regression allowance.
 
+Search receipts retain `fgm-search-accounting-v1` snapshots on failure. `counters`
+and `workers` describe the latest fully verified dispatch and completed host
+control operations. `committed_counters` records the corresponding totals at
+the last acknowledged journal transaction. Discovery counts in both objects
+include only acknowledged discoveries; resumed historical counts are retained
+even if the new run cannot start. Complete frames beyond the prior durable head
+enter those totals only after writable recovery synchronizes the journal and
+publishes the recovered head. Work and captures can therefore exceed their
+committed counts after a failed append, without earning discovery credit.
+`accounting.work_snapshot_batch` and `committed_batches` identify those boundaries.
+If dispatch or verification fails, `dispatch_unverified` is true and the receipt
+keeps the preceding trusted snapshot instead of reading uncertain device state.
+
 ## Testing
 
 Run from the checkout root, with no concurrent GPU workload:

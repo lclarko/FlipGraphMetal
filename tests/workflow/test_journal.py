@@ -13,7 +13,7 @@ class JournalTests(unittest.TestCase):
     def test_native_cases(self):
         self.assertTrue(DRIVER.is_file(), 'build native journal test driver first')
         for scenario in ('basic', 'short-writes', 'torn-tail', 'sync-failure',
-                         'index-sync-failure', 'head-sync-failure', 'head-required', 'corruption', 'rebuild', 'storage', 'invalid'):
+                         'index-sync-failure', 'recovery-sync-failure', 'head-sync-failure', 'head-required', 'corruption', 'rebuild', 'storage', 'invalid'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as folder:
                 result = subprocess.run([str(DRIVER), scenario, str(Path(folder) / 'history')],
                                         text=True, capture_output=True, timeout=45)

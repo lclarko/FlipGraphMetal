@@ -207,6 +207,8 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     Json presentations = Json::list();
     std::set<std::string> seen;
     uint64_t admittedBytes = configCheckedMultiply(jsonMemoryBytes(config.resolved),2), duplicates = 0;
+    uint64_t acknowledgedSequence=0,acknowledgedDiscoveries=0;
+    std::string acknowledgedHead(64,'0');
     auto admit = [&](const AdmittedScheme &item) {
         const auto &source = item.source;
         if ((source.f2 ? "F2" : "ZT") != domainOf(config)) throw std::runtime_error("input domain conflicts with run");
@@ -252,8 +254,10 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
                         scheme.rank!=entry.at("rank").num()||(scheme.f2?"F2":"ZT")!=entry.at("domain").str()||
                         entry.at("domain").str()!=domainOf(config))throw std::runtime_error("invalid historical admission binding");
                     for(size_t p=0;p<3;++p)if(scheme.n[p]!=config.policy->dimensions[p])throw std::runtime_error("historical dimensions mismatch");
-                    if(credited.count(entry.at("scheme_id").str())&&(config.policy->mode==ControlledConfig::Mode::RankReduction||scheme.rank==config.policy->anchor))
+                    if(credited.count(entry.at("scheme_id").str())&&(config.policy->mode==ControlledConfig::Mode::RankReduction||scheme.rank==config.policy->anchor)) {
                         run.historicalDiscoveries=configCheckedAdd(run.historicalDiscoveries,1);
+                        if(commit.acknowledged)acknowledgedDiscoveries=configCheckedAdd(acknowledgedDiscoveries,1);
+                    }
                 }
                 if(transaction.has("observations"))for(const auto &entry:transaction.at("observations").array) {
                     AdmissionContext verifier(config.limits);auto scheme=verifier.fromJson(entry.at("scheme"));
@@ -261,6 +265,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
                         throw std::runtime_error("invalid historical capture binding");
                 }
                 run.recoveredPools=transaction.at("pools");stage=uint64_t(transaction.at("stage").num());
+                if(commit.acknowledged){acknowledgedSequence=commit.sequence;acknowledgedHead=commit.hash;}
             },[&](uint64_t bytes){context.accountRead(bytes);});
         if(!recovered.sequence||run.recoveredPools.kind==Json::Null)throw std::runtime_error("journal has no committed workflow history");
         run.recoveredHead=recovered.hash;
@@ -344,11 +349,16 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     receipt.object["presentations"] = std::move(presentations);
     receipt.object["admitted_inputs"] = integer(run.inputs.size());
     receipt.object["seed_duplicates"] = integer(duplicates);
+    if(config.input.kind==RunInput::Kind::Resume) {
+        receipt.object["journal_sequence"]=integer(acknowledgedSequence);
+        receipt.object["journal_head_sha256"]=Json(acknowledgedHead);
+    }
     Json counters = Json::dict();
     for (auto key : {"flip_attempts", "flips_applied", "control_steps", "reduction_attempts", "terms_removed",
                     "expansion_attempts", "expansions_applied", "tuple_rejections", "coefficient_rejections",
                     "proposal_exhaustions", "rank_blocked", "mandatory_captures", "optional_captures", "capture_drops",
                     "discoveries_current_run", "discoveries_historical"}) counters.object[key] = integer(0);
+    counters.object["discoveries_historical"]=integer(acknowledgedDiscoveries);
     receipt.object["counters"] = counters;
     run.receipt = std::move(receipt);
     if (readBounded(configPath, 1048576) != bytes) throw std::runtime_error("run configuration changed during admission");
