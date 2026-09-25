@@ -89,9 +89,38 @@ metal-probe: build/metal/probe
 	python3 tests/metal/run.py --probe
 
 clean:
-	rm -f build/metal/flip_graph build/metal/flip_graph_f2 build/metal/complexity_minimizer build/metal/complexity_minimizer_f2 build/metal/additions_reducer build/metal/probe build/metal/correctness build/metal/f2_correctness
+	rm -f build/metal/flip_graph build/metal/flip_graph_f2 build/metal/complexity_minimizer build/metal/complexity_minimizer_f2 build/metal/additions_reducer build/metal/probe build/metal/correctness build/metal/f2_correctness build/metal/scheme_tool
 
 # Produce a new, relocatable directory without copying build evidence or sources.
 .PHONY: package-metal
 package-metal: metal
 	python3 scripts/metal_library.py package --binary-dir=build/metal --output=$(call shell_quote,$(PACKAGE_DIR))
+
+WORKFLOW_CXX ?= xcrun clang++
+WORKFLOW_FLAGS ?= -mmacosx-version-min=15.0 -std=c++17 -O2
+WORKFLOW_CONFIG = build/workflow/config.json
+WORKFLOW_SOURCES = $(wildcard src/workflow/*.h src/workflow/*.cpp)
+
+$(WORKFLOW_CONFIG): FORCE scripts/build_config.py
+	@python3 scripts/build_config.py stamp --output=$@ --compiler=$(call shell_quote,$(WORKFLOW_CXX)) --flags=$(call shell_quote,$(WORKFLOW_FLAGS)) --source-dir=$(call shell_quote,$(CURDIR)/src/workflow)
+
+.PHONY: scheme-tool test-workflow qualify-workflow
+scheme-tool: build/metal/scheme_tool
+
+build/metal/scheme_tool: $(WORKFLOW_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@mkdir -p build/metal
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) src/workflow/scheme_tool.cpp -o $@
+
+WORKFLOW_TEST_DRIVERS = build/workflow/test_run_config build/workflow/test_host_rng
+
+build/workflow/test_run_config: tests/workflow/run_config.cpp src/workflow/run_config.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow tests/workflow/run_config.cpp -o $@
+
+build/workflow/test_host_rng: tests/workflow/host_rng.cpp makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) tests/workflow/host_rng.cpp -o $@
+
+test-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
+	python3 tests/workflow/run.py
+
+qualify-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
+	python3 tests/workflow/run.py --qualification

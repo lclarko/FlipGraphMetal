@@ -79,9 +79,29 @@ No consistent throughput loss appeared in this screen. Two seeds and four pairs 
 
 All 1504 expected search dispatches recorded positive GPU timings on Apple M1. Eight exports from the measured runs passed independent exact-integer tensor verification. Every process remained within the 45-second and sampled 3 GiB wired-memory limits.
 
+## Native scheme utilities
+
+On September 24, 2026, `scheme_tool` at revision `3b29651` was measured on an 8 GB Apple M1 running macOS 27.0, using the default C++17 `-O2` build. Six repetitions of each workload completed, comprising 30 workflows and 84 native processes. Every returned presentation passed independent domain-correct tensor and identity checks. No attempts failed or were excluded.
+
+Complete-workflow time includes process supervision and independent verification. Inputs are generated and hashed before timing. The native-time column is the mean of the child-process elapsed counters, which are rounded to 0.01 seconds; several short interchange processes are below that resolution. Peak RSS is the maximum observed native-process value, excluding the benchmark controller and independent verifier.
+
+| Workflow | Approximate native time | Mean complete workflow | Observed workflow range | Peak native RSS |
+|---|---:|---:|---:|---:|
+| Verify/report 100 signed/F2 presentations | 0.09 s | 1.069 s | 1.001 to 1.226 s | 4.81 MiB |
+| Five CPU-text round trips | Resolution-limited | 0.281 s | 0.234 to 0.455 s | 3.42 MiB |
+| Select 3 from 1,000 records | 0.02 s | 0.054 s | 0.051 to 0.059 s | 2.41 MiB |
+| Select 3 from 10,000 records | 0.16 s | 0.209 s | 0.196 to 0.258 s | 3.88 MiB |
+| Select 3 from 100,000 records | 1.63 s | 1.670 s | 1.600 to 1.825 s | 17.69 MiB |
+
+Reporting and interchange use the public signed rank-23 3×3, signed Strassen-derived 4×4 and F2 3×3 fixtures, plus generated signed/F2 rectangular 2×3×4 schemes. The report repeats those five presentations 20 times. Each selection inventory contains distinct presentation IDs referring to one scalar source; seed 7 selects three records. This measures manifest handling with small selected inputs, not verification of an entire library or the cost of richer metadata and larger scheme records.
+
+These workloads completed quickly enough for interactive verification and short preprocessing on this host. Independent verification accounted for about 0.94 seconds of the 1.07-second reporting workflow; it is benchmark work outside the native executable. Inventory selection time and memory increased with inventory size. Six repetitions on a normal desktop establish descriptive baselines, not statistical performance verdicts, cold-cache guarantees or results for other hardware. No Metal kernels ran. Existing production-path regression requirements remain separate.
+
+Reproduce these host workloads with `make scheme-tool` and the native-host measurement command in [the benchmark instructions](../benchmarks/metal/README.md). They require only repository fixtures and generated inventories, without private inputs or the external CPU project.
+
 ## Reproduction and new measurements
 
-Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for these studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.
+Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for the CPU/GPU studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.
 
 Use [the benchmark tools](../benchmarks/metal/README.md) for new, separately labeled measurements. Keep source identities, fixtures, commands, raw logs, incomplete runs and timing protocols. Serialize GPU work with the documented process-group and memory supervision. Do not pool incompatible timing methods or replace slow observations selectively.
 

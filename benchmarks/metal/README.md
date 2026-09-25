@@ -8,6 +8,30 @@ Use Apple silicon with accessible Metal hardware, macOS 15 or later, Xcode with 
 
 Run GPU work serially. The guards use a 45-second process-group timeout and sampled 3 GiB system wired-memory cutoff, followed by TERM and KILL after two seconds. Do not nest another process-group supervisor around `screen.py` or `application.py`, which already own their supervision. Retain incomplete attempts and choose a new output directory for retries.
 
+## Pinned workload baseline
+
+The workflow benchmark adapters cover signed packed 3×3 search, two signed general 4×4 searches, F2 search, both minimizers and fixed/flip-enabled signed reduction. They use repository fixtures and require compiled shader libraries. A fresh checkout can prepare the baseline without an existing measurement bundle.
+
+With `ATTEMPT` set to a new absolute output directory:
+
+```sh
+python3 benchmarks/workflow/baseline.py --freeze "$ATTEMPT/baseline"
+python3 benchmarks/metal/guard.py --output "$ATTEMPT/baseline-build" -- \
+  make -C "$ATTEMPT/baseline/source" METAL_LIBRARY_MODE=metallib metal
+python3 benchmarks/workflow/baseline.py \
+  --source "$ATTEMPT/baseline/source" --output "$ATTEMPT/baseline-pilot"
+```
+
+Source preparation pins `2f91a88` and records the Git tree and archive digest. It does not build or measure anything. The separate build and measurement steps retain their own receipts. Keep the resulting source, binaries, libraries and receipts unchanged after qualification.
+
+The pilot starts with six rounds per workload. Use baseline-only pilots to select work amounts that give useful timings within the guards, normally around 5–10 seconds per process. Each run writes `protocol.json`; save calibrated settings as a separately versioned protocol before evaluating a candidate. Pass that file with `--protocol FILE`, and use `--repetitions` for repeated baseline observations. `baseline.py --summarize RUN/qualification.json --output NEW_SUMMARY` reports repeatability diagnostics without granting any regression allowance.
+
+`profile_baseline.py --baseline BASELINE --output NEW_PROFILE` prepares a separate instrumented source snapshot. Build it under the same guard, then qualify its observations with `baseline.py --qualify-profile PROFILE --baseline BASELINE --production-run RUN --output NEW_CHECK`. New qualification records share one attempt structure and identify production or diagnostic mode. Existing v1 records remain readable without rewriting them. The production run is explicit; no particular pilot-directory name is required. Qualification compares shader bytes, inputs and independently verified exports. It does not replace complete-walk equivalence or production timing.
+
+`benchmarks/workflow/performance.py INPUT --output NEW_RECEIPT` evaluates retained paired observations for existing production paths. Its input binds approved regression budgets, the mandatory endpoint roster, both planned looks, matched-work identities and a separate precision assessment. Unapproved budgets and insufficient evidence cannot pass. A hard resource violation remains a failure even when a practical margin is still unapproved. A slowdown inside an approved tolerance must still be reported as a slowdown.
+
+`baseline.py --host build/metal/scheme_tool --repetitions 6 --output NEW_RUN` measures verified reporting, CPU-text round trips and bounded selection from generated inventories. It retains fixtures, build settings, hardware, the ordered workload roster and every attempt. Complete-workflow time includes independent output verification; native process time, verification time and peak native RSS are reported separately. Input generation occurs before timing. These repeated measurements establish a usability and scaling baseline, without absolute latency budgets or statistical acceptance verdicts. Execution safeguards, exact verification and source/build checks remain required. Incomplete attempts are retained and reported as failures. This host-only mode does not initialize Metal or establish GPU performance.
+
 ## Complete-walk comparison
 
 `build.py` compiles selected Metal source as the C++ reference and builds the selected GPU implementation. This reference is distinct from the separate `ternary_flip_graph` CPU application. Set both source directories explicitly: omitting them can select the same source for both sides. The general kernel is the build default, so packed validation must select `randomWalkCompactKernel` explicitly.

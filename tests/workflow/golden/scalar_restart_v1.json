@@ -1,0 +1,1131 @@
+{
+  "scope": "Actual pinned arithmetic for tiny accepted flip, subsequent blocked recovery, and committed restart. No GPU or durable-journal implementation claim.",
+  "derivation": "F2 1+1+1=1. First flip removes two terms; the next has no candidates. Both completed expansion events are blocked at naive rank1 but redraw intervals. First flip consumes RNG words2..4; q=0 decision consumes word5; redraw consumes word6=745495504. Failed next flip consumes no word; blocked recovery redraw consumes word7=632435482. Committed parent installation consumes one control credit and word8=435756210. Mandatory rank1 evidence survives installation.",
+  "specification_sha256": "b0ecaf3ae1e6da9eb0cfb36bee4454262be5f414eec15e3251f51af5bda54d34",
+  "arithmetic_reference": "9ea5bfc144b528184c32c178cae0b49bc60e8e3d",
+  "config": {
+    "seed": 2654435769,
+    "mode": "rank-reduction",
+    "anchor": 3,
+    "dimensions": [
+      1,
+      1,
+      1
+    ],
+    "interval_min": 1,
+    "interval_max": 1,
+    "flip_budget": 5,
+    "control_budget": 8
+  },
+  "parent": {
+    "n": [
+      1,
+      1,
+      1
+    ],
+    "m": 3,
+    "z2": true,
+    "u": [
+      [
+        1
+      ],
+      [
+        1
+      ],
+      [
+        1
+      ]
+    ],
+    "v": [
+      [
+        1
+      ],
+      [
+        1
+      ],
+      [
+        1
+      ]
+    ],
+    "w": [
+      [
+        1
+      ],
+      [
+        1
+      ],
+      [
+        1
+      ]
+    ]
+  },
+  "initial": {
+    "outcome": "inspected",
+    "rng": 270369,
+    "draws": 0,
+    "words": [],
+    "removed_terms": null,
+    "reduction_operations": null,
+    "scheme": {
+      "n": [
+        1,
+        1,
+        1
+      ],
+      "m": 3,
+      "z2": true,
+      "u": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "v": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "w": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "candidates": [
+      {
+        "overflow": 0,
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            1,
+            2
+          ]
+        ]
+      },
+      {
+        "overflow": 0,
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            1,
+            2
+          ]
+        ]
+      },
+      {
+        "overflow": 0,
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            2
+          ],
+          [
+            1,
+            2
+          ]
+        ]
+      }
+    ]
+  },
+  "accepted_step": {
+    "policy": {
+      "rank": 1,
+      "best": 1,
+      "countdown": 1,
+      "rng": 745495504,
+      "draws": 6,
+      "flips": 1,
+      "controls": 1,
+      "terminal": null,
+      "pending_restart": false,
+      "mandatory": {
+        "rank": 1,
+        "operation": "flip",
+        "control": 1,
+        "state": {
+          "scheme": {
+            "n": [
+              1,
+              1,
+              1
+            ],
+            "m": 1,
+            "z2": true,
+            "u": [
+              [
+                1
+              ]
+            ],
+            "v": [
+              [
+                1
+              ]
+            ],
+            "w": [
+              [
+                1
+              ]
+            ]
+          },
+          "candidates": [
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            }
+          ]
+        }
+      },
+      "optional": [
+        {
+          "rank": 1,
+          "operation": "flip",
+          "control": 1,
+          "state": {
+            "scheme": {
+              "n": [
+                1,
+                1,
+                1
+              ],
+              "m": 1,
+              "z2": true,
+              "u": [
+                [
+                  1
+                ]
+              ],
+              "v": [
+                [
+                  1
+                ]
+              ],
+              "w": [
+                [
+                  1
+                ]
+              ]
+            },
+            "candidates": [
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              }
+            ]
+          }
+        }
+      ],
+      "optional_encounters": 1,
+      "optional_drops": 0,
+      "events": [
+        "initial_countdown",
+        "flip",
+        "observed",
+        "reduction_decision",
+        "rank_blocked",
+        "event_countdown"
+      ],
+      "state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 1,
+          "z2": true,
+          "u": [
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          }
+        ]
+      },
+      "best_state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 1,
+          "z2": true,
+          "u": [
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          }
+        ]
+      },
+      "removed_terms": {
+        "flip": 2,
+        "reduction": 0,
+        "total": 2
+      }
+    },
+    "native": {
+      "outcome": "applied",
+      "rng": 307599695,
+      "draws": 3,
+      "words": [
+        67634689,
+        2647435461,
+        307599695
+      ],
+      "removed_terms": 2,
+      "reduction_operations": null,
+      "scheme": {
+        "n": [
+          1,
+          1,
+          1
+        ],
+        "m": 1,
+        "z2": true,
+        "u": [
+          [
+            1
+          ]
+        ],
+        "v": [
+          [
+            1
+          ]
+        ],
+        "w": [
+          [
+            1
+          ]
+        ]
+      },
+      "candidates": [
+        {
+          "overflow": 0,
+          "pairs": []
+        },
+        {
+          "overflow": 0,
+          "pairs": []
+        },
+        {
+          "overflow": 0,
+          "pairs": []
+        }
+      ]
+    }
+  },
+  "pending_restart": {
+    "policy": {
+      "rank": 1,
+      "best": 1,
+      "countdown": 1,
+      "rng": 632435482,
+      "draws": 7,
+      "flips": 2,
+      "controls": 2,
+      "terminal": null,
+      "pending_restart": true,
+      "mandatory": {
+        "rank": 1,
+        "operation": "flip",
+        "control": 1,
+        "state": {
+          "scheme": {
+            "n": [
+              1,
+              1,
+              1
+            ],
+            "m": 1,
+            "z2": true,
+            "u": [
+              [
+                1
+              ]
+            ],
+            "v": [
+              [
+                1
+              ]
+            ],
+            "w": [
+              [
+                1
+              ]
+            ]
+          },
+          "candidates": [
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            }
+          ]
+        }
+      },
+      "optional": [
+        {
+          "rank": 1,
+          "operation": "flip",
+          "control": 1,
+          "state": {
+            "scheme": {
+              "n": [
+                1,
+                1,
+                1
+              ],
+              "m": 1,
+              "z2": true,
+              "u": [
+                [
+                  1
+                ]
+              ],
+              "v": [
+                [
+                  1
+                ]
+              ],
+              "w": [
+                [
+                  1
+                ]
+              ]
+            },
+            "candidates": [
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              }
+            ]
+          }
+        }
+      ],
+      "optional_encounters": 1,
+      "optional_drops": 0,
+      "events": [
+        "initial_countdown",
+        "flip",
+        "observed",
+        "reduction_decision",
+        "rank_blocked",
+        "event_countdown",
+        "flip",
+        "rank_blocked",
+        "event_countdown",
+        "restart_requested"
+      ],
+      "state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 1,
+          "z2": true,
+          "u": [
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          }
+        ]
+      },
+      "best_state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 1,
+          "z2": true,
+          "u": [
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          },
+          {
+            "overflow": 0,
+            "pairs": []
+          }
+        ]
+      },
+      "removed_terms": {
+        "flip": 2,
+        "reduction": 0,
+        "total": 2
+      }
+    },
+    "native": {
+      "outcome": "unsuccessful",
+      "rng": 745495504,
+      "draws": 0,
+      "words": [],
+      "removed_terms": 0,
+      "reduction_operations": null,
+      "scheme": {
+        "n": [
+          1,
+          1,
+          1
+        ],
+        "m": 1,
+        "z2": true,
+        "u": [
+          [
+            1
+          ]
+        ],
+        "v": [
+          [
+            1
+          ]
+        ],
+        "w": [
+          [
+            1
+          ]
+        ]
+      },
+      "candidates": [
+        {
+          "overflow": 0,
+          "pairs": []
+        },
+        {
+          "overflow": 0,
+          "pairs": []
+        },
+        {
+          "overflow": 0,
+          "pairs": []
+        }
+      ]
+    }
+  },
+  "installed_restart": {
+    "policy": {
+      "rank": 3,
+      "best": 3,
+      "countdown": 1,
+      "rng": 435756210,
+      "draws": 8,
+      "flips": 2,
+      "controls": 3,
+      "terminal": null,
+      "pending_restart": false,
+      "mandatory": {
+        "rank": 1,
+        "operation": "flip",
+        "control": 1,
+        "state": {
+          "scheme": {
+            "n": [
+              1,
+              1,
+              1
+            ],
+            "m": 1,
+            "z2": true,
+            "u": [
+              [
+                1
+              ]
+            ],
+            "v": [
+              [
+                1
+              ]
+            ],
+            "w": [
+              [
+                1
+              ]
+            ]
+          },
+          "candidates": [
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            },
+            {
+              "overflow": 0,
+              "pairs": []
+            }
+          ]
+        }
+      },
+      "optional": [
+        {
+          "rank": 1,
+          "operation": "flip",
+          "control": 1,
+          "state": {
+            "scheme": {
+              "n": [
+                1,
+                1,
+                1
+              ],
+              "m": 1,
+              "z2": true,
+              "u": [
+                [
+                  1
+                ]
+              ],
+              "v": [
+                [
+                  1
+                ]
+              ],
+              "w": [
+                [
+                  1
+                ]
+              ]
+            },
+            "candidates": [
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              },
+              {
+                "overflow": 0,
+                "pairs": []
+              }
+            ]
+          }
+        }
+      ],
+      "optional_encounters": 1,
+      "optional_drops": 0,
+      "events": [
+        "initial_countdown",
+        "flip",
+        "observed",
+        "reduction_decision",
+        "rank_blocked",
+        "event_countdown",
+        "flip",
+        "rank_blocked",
+        "event_countdown",
+        "restart_requested",
+        "parent_installed",
+        "restart_countdown"
+      ],
+      "state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 3,
+          "z2": true,
+          "u": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          },
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          },
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          }
+        ]
+      },
+      "best_state": {
+        "scheme": {
+          "n": [
+            1,
+            1,
+            1
+          ],
+          "m": 3,
+          "z2": true,
+          "u": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ],
+          "v": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ],
+          "w": [
+            [
+              1
+            ],
+            [
+              1
+            ],
+            [
+              1
+            ]
+          ]
+        },
+        "candidates": [
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          },
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          },
+          {
+            "overflow": 0,
+            "pairs": [
+              [
+                0,
+                1
+              ],
+              [
+                0,
+                2
+              ],
+              [
+                1,
+                2
+              ]
+            ]
+          }
+        ]
+      },
+      "removed_terms": {
+        "flip": 2,
+        "reduction": 0,
+        "total": 2
+      }
+    },
+    "native": {
+      "outcome": "inspected",
+      "rng": 435756210,
+      "draws": 0,
+      "words": [],
+      "removed_terms": null,
+      "reduction_operations": null,
+      "scheme": {
+        "n": [
+          1,
+          1,
+          1
+        ],
+        "m": 3,
+        "z2": true,
+        "u": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "v": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ],
+        "w": [
+          [
+            1
+          ],
+          [
+            1
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "candidates": [
+        {
+          "overflow": 0,
+          "pairs": [
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ]
+          ]
+        },
+        {
+          "overflow": 0,
+          "pairs": [
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ]
+          ]
+        },
+        {
+          "overflow": 0,
+          "pairs": [
+            [
+              0,
+              1
+            ],
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "mandatory_scheme": {
+    "n": [
+      1,
+      1,
+      1
+    ],
+    "m": 1,
+    "z2": true,
+    "u": [
+      [
+        1
+      ]
+    ],
+    "v": [
+      [
+        1
+      ]
+    ],
+    "w": [
+      [
+        1
+      ]
+    ]
+  },
+  "remaining_coverage": "Full signed/F2 controlled-policy arithmetic coverage, wider-rank traces and GPU equivalence remain unverified.",
+  "review": {
+    "version": 1,
+    "status": "reviewed",
+    "scope": "The named scalar cases and their recorded controller transitions only",
+    "method": [
+      "Pinned arithmetic branch inspection",
+      "Independent xorshift draw calculation",
+      "Exact tensor and ordered factor/candidate checks"
+    ],
+    "coverage": "Partial FGM-CONTRACT-v1 coverage; not general or packed GPU acceptance"
+  },
+  "arithmetic_headers": {
+    "core.h": "8760ccee34f9ed570b4bbf9a6cf8e79860f805e0ca3a76fb5b2029f4c4d638cd",
+    "addition.h": "789cd66d3560cbfdfe14c6fd2107f2ab6e8e21f6694775abb0c68a61c3de37a1",
+    "flip_set.h": "6da8e32803e00979f6246fa45e3d62b2b6271eaa7cc6a1118cbfbeef414a7ff1",
+    "scheme_integer.h": "282f3e648d6a9f5829c20bf9422fd3d908ee3f4c0e93c72ea1e671c587229d39",
+    "scheme_z2.h": "cdb387997834d797d5483f46d4488b31e65a259196be6dec197ef0fea423567c"
+  }
+}
