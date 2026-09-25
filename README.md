@@ -52,6 +52,8 @@ Move the complete directory, including `shaders/`. Copying only an executable is
 
 FlipGraphMetal ports FlipGraphGPU's signed and F2 search, scheme transformations, complexity minimizers and signed additions reducer. Projection, extension, direct sums, tensor products and randomized resizing are supported. F2 search also supports sandwiching; nonzero signed sandwiching is deliberately rejected. There is no F2 additions reducer.
 
+Native `--run-config` workflows add bounded rank-reduction and fixed-rank alternative searches, retained pools, durable history and resume, corpus analysis, and direct signed circuit reduction. These workflows are inspired by [Perminov's CPU implementation](https://github.com/dronperminov/ternary_flip_graph), with a separately specified bounded search policy. They do not reproduce its trajectories, population dynamics or optimizer objectives. See [native workflow configuration](docs/development.md#native-controlled-workflows).
+
 Dimensions are limited to 1 through 16, factors to 64 elements and rank to 350. Naive initialization additionally requires the product of the dimensions to fit within rank 350. Candidate lists are limited to 500 equal-factor pairs per factor. Exceeding that capacity during initialization or a walk stops the run with an error, rather than accepting an incomplete neighborhood; for example, naive 6×6 and 7×7 inputs exceed it. File-loaded schemes use their own dimension and rank headers. Malformed inputs and unsupported configurations fail explicitly.
 
 Eligible signed 3×3 searches use a specialized packed path across ranks. Other supported dimensions and configurations use general Metal kernels. See [development](docs/development.md) for eligibility and numeric behavior, and [performance](docs/performance.md) for measured results and their limits.
@@ -69,7 +71,7 @@ The optional host-only `scheme_tool` verifies, converts, analyzes and selects si
 
 ## Scope and future work
 
-Potential future work includes newer CPU pool, restart and meta-search strategies; Z3 support and lifting tools; and additional analysis tools and search metrics. These are separate from the existing projection, extension, tensor-product and resizing support. The initial project scope preserves current search behavior and focuses maintenance on Apple silicon Metal.
+Potential future work includes additional CPU pool and restart strategies, structural/type descriptors and diversity policies, meta-search, Z3 support and lifting. These are separate from the implemented bounded native workflows and the existing projection, extension, tensor-product and resizing support. Legacy behavior remains separate from the controlled policy.
 
 ## Attribution and rights
 

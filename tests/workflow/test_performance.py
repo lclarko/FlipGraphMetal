@@ -81,6 +81,33 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'INCONCLUSIVE')
         self.assertFalse(result['budget_readiness'])
 
+    def test_unset_unapproved_margin(self):
+        doc = case()
+        doc['budget'].update(status='unapproved', approval=None, margin=None)
+        result = p.evaluate(seal(doc))
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertEqual(result['reason'], 'practical budget unapproved')
+        self.assertFalse(result['budget_readiness'])
+        self.assertIsNone(result['interval'])
+        self.assertNotIn('approved_degradation', result)
+
+    def test_unset_approved_margin_rejected(self):
+        doc = case()
+        doc['budget']['margin'] = None
+        with self.assertRaisesRegex(ValueError, 'margin: invalid finite number'):
+            p.evaluate(seal(doc))
+
+    def test_invalid_unapproved_margins_rejected(self):
+        for margin in (-.01, '0.02', True, [], math.inf, math.nan):
+            with self.subTest(margin=margin), self.assertRaises(ValueError):
+                doc = case()
+                doc['budget'].update(status='unapproved', approval=None, margin=margin)
+                p.evaluate(seal(doc))
+        doc = case()
+        doc['budget'].update(status='unapproved', approval=None, direction='higher', margin=1)
+        with self.assertRaisesRegex(ValueError, 'invalid practical margin'):
+            p.evaluate(seal(doc))
+
     def test_directions(self):
         doc = case(.98)
         doc['budget'].update(direction='higher', margin=.01)
@@ -202,7 +229,7 @@ class PerformanceTests(unittest.TestCase):
 
     def test_resource_failure_survives_unapproved_margin(self):
         doc=case()
-        doc['budget'].update(status='unapproved',approval=None)
+        doc['budget'].update(status='unapproved',approval=None,margin=None)
         doc['observations'][0].update(complete=False,candidate=None,error='memory cutoff',resource_violation=True)
         doc['precision_assessment']['adequate']=False
         result=p.evaluate(seal(doc))
@@ -210,6 +237,14 @@ class PerformanceTests(unittest.TestCase):
         self.assertFalse(result['budget_readiness'])
         self.assertTrue(result['resource_violation'])
         self.assertEqual(result['pairs_retained'],6)
+
+    def test_absolute_limit_failure_survives_unset_margin(self):
+        doc = case()
+        doc['budget'].update(status='unapproved', approval=None, margin=None, absolute_limit=1)
+        result = p.evaluate(seal(doc))
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['reason'], 'absolute resource budget violated')
+        self.assertTrue(result['resource_violation'])
 
     def test_no_extra_look(self):
         doc = case()

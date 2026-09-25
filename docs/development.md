@@ -10,7 +10,7 @@ Normal builds assemble the shared headers and kernels, then compile Metal 3.2 li
 
 Each executable embeds its library's relative filename and SHA-256 digest. The runtime resolves resources from the executable's actual location, including symlink resolution, verifies the bytes and loads them with `newLibraryWithData`. Missing or mismatched libraries fail explicitly. GPU-specific pipeline creation still occurs at runtime.
 
-Build receipts track compiler settings, source location and source contents; unchanged inputs do not trigger recompilation. `make package-metal PACKAGE_DIR=NEW_DIRECTORY` copies the five production executables, their two libraries, the README's attribution and rights section, and a portable hash manifest. It excludes test programs, source snapshots and benchmark evidence. Move that directory intact; no rebuild is needed merely to run the relocated installation.
+Build receipts track compiler settings, source location and source contents; unchanged inputs do not trigger recompilation. `make package-metal PACKAGE_DIR=NEW_DIRECTORY` copies the five Metal executables, host-only `scheme_tool`, two libraries, the README's attribution and rights section, and a portable hash manifest. It excludes test programs, source snapshots and benchmark evidence. Move that directory intact; no rebuild is needed merely to run the relocated installation.
 
 For shader experiments without the offline compiler, use `make METAL_LIBRARY_MODE=source`. This explicitly selects runtime compilation through `newLibraryWithSource`, embeds the source checkout's absolute path and requires that source to remain available. Run `make METAL_LIBRARY_MODE=source` after moving that checkout. Running ordinary `make` switches back to compiled libraries and rebuilds the affected programs. There is no automatic fallback between modes.
 
@@ -34,6 +34,8 @@ The `fgm-scheme-v1` JSON representation contains `dimensions`, `rank`, `domain`,
 Records distinguish submitted factors, canonical scheme identity and the effective positive-first U/V normalization used for execution eligibility. Identity follows [FGM-CONTRACT-v1](specifications/FGM-CONTRACT-v1.md): sign/order aliases share a canonical identity, while zero terms and multiplicity remain significant. Import does not reduce rank. Tensor validity, search eligibility and signed-reducer eligibility are separate findings; candidate capacities are assessed after the documented execution normalization.
 
 Analysis reports naive addition cost, coefficient counts, zero-factor terms, equal-factor candidate pairs, factor-matrix ranks over Q or F2, and sign-normalization status. These descriptors do not establish scheme equivalence or an optimized addition circuit. Circuit inputs reconstruct their factors, verify the tensor in the declared domain and check the reported operation count. This verification interface does not add an F2 GPU additions reducer.
+
+`factor_ranks` describes the assembled rank-by-factor-width matrices. It is distinct from the CPU repository's type invariant, which uses the reshaped factors of individual multiplication terms. Buds-based structural signatures and structural/type diversity selection are not implemented. Canonical identity removes term-order and sign-gauge aliases; it is not a general equivalence test.
 
 Resource limits default to 1 MiB per record, 10 million accounted verification/analysis operations per record, 64 MiB of selection-content accounting and 256 MiB of cumulative input reads. Use `--record-bytes`, `--verification-work`, `--selection-memory` and `--scan-bytes` to change them. Input reads include hashing passes. Selection accounting is not a claim about process RSS. Exit code 2 means a resource limit prevented completion; it does not establish an invalid tensor. Exit code 1 reports malformed or invalid input; 0 reports completed verification and output.
 
@@ -152,6 +154,20 @@ completed batch boundary to the lowest lower rank meeting the threshold.
 There is no smaller-population fallback. Stage changes and installations use
 separate lifetime control credits.
 
+These are CPU-inspired workflows governed by `FGM-CONTRACT-v1`, not a port of
+the CPU controller's timing, expansion or population policy. CPU parameter
+values do not imply matching search behavior. Reference/general/packed checks
+establish conformance to the controlled contract, not CPU search effectiveness.
+
+`batch_steps` and `optional_quota` affect retained output as well as runtime.
+Each worker keeps the first eligible optional encounters up to the quota and
+one mandatory lowest-rank encounter per batch. Captures can duplicate each
+other, and the mandatory encounter can be outside the requested alternatives
+rank. A quota of two therefore stores at most three captures, with potentially
+fewer distinct qualifying results. Later optional encounters count as drops.
+Increasing batch length does not increase the quota. Assess useful output from
+verified committed discoveries and capture drops alongside total workflow time.
+
 `history` accepts `path`, `storage_bytes`, `transaction_bytes` and
 `index_memory_bytes`. Defaults are `OUTPUT.journal`, 536870912, 1048576 and
 1048576. Reservations cover captures, durable frame completion and bounded
@@ -189,6 +205,11 @@ target. The best circuit is verified against its own reconstructed factors and
 rank. It is written to `OUTPUT.circuits.jsonl`; the receipt binds its hash and
 record indices. Supplied bounds, naive additions and verified circuit costs stay
 distinct. Parent classifications are not transferred to changed factors.
+
+Each mutation round starts nonzero lanes from the effective input and applies
+bounded flips. This does not implement the CPU optimizer's ongoing walk,
+naive-cost or maximize-flips objective, expansion, or sandwiching. The pool's
+`flips` selector weights parent draws; it is not a maximize-flips optimizer.
 
 Packaged native analysis and verification need no Python:
 
