@@ -1,5 +1,6 @@
 """Qualify pinned production programs using public fixtures and retained guards."""
 import argparse
+import ast
 import copy
 from collections import defaultdict
 import hashlib
@@ -12,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import re
 import statistics
 import subprocess
+import shutil
 import sys
 import time
 import tarfile
@@ -22,6 +24,7 @@ sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 sys.path.insert(0, str(ROOT / 'tests/metal'))
 from application import digest, hardware_inventory, write_json, source_identity
 from guard import run as guarded_run
+from application import wired_memory, LIMIT
 from smoke import dispatch_evidence
 from verify import verify, reconstruct
 
@@ -1018,6 +1021,1029 @@ def execute_native(config_path, binary, output, repetitions=1):
     return evidence
 
 
+FGM1_PANEL = ('original', 'laderman', 'smirnov', 'sun', 'cn122')
+FGM1_PROTOCOL = {
+    'schema': 'fgm-effectiveness-protocol-v1', 'version': 1,
+    'panel': list(FGM1_PANEL), 'seeds': [7, 19, 41],
+    'arms': ['fixed', 'generate'], 'arm_seconds': 20, 'endpoints': [10, 20],
+    'total_seconds': 900, 'child_reserve_seconds': 50,
+    'reducers': 256, 'initial_rounds': 32, 'initial_workers': 32,
+    'reduction_pilot_seconds': 1, 'generation_pilot_seconds': 5,
+    'search': {'batch_steps': 64, 'flip_budget': 64, 'control_budget': 64,
+               'optional_quota': 2, 'excursion': 2, 'interval_min': 4,
+               'interval_max': 8, 'stagnation_limit': 100, 'proposal_limit': 64,
+               'reduction_q': 0},
+    'seed_encoding': 'SHA256 compact ASCII JSON [panel,trial,stage,block], first 4 bytes little endian; zero becomes one',
+}
+FGM1_PREVIOUS_PROTOCOL = copy.deepcopy(FGM1_PROTOCOL)
+FGM1_PROTOCOL.update(version=2, launch_wired_reserve_bytes=1275068416, headroom_poll_seconds=0.025)
+FGM1_HEADROOM_PROTOCOL = copy.deepcopy(FGM1_PROTOCOL)
+FGM1_PROTOCOL.update(version=3, reducers=128)
+
+
+def reference_circuit(source, kind):
+    """Convert retained author data only; never execute an upstream program."""
+    result = dict(n=[3, 3, 3], m=23, z2=False)
+    if kind == 'cn122-58':
+        result = json.loads(source.read_text())
+    elif kind == 'cn122-55':
+        certificate = json.loads(source.read_text())
+        for key, name in zip('uvw', ('U_input_9_to_23', 'V_input_9_to_23', 'W_output_raw_23_to_9')):
+            side = certificate['circuits'][name]
+            fresh = []
+            for index, gate in enumerate(side['gates'], side['input_count']):
+                if gate['slot'] != index:
+                    raise ValueError('certificate gate slots are not consecutive')
+                fresh.append([dict(index=gate[term], value=gate[term+'_sign'])
+                              for term in ('left', 'right')])
+            result[key+'_fresh'] = fresh
+            result[key] = [[dict(index=item['slot'], value=item['sign'])] for item in side['outputs']]
+    elif kind == 'sun-56':
+        assignments = [node for node in ast.parse(source.read_text()).body
+                       if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SIDES'
+                                                               for t in node.targets)]
+        if len(assignments) != 1:
+            raise ValueError('expected one literal SIDES assignment')
+        sides = ast.literal_eval(assignments[0].value)
+        for key in 'uvw':
+            side = sides[key.upper()]
+            result[key+'_fresh'] = [[dict(index=a, value=1), dict(index=b, value=sign)]
+                                    for a, sign, b in side['inter']]
+            result[key] = [[dict(index=index, value=sign) for index, sign in expression]
+                           for expression in side['final']]
+        # The source output is row-major; FGM W uses j*3+i.
+        result['w'] = [result['w'][i] for i in (0, 3, 6, 1, 4, 7, 2, 5, 8)]
+    else:
+        raise ValueError('unknown reference circuit')
+    factors = dict(n=[3, 3, 3], m=23, z2=False, **dict(zip('uvw', circuit_factors(result))))
+    counts = {key: reconstruct(result[key], result[key+'_fresh'], 23 if key == 'w' else 9, False)[1]
+              for key in 'uvw'}
+    result['complexity'] = dict(naive=verify(factors)['additions'], reduced=sum(counts.values()))
+    verify(result, factors)
+    return result
+
+
+def prepare_effectiveness_panel(corpus, output):
+    """Freeze five factors and literal reference sources from the retained corpus."""
+    corpus = Path(corpus).resolve(strict=True)
+    manifest = json.loads((corpus/'manifest.json').read_text())
+    output = Path(output).absolute()
+    output.mkdir(parents=True, exist_ok=False)
+    for name in ('factors', 'circuits', 'sources'):
+        (output/name).mkdir()
+    def retained(relative, destination):
+        source = corpus/relative
+        if digest(source) != manifest['artifacts'][relative]:
+            raise ValueError('retained source hash mismatch: '+relative)
+        shutil.copyfile(source, output/destination)
+        return output/destination
+    entries = []
+    provenance = []
+    for name in FGM1_PANEL:
+        relative = f'fixtures/{name}.json'
+        path = retained(relative, f'factors/{name}.json')
+        data = json.loads(path.read_text())
+        if set(data) != {'n', 'm', 'z2', 'u', 'v', 'w'} or data['n'] != [3, 3, 3] or data['m'] != 23 or data['z2']:
+            raise ValueError('panel input must contain rank-23 signed factors only')
+        verify(data)
+        entries.append(dict(id=name, path=f'factors/{name}.json', sha256=digest(path),
+                            format='json', domain='ZT', references=[]))
+        item = next(row for row in manifest['inputs'] if row['id'] == name)
+        provenance.append(dict(id=name, source_sha256=digest(path), lineage=item['lineage'],
+                               source_metadata=item.get('source_metadata', {})))
+    cn = 'sources/data/schemes/source/cn122_add55/34949f9ce50a89a5ad6b47a17f5834ad5a87a2fb/'
+    sun = 'sources/data/schemes/source/sun2026_56/2917e6dedb624340a7a75fbb0214627ed545ea84/'
+    cases = [
+        ('cn122-55', 'cn122', cn+'search_runs/cn122_add55/certificate.json', 'sources/cn122-55.json',
+         {'u':13, 'v':14, 'w':28}, 'https://github.com/trylogical/cn122_add55', '34949f9ce50a89a5ad6b47a17f5834ad5a87a2fb'),
+        ('cn122-58', 'cn122', cn+'external/FastMatrixMultiplication/schemes/results/addition_reduced_ZT/3x3x3_m23_cr58_cn122_ZT_reduced.json',
+         'sources/cn122-58.json', {'u':14, 'v':15, 'w':29}, 'https://github.com/dronperminov/FastMatrixMultiplication', '98ba522db92b74f1f8c561a78038ff3091356d73'),
+        ('sun-56', 'sun', sun+'verify.py', 'sources/sun-56.py', {'u':13, 'v':13, 'w':30},
+         'https://github.com/sunyinqi0508/3by3r23-56a', '2917e6dedb624340a7a75fbb0214627ed545ea84'),
+    ]
+    for label, name, relative, dest, counts, repo, commit in cases:
+        source = retained(relative, dest)
+        circuit = reference_circuit(source, label)
+        factor = json.loads((output/f'factors/{name}.json').read_text())
+        verify(circuit, factor)
+        path = output/f'circuits/{label}.json'
+        write_json(path, circuit)
+        next(row for row in entries if row['id'] == name)['references'].append(dict(
+            id=label, path=f'circuits/{label}.json', sha256=digest(path), source=dest,
+            source_sha256=digest(source), repository=repo, commit=commit,
+            claimed_additions=sum(counts.values()), claimed_additions_by_stage=counts))
+    for relative, name in ((cn+'LICENSE', 'LICENSE-cn122.txt'),
+                           (cn+'THIRD_PARTY_LICENSES/Perminov-MIT.txt', 'LICENSE-perminov.txt'),
+                           (sun+'LICENSE', 'LICENSE-sun.txt')):
+        retained(relative, 'sources/'+name)
+    write_json(output/'provenance.json', dict(schema='fgm-panel-provenance-v1', factors=provenance,
+        conversion='CN122 uses cyclic-W raw output; Sun row-major outputs permuted to cyclic-W; term order and signs preserved'))
+    write_json(output/'protocol.json', FGM1_PROTOCOL)
+    panel = dict(schema='fgm-effectiveness-panel-v1', entries=entries, protocol='protocol.json',
+                 artifacts={str(p.relative_to(output)):digest(p) for p in sorted(output.rglob('*')) if p.is_file()})
+    write_json(output/'panel.json', panel)
+    return panel
+
+
+def effectiveness_seed(panel, trial, stage, block):
+    encoded = json.dumps([panel, trial, stage, block], separators=(',', ':'), ensure_ascii=True).encode()
+    return int.from_bytes(hashlib.sha256(encoded).digest()[:4], 'little') or 1
+
+
+def effective_factor_id(data):
+    factors = normalized_input(data)
+    return host_oracle().identity(dict(dimensions=factors['n'], rank=factors['m'], domain='ZT',
+                                      orientation='cyclic-w', **{k:factors[k] for k in 'uvw'}), False)
+
+
+def panel_artifact(root, name, checksum):
+    relative = PurePosixPath(name)
+    if relative.is_absolute() or '..' in relative.parts or not relative.parts:
+        raise ValueError('panel paths must stay within the bundle')
+    path = root/relative
+    if path.is_symlink() or not path.resolve(strict=True).is_relative_to(root.resolve()):
+        raise ValueError('panel artifact escapes bundle')
+    if path.stat().st_size > 4*1048576 or digest(path) != checksum:
+        raise ValueError('panel artifact hash/size mismatch: '+name)
+    return path
+
+
+def load_effectiveness_panel(path, expected_protocol=None):
+    path = Path(path).resolve(strict=True)
+    if path.stat().st_size > 1048576:
+        raise ValueError('panel manifest exceeds limit')
+    panel = json.loads(path.read_text())
+    if panel['schema'] != 'fgm-effectiveness-panel-v1' or [e['id'] for e in panel['entries']] != list(FGM1_PANEL):
+        raise ValueError('unexpected effectiveness panel roster')
+    for name, checksum in panel['artifacts'].items():
+        panel_artifact(path.parent, name, checksum)
+    protocol = json.loads((path.parent/panel['protocol']).read_text())
+    expected_protocol = expected_protocol or FGM1_PROTOCOL
+    if expected_protocol not in (FGM1_PROTOCOL, FGM1_HEADROOM_PROTOCOL, FGM1_PREVIOUS_PROTOCOL) or protocol != expected_protocol:
+        raise ValueError('unsupported effectiveness protocol; version changes require implementation and calibration')
+    canonical = set()
+    expected_references = {'sun': {'sun-56': {'u':13,'v':13,'w':30}},
+                           'cn122': {'cn122-55': {'u':13,'v':14,'w':28}, 'cn122-58': {'u':14,'v':15,'w':29}}}
+    for entry in panel['entries']:
+        expected = expected_references.get(entry['id'], {})
+        if len(entry['references']) != len(expected) or {r['id'] for r in entry['references']} != set(expected):
+            raise ValueError('reference roster differs from fixed panel')
+        factor_path = panel_artifact(path.parent, entry['path'], entry['sha256'])
+        if panel['artifacts'].get(entry['path']) != entry['sha256']:
+            raise ValueError('panel factor hash declarations disagree')
+        data = json.loads(factor_path.read_text())
+        if set(data) != {'n', 'm', 'z2', 'u', 'v', 'w'} or data['n'] != [3, 3, 3] or data['m'] != 23 or data['z2'] is not False:
+            raise ValueError('panel factors must be signed rank-23 3x3 with no circuit metadata')
+        verify(data)
+        sid = host_oracle().identity(dict(dimensions=data['n'], rank=data['m'], domain='ZT',
+                                          orientation='cyclic-w', **{k:data[k] for k in 'uvw'}))
+        if sid in canonical:
+            raise ValueError('panel contains canonical aliases')
+        canonical.add(sid)
+        entry['scheme_id'] = sid
+        for reference in entry['references']:
+            circuit_path = panel_artifact(path.parent, reference['path'], reference['sha256'])
+            source = panel_artifact(path.parent, reference['source'], reference['source_sha256'])
+            if reference_circuit(source, reference['id']) != json.loads(circuit_path.read_text()):
+                raise ValueError('reference circuit differs from retained source conversion')
+            circuit_data = json.loads(circuit_path.read_text())
+            result = verify(circuit_data, data)
+            if result['additions'] != reference['claimed_additions']:
+                raise ValueError('reference source count mismatch')
+            counts = {k:reconstruct(circuit_data[k], circuit_data[k+'_fresh'],
+                                    23 if k == 'w' else 9, False)[1] for k in 'uvw'}
+            if counts != reference['claimed_additions_by_stage']:
+                raise ValueError('reference source stage count mismatch')
+            if counts != expected[reference['id']]:
+                raise ValueError('reference stage counts differ from panel protocol')
+    return panel, protocol
+
+
+def effectiveness_config(entry, seed, calibration, operation, source, history):
+    config = dict(schema='fgm-run-v1', operation=operation, output='receipt.json',
+                  input={'kind':'files', 'files':[{'path':str(source), 'format':'json', 'domain':'ZT'}]},
+                  execution=dict(workers=1, batch_steps=64, block_size=32, backend='general', memory_bytes=536870912))
+    if operation == 'reduce':
+        rounds = calibration['rounds']
+        config['reduction'] = dict(domain='ZT', seed=seed, rounds=rounds, reducers=FGM1_PROTOCOL['reducers'],
+                                   schemes=1, max_flips=0, no_improvements=rounds, target_additions=0)
+    else:
+        policy = copy.deepcopy(FGM1_PROTOCOL['search'])
+        policy.pop('batch_steps')
+        policy.update(schema='fgm-controlled-config-v1', policy='controlled-v1', mode='alternatives',
+                      domain='ZT', dimensions=[3, 3, 3], seed=seed, collection_rank=23, target_rank=None)
+        config['policy'] = policy
+        config['execution'].update(workers=calibration['workers'], backend='packed')
+        config['pool'] = dict(capacity_per_rank=16, reserve_per_rank=16, memory_bytes=1048576,
+                              stage_threshold=1, selector='uniform')
+        # Reserve bounded evidence for 32 workers and three capture slots each.
+        config['history'] = dict(path=str(history), storage_bytes=268435456,
+                                 transaction_bytes=8388608, index_memory_bytes=1048576)
+        if history.exists():
+            config['input'] = dict(kind='resume', journal=str(history))
+    return config
+
+
+def effectiveness_accounting(observations, seed_id, capture_drops=0):
+    """Descriptive capture accounting, independent of circuit scores."""
+    optional_seen = {seed_id}
+    canonical = {seed_id}
+    mandatory_events = set()
+    optional_events = set()
+    optional = duplicates = seed_hits = evictions = 0
+    active = {23:[seed_id]}
+    for row in observations:
+        sid, rank = row['scheme_id'], row['rank']
+        roster = active.setdefault(rank, [])
+        if sid not in roster:
+            if len(roster) == 16:
+                roster.pop(0)
+                evictions += 1
+            roster.append(sid)
+        if rank != 23:
+            continue
+        canonical.add(sid)
+        event = (row['run_id'], row['batch'], row['worker'], row['control'], row['operation'], row['factors_id'])
+        if row['mandatory']:
+            mandatory_events.add(event)
+        else:
+            optional_events.add(event)
+            optional += 1
+            duplicates += sid in optional_seen
+            seed_hits += sid == seed_id
+            optional_seen.add(sid)
+    return dict(distinct_discoveries=len(canonical)-1, optional_rank23_captures=optional,
+                optional_duplicates=duplicates, optional_duplicate_rate=duplicates/optional if optional else None,
+                optional_seed_rediscoveries=seed_hits,
+                mandatory_optional_redundancy=len(mandatory_events & optional_events),
+                capture_drops=capture_drops, encounter_drop_rate=capture_drops/(optional+capture_drops) if optional+capture_drops else None,
+                active_pool_evictions_derived=evictions,
+                eviction_scope='FIFO replay of captured IDs with one rank-23 seed and capacity 16 per rank')
+
+
+def effectiveness_endpoints(cell, endpoints=(10, 20)):
+    result = {}
+    for endpoint in endpoints:
+        best = {}
+        for item in cell['evaluations']:
+            if item['verified_seconds'] <= endpoint:
+                sid = item['scheme_id']
+                if sid not in best or item['additions'] < best[sid]['additions']:
+                    best[sid] = item
+        counts = defaultdict(int)
+        for item in best.values():
+            counts[str(item['additions'])] += 1
+        discoveries = {item['scheme_id'] for item in cell['discoveries'] if item['verified_seconds'] <= endpoint}
+        winner = min(best.values(), key=lambda item:item['additions']) if best else None
+        result[str(endpoint)] = dict(best_additions=winner['additions'] if winner else None,
+            best_additions_by_stage=winner['additions_by_stage'] if winner else None,
+            cost_histogram=dict(sorted(counts.items(), key=lambda kv:int(kv[0]))),
+            distinct_discoveries=len(discoveries), evaluated_candidates=len(best),
+            unevaluated_discoveries=len(discoveries-set(best)),
+            reference_attainment={str(cost):bool(winner and winner['additions'] <= cost)
+                                  for cost in cell['reference_costs']})
+    return result
+
+
+class EffectivenessStop(Exception):
+    """An orderly scheduling stop, never a successful incomplete measurement."""
+
+
+class EffectivenessRun:
+    def __init__(self, output, binary_dir, clock=None, sleeper=None):
+        self.output = Path(output)
+        self.binary_dir = Path(binary_dir)
+        self.clock = clock or time.monotonic
+        self.sleeper = sleeper or time.sleep
+        self.started = None
+        self.deadline = None
+        self.serial = 0
+
+    def check_launch(self, stop=None):
+        now = self.clock()
+        if self.deadline is not None and self.deadline-now < FGM1_PROTOCOL['child_reserve_seconds']:
+            raise EffectivenessStop('overall envelope cleanup reserve')
+        if stop is not None and now >= stop:
+            raise EffectivenessStop('block or arm deadline')
+
+    def command(self, argv, attempt, record, stop=None):
+        wait_started = self.clock()
+        try:
+            if Path(argv[0]).name in ('flip_graph', 'additions_reducer'):
+                self.await_headroom(stop)
+            else:
+                self.check_launch(stop)
+        finally:
+            record['headroom_wait_seconds'] = record.get('headroom_wait_seconds', 0.)+self.clock()-wait_started
+        guard_dir = attempt/f'guard-{len(record["commands"]):02d}'
+        record['commands'].append(argv)
+        write_json(attempt/'step.json', record)
+        guard = guarded_run(['/usr/bin/time', '-l', '-p', *argv], guard_dir)
+        record.setdefault('guards', []).append(dict(path=guard_dir.name,
+            result_sha256=digest(guard_dir/'result.json'),
+            log_sha256=digest(guard_dir/'run.log') if (guard_dir/'run.log').exists() else None))
+        record['peak_system_wired_bytes'] = max(record.get('peak_system_wired_bytes', 0),
+                                                max((r['wired_bytes'] for r in guard.get('memory', [])), default=0))
+        if not guard['complete']:
+            raise RuntimeError('guarded process incomplete: '+str(guard.get('error')))
+        log = (guard_dir/'run.log').read_text()
+        elapsed = re.findall(r'^real\s+([0-9.]+)$', log, re.M)
+        rss = re.findall(r'^\s*(\d+)\s+maximum resident set size\s*$', log, re.M)
+        if len(elapsed) != 1 or len(rss) != 1:
+            raise ValueError('missing process time/RSS')
+        record['native_process_seconds'] = record.get('native_process_seconds', 0.)+float(elapsed[0])
+        record['peak_process_rss_bytes'] = max(record.get('peak_process_rss_bytes', 0), int(rss[0]))
+        return log
+
+    def await_headroom(self, stop=None):
+        """Wait within the scored budget for observed GPU allocation headroom."""
+        started = self.clock()
+        while True:
+            self.check_launch(stop)
+            wired = wired_memory()
+            self.check_launch(stop)
+            if wired <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']:
+                return self.clock()-started
+            self.sleeper(FGM1_PROTOCOL['headroom_poll_seconds'])
+
+    def invoke(self, config, label, stop=None):
+        self.check_launch(stop)
+        start = self.clock()
+        self.serial += 1
+        attempt = self.output/'blocks'/f'{self.serial:05d}-{label}'
+        attempt.mkdir(parents=True)
+        config = copy.deepcopy(config)
+        config['output'] = str(attempt/'receipt.json')
+        if config['input']['kind'] == 'files':
+            shutil.copyfile(config['input']['files'][0]['path'], attempt/'input.json')
+            config['input']['files'][0]['path'] = str(attempt/'input.json')
+        write_json(attempt/'config.json', config)
+        record = dict(complete=False, operation=config['operation'], commands=[], label=label,
+                      started_seconds=start-self.started if self.started is not None else None)
+        try:
+            binary = self.binary_dir/('flip_graph' if config['operation'] == 'search' else 'additions_reducer')
+            log = self.command([str(binary), '--run-config', str(attempt/'config.json')], attempt, record, stop)
+            receipt = json.loads((attempt/'receipt.json').read_text())
+            record['counters'] = receipt.get('counters', {})
+            record['native_receipt_sha256'] = digest(attempt/'receipt.json')
+            if receipt['status'] != 'complete' or not receipt['execution_started']:
+                raise ValueError('native workflow incomplete')
+            if receipt['configuration_sha256'] != digest(attempt/'config.json') or receipt['executable_sha256'] != digest(binary):
+                raise ValueError('native workflow identity mismatch')
+            if config['input']['kind'] == 'files':
+                hashes = {digest(Path(item['path'])) for item in config['input']['files']}
+                if any(p['source_sha256'] not in hashes for p in receipt['presentations']):
+                    raise ValueError('native admitted source differs from supplied factors')
+            record['gpu'] = native_dispatch_evidence(log, receipt)
+            record['host_phases'] = {k:v for k,v in receipt.items() if k.endswith('_microseconds')}
+            record['native_results'] = receipt.get('results', [])
+            verify_start = self.clock()
+            if config['operation'] == 'reduce':
+                artifact = attempt/'receipt.json.circuits.jsonl'
+                native_verify_circuits(artifact, receipt)
+                if len(receipt['results']) != 1:
+                    raise ValueError('effectiveness reduction requires one presentation')
+                circuit = json.loads(artifact.read_text())
+                independent = verify(circuit)
+                counts = {k:reconstruct(circuit[k], circuit[k+'_fresh'], 23 if k == 'w' else 9, False)[1] for k in 'uvw'}
+                if receipt['results'][0]['verified_circuit_additions_by_stage'] != counts:
+                    raise ValueError('native/independent stage count mismatch')
+                data = dict(dimensions=circuit['n'], rank=circuit['m'], domain='ZT', orientation='cyclic-w',
+                            **dict(zip('uvw', circuit_factors(circuit))))
+                record['evaluation'] = dict(scheme_id=host_oracle().identity(data),
+                    factors_id=host_oracle().identity(data, False), additions=independent['additions'],
+                    additions_by_stage=counts, circuit_path=str(artifact.relative_to(self.output)),
+                    circuit_sha256=digest(artifact))
+            else:
+                exported = attempt/'observations.jsonl'
+                export_start = self.clock()
+                self.command([str(self.binary_dir/'scheme_tool'), 'analyze', '--format', 'journal', '--observations',
+                              '--input', config['history']['path'], '--output', str(exported),
+                              '--record-bytes', str(config['history']['transaction_bytes']), '--scan-bytes', '268435456'],
+                             attempt, record, stop)
+                record['observation_export_seconds'] = self.clock()-export_start
+                verify_start = self.clock()
+                observations = checked_observations(exported)
+                record['observations_path'] = str(exported.relative_to(self.output))
+                record['observations_sha256'] = digest(exported)
+                record['observations'] = observations
+            record['verification_seconds'] = self.clock()-verify_start
+            record['verified_at_seconds'] = self.clock()-self.started if self.started is not None else None
+            record['complete'] = True
+        except Exception as error:
+            record['error'] = str(error)
+            error.effectiveness_record = record
+            raise
+        finally:
+            record['workflow_seconds'] = self.clock()-start
+            disk = {k:v for k,v in record.items() if k != 'observations'}
+            write_json(attempt/'step.json', disk)
+            record['evidence_path'] = str((attempt/'step.json').relative_to(self.output))
+            record['evidence_sha256'] = digest(attempt/'step.json')
+        return record
+
+
+def effectiveness_identity(binary_dir, panel_path):
+    """Bind calibration to actual build inputs, executables, fixtures and hardware."""
+    binary_dir = Path(binary_dir).resolve(strict=True)
+    inventory = {}
+    for name in ('scheme_tool', 'flip_graph', 'additions_reducer'):
+        binary = binary_dir/name
+        path = binary.with_name(name+'.build.json')
+        build = json.loads(path.read_text())
+        stat = binary.stat()
+        if build['output'] != {'size':stat.st_size, 'mtime_ns':stat.st_mtime_ns}:
+            raise ValueError('build receipt does not match executable: '+name)
+        for dependency, checksum in build['inputs']['dependencies'].items():
+            source = Path(dependency)
+            if digest(source if source.is_absolute() else ROOT/source) != checksum:
+                raise ValueError('build dependency changed: '+dependency)
+        inventory[name] = digest(binary)
+        inventory[path.name] = digest(path)
+    for library in sorted((binary_dir/'shaders').glob('*.metallib')):
+        inventory[str(library.relative_to(binary_dir))] = digest(library)
+    if not inventory.get('shaders/signed.metallib'):
+        raise ValueError('effectiveness measurements require compiled signed Metal library')
+    source_hashes = source_identity(ROOT)
+    source_hashes['docs/specifications/FGM-CONTRACT-v1.md'] = digest(ROOT/'docs/specifications/FGM-CONTRACT-v1.md')
+    return dict(panel_sha256=digest(panel_path), protocol_sha256=content_hash(FGM1_PROTOCOL),
+                build_inventory=inventory, source_inventory=source_hashes, hardware=host_machine_identity())
+
+
+def checked_observations(path):
+    rows = []
+    with path.open() as stream:
+        while line := stream.readline(1048577):
+            if len(line.encode()) > 1048576 or not line.endswith('\n'):
+                raise ValueError('observation record exceeds limit')
+            row = json.loads(line)
+            if row['schema'] != 'fgm-journal-observation-v1':
+                raise ValueError('unexpected observation schema')
+            data = row['scheme']
+            verify(dict(n=data['dimensions'],m=data['rank'],z2=data['domain']=='F2', **{k:data[k] for k in 'uvw'}))
+            if row['scheme_id'] != host_oracle().identity(data) or row['factors_id'] != host_oracle().identity(data, False):
+                raise ValueError('observation identity mismatch')
+            if row['rank'] != data['rank'] or row['domain'] != data['domain']:
+                raise ValueError('observation rank/domain mismatch')
+            rows.append(row)
+    return rows
+
+
+def checked_effectiveness_step(base, reference, bindings=None, expected_reducers=None):
+    path = panel_artifact(Path(base), reference['path'], reference['sha256'])
+    step = json.loads(path.read_text())
+    for field in ('workflow_seconds', 'started_seconds'):
+        if type(step[field]) not in (int, float) or not math.isfinite(step[field]) or step[field] < 0:
+            raise ValueError('invalid retained step timing')
+    if not step['complete']:
+        if 'native_receipt_sha256' in step:
+            receipt_path = path.parent/'receipt.json'
+            if digest(receipt_path) != step['native_receipt_sha256']:
+                raise ValueError('partial step receipt hash mismatch')
+            receipt = json.loads(receipt_path.read_text())
+            if step['counters'] != receipt['counters']:
+                raise ValueError('partial step counters differ from receipt')
+        return step
+    config_path = path.parent/'config.json'
+    receipt_path = path.parent/'receipt.json'
+    receipt = json.loads(receipt_path.read_text())
+    if digest(receipt_path) != step['native_receipt_sha256'] or digest(config_path) != receipt['configuration_sha256']:
+        raise ValueError('step receipt/configuration hash mismatch')
+    config = json.loads(config_path.read_text())
+    if receipt['status'] != 'complete' or receipt['configuration']['operation'] != step['operation']:
+        raise ValueError('step operation or completion mismatch')
+    if not step.get('guards') or len(step['guards']) != len(step['commands']):
+        raise ValueError('missing guarded command evidence')
+    for guard, command in zip(step['guards'], step['commands']):
+        folder = path.parent/guard['path']
+        if digest(folder/'result.json') != guard['result_sha256'] or digest(folder/'run.log') != guard['log_sha256']:
+            raise ValueError('guard artifact hash mismatch')
+        guarded = json.loads((folder/'result.json').read_text())
+        if guarded['complete'] is not True or guarded['argv'] != ['/usr/bin/time','-l','-p',*command]:
+            raise ValueError('completed step has incomplete guard')
+    if bindings is not None:
+        binary = 'additions_reducer' if step['operation']=='reduce' else 'flip_graph'
+        if receipt['executable_sha256'] != bindings['build_inventory'][binary]:
+            raise ValueError('native executable differs from frozen build')
+    if config['input']['kind'] == 'files':
+        source = path.parent/'input.json'
+        source_data = json.loads(source.read_text())
+        verify(source_data)
+        if not receipt['presentations'] or any(p['source_sha256'] != digest(source) for p in receipt['presentations']):
+            raise ValueError('native input differs from retained source')
+        step['input_factors_id'] = effective_factor_id(source_data)
+    gpu = json.loads(json.dumps(native_dispatch_evidence((path.parent/step['guards'][0]['path']/'run.log').read_text(), receipt)))
+    if step['gpu'] != gpu or step['counters'] != receipt['counters']:
+        raise ValueError('step GPU/counter evidence differs from native artifacts')
+    if step['host_phases'] != {k:v for k,v in receipt.items() if k.endswith('_microseconds')}:
+        raise ValueError('step phase timings differ from native receipt')
+    timestamp = step['verified_at_seconds']
+    if type(timestamp) not in (int, float) or not math.isfinite(timestamp) or not step['started_seconds'] <= timestamp <= step['started_seconds']+step['workflow_seconds']:
+        raise ValueError('step verification time outside retained interval')
+    if step['operation'] == 'reduce':
+        reduction = config['reduction']
+        expected_reducers = FGM1_PROTOCOL['reducers'] if expected_reducers is None else expected_reducers
+        if any(reduction[k] != value for k,value in dict(max_flips=0,schemes=1,target_additions=0,
+                no_improvements=reduction['rounds'],reducers=expected_reducers).items()):
+            raise ValueError('reduction quantum differs from fixed-factor protocol')
+        circuit_path = path.parent/'receipt.json.circuits.jsonl'
+        native_verify_circuits(circuit_path, receipt)
+        circuit = json.loads(circuit_path.read_text())
+        result = verify(circuit)
+        factors = dict(dimensions=circuit['n'],rank=circuit['m'],domain='ZT',orientation='cyclic-w',
+                       **dict(zip('uvw', circuit_factors(circuit))))
+        counts = result['additions_by_stage']
+        expected = dict(scheme_id=host_oracle().identity(factors),factors_id=host_oracle().identity(factors,False),
+                        additions=result['additions'],additions_by_stage=counts,circuit_sha256=digest(circuit_path))
+        if any(step['evaluation'][k] != v for k,v in expected.items()) or receipt['results'][0]['verified_circuit_additions_by_stage'] != counts:
+            raise ValueError('retained evaluation differs from independently verified circuit')
+        if step['evaluation']['factors_id'] != step['input_factors_id']:
+            raise ValueError('reduction did not preserve retained input presentation')
+    else:
+        observations = path.parent/'observations.jsonl'
+        if digest(observations) != step['observations_sha256']:
+            raise ValueError('observation artifact hash mismatch')
+        step['observations'] = checked_observations(observations)
+    step['config'] = config
+    return step
+
+
+def calibration_valid(calibration, bindings, base=None):
+    if calibration.get('schema') != 'fgm-effectiveness-calibration-v1' or calibration.get('complete') is not True:
+        return False
+    if calibration.get('bindings') != bindings:
+        return False
+    settings = calibration.get('settings', {})
+    if any(type(settings.get(k)) is not int or settings[k] not in (1, 2, 4, 8, 16, 32) for k in ('rounds', 'workers')):
+        return False
+    for kind, setting, limit in (('reduce', settings['rounds'], 1), ('search', settings['workers'], 5)):
+        rows = [row for row in calibration.get('pilots', []) if row['kind'] == kind and row['setting'] == setting]
+        if [row['panel'] for row in rows] != list(FGM1_PANEL):
+            return False
+        if any(row.get('complete') is not True or type(row['seconds']) not in (int,float)
+               or not math.isfinite(row['seconds']) or not 0 <= row['seconds'] <= limit
+               or not row.get('steps') for row in rows):
+            return False
+    if base is not None:
+        expected_reducers = next((p['reducers'] for p in (FGM1_PROTOCOL, FGM1_HEADROOM_PROTOCOL, FGM1_PREVIOUS_PROTOCOL)
+                                  if content_hash(p)==bindings.get('protocol_sha256')), FGM1_PROTOCOL['reducers'])
+        for row in calibration['pilots']:
+            checked_steps = []
+            for step in row.get('steps', []):
+                try:
+                    checked = checked_effectiveness_step(base, step, bindings, expected_reducers=expected_reducers)
+                    if not checked.get('complete'):
+                        return False
+                    config = checked['config']
+                    if config['operation'] == 'reduce' and config['reduction']['rounds'] != (row['setting'] if row['kind']=='reduce' else settings['rounds']):
+                        return False
+                    if config['operation'] == 'search' and config['execution']['workers'] != row['setting']:
+                        return False
+                    checked_steps.append(checked)
+                except (KeyError, ValueError, OSError):
+                    return False
+            if sum(step['workflow_seconds'] for step in checked_steps) > row['seconds']:
+                return False
+            if checked_steps and checked_steps[-1]['started_seconds']+checked_steps[-1]['workflow_seconds']-checked_steps[0]['started_seconds'] > row['seconds']:
+                return False
+            if row['complete'] and row['seconds'] <= (1 if row['kind']=='reduce' else 5):
+                initial = json.loads((Path(base)/'panel'/f'factors/{row["panel"]}.json').read_text())
+                if not checked_steps or checked_steps[0].get('input_factors_id') != effective_factor_id(initial):
+                    return False
+                if row['kind'] == 'reduce':
+                    if len(checked_steps) != 1 or checked_steps[0]['operation'] != 'reduce':
+                        return False
+                else:
+                    if not checked_steps or checked_steps[0]['operation'] != 'search':
+                        return False
+                    initial = json.loads((Path(base)/'panel'/f'factors/{row["panel"]}.json').read_text())
+                    seed_id = host_oracle().identity(dict(dimensions=initial['n'],rank=23,domain='ZT',orientation='cyclic-w',
+                                                         **{k:initial[k] for k in 'uvw'}))
+                    pending = list(dict.fromkeys(o['scheme_id'] for o in checked_steps[0]['observations']
+                                                  if o['rank']==23 and o['scheme_id'] != seed_id))
+                    if [s.get('evaluation',{}).get('scheme_id') for s in checked_steps[1:]] != pending:
+                        return False
+    return True
+
+
+def candidate_file(run, row):
+    data = row['scheme']
+    path = run.output/'candidates'/(row['factors_id'].split(':')[-1]+'.json')
+    factor = dict(n=data['dimensions'], m=data['rank'], z2=data['domain']=='F2', **{k:data[k] for k in 'uvw'})
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        if json.loads(path.read_text()) != factor:
+            raise ValueError('ordered candidate identity collision')
+    else:
+        write_json(path, factor)
+    return path
+
+
+def calibrate_effectiveness(run, entries, panel_root, bindings, save):
+    calibration = dict(schema='fgm-effectiveness-calibration-v1', complete=False,
+                       bindings=bindings, settings={'rounds':32, 'workers':32}, pilots=[])
+    for kind, setting_name, limit in (('reduce', 'rounds', 1), ('search', 'workers', 5)):
+        while True:
+            setting = calibration['settings'][setting_name]
+            passed = True
+            for entry in entries:
+                run.check_launch()
+                started = run.clock()
+                stop = started+limit
+                row = dict(kind=kind, setting=setting, panel=entry['id'], complete=False, steps=[])
+                calibration['pilots'].append(row)
+                save(calibration)
+                source = panel_root/entry['path']
+                history = run.output/'pilots'/f'{kind}-{setting}-{entry["id"]}'/'history'
+                history.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    seed = effectiveness_seed(entry['id'], 7, 'pilot-'+kind, setting)
+                    config = effectiveness_config(entry, seed, calibration['settings'], kind, source, history)
+                    record = run.invoke(config, 'pilot-'+kind, stop)
+                    row['steps'].append({'path':record['evidence_path'], 'sha256':record['evidence_sha256']})
+                    if kind == 'search':
+                        seen = {entry['scheme_id']}
+                        for observation in record['observations']:
+                            if observation['rank'] != 23 or observation['scheme_id'] in seen:
+                                continue
+                            seen.add(observation['scheme_id'])
+                            path = candidate_file(run, observation)
+                            config = effectiveness_config(entry, effectiveness_seed(entry['id'], 7, 'pilot-evaluate', len(seen)),
+                                                          calibration['settings'], 'reduce', path, history)
+                            reduced = run.invoke(config, 'pilot-evaluate', stop)
+                            row['steps'].append({'path':reduced['evidence_path'], 'sha256':reduced['evidence_sha256']})
+                    row['complete'] = True
+                except EffectivenessStop as error:
+                    row['error'] = str(error)
+                    if run.deadline-run.clock() < FGM1_PROTOCOL['child_reserve_seconds']:
+                        raise
+                finally:
+                    row['seconds'] = run.clock()-started
+                    row['passed'] = row['complete'] and row['seconds'] <= limit
+                    passed &= row['passed']
+                    save(calibration)
+            if passed:
+                break
+            if setting == 1:
+                raise RuntimeError(f'calibration cannot fit {kind} at minimum quantum')
+            calibration['settings'][setting_name] //= 2
+    calibration['complete'] = True
+    save(calibration)
+    return calibration
+
+
+def run_effectiveness_cell(run, cell, entry, panel_root, settings, save):
+    started = run.clock()
+    stop = started+FGM1_PROTOCOL['arm_seconds']
+    cell.update(status='running', evaluations=[], discoveries=[], observations=[], steps=[], counters={},
+                started_seconds=started-run.started)
+    history = run.output/'cells'/cell['id']/'history'
+    history.parent.mkdir(parents=True, exist_ok=True)
+    queue = [(entry['scheme_id'], panel_root/entry['path'])]
+    seen = {entry['scheme_id']}
+    observed = set()
+    block = reduction = 0
+    save()
+    try:
+        while run.clock() < stop:
+            run.check_launch(stop)
+            if queue or cell['arm'] == 'fixed':
+                sid, source = queue[0] if queue else (entry['scheme_id'], panel_root/entry['path'])
+                config = effectiveness_config(entry, effectiveness_seed(entry['id'], cell['seed'], 'reduce', reduction),
+                                              settings, 'reduce', source, history)
+                record = run.invoke(config, cell['id']+'-reduce', stop)
+                evaluated = record['evaluation']
+                if evaluated['scheme_id'] != sid:
+                    raise ValueError('evaluation canonical identity differs from queued factors')
+                evaluated['verified_seconds'] = record['verified_at_seconds']-cell['started_seconds']
+                cell['evaluations'].append(evaluated)
+                if queue:
+                    queue.pop(0)
+                reduction += 1
+            else:
+                config = effectiveness_config(entry, effectiveness_seed(entry['id'], cell['seed'], 'search', block),
+                                              settings, 'search', panel_root/entry['path'], history)
+                record = run.invoke(config, cell['id']+'-search', stop)
+                captured_at = record['verified_at_seconds']-cell['started_seconds']
+                for row in record['observations']:
+                    key = (row['sequence'], row['worker'], row['slot'])
+                    if key in observed:
+                        continue
+                    observed.add(key)
+                    cell['observations'].append({k:v for k,v in row.items() if k != 'scheme'})
+                    if row['rank'] == 23 and row['scheme_id'] not in seen:
+                        seen.add(row['scheme_id'])
+                        queue.append((row['scheme_id'], candidate_file(run, row)))
+                        cell['discoveries'].append(dict(scheme_id=row['scheme_id'], factors_id=row['factors_id'],
+                                                       verified_seconds=captured_at))
+                for key, value in record['counters'].items():
+                    if key != 'discoveries_historical':
+                        cell['counters'][key] = cell['counters'].get(key, 0)+value
+                block += 1
+            cell['steps'].append(dict(path=record['evidence_path'], sha256=record['evidence_sha256']))
+        cell['status'] = 'complete'
+    except EffectivenessStop as error:
+        record = getattr(error, 'effectiveness_record', None)
+        if record:
+            cell['steps'].append(dict(path=record['evidence_path'], sha256=record['evidence_sha256']))
+            cell['unexported_native_discoveries'] = record.get('counters', {}).get('discoveries_current_run', 0)
+            if record['operation'] == 'search':
+                for key, value in record.get('counters', {}).items():
+                    if key != 'discoveries_historical':
+                        cell['counters'][key] = cell['counters'].get(key, 0)+value
+        cell['status'] = 'complete' if run.clock() >= stop else 'incomplete'
+        cell['stop_reason'] = str(error)
+    except Exception as error:
+        record = getattr(error, 'effectiveness_record', None)
+        if record:
+            cell['steps'].append(dict(path=record['evidence_path'], sha256=record['evidence_sha256']))
+            if record['operation'] == 'search':
+                for key, value in record.get('counters', {}).items():
+                    if key != 'discoveries_historical':
+                        cell['counters'][key] = cell['counters'].get(key, 0)+value
+        cell['status'] = 'failed'
+        cell['error'] = str(error)
+        raise
+    finally:
+        cell['workflow_seconds'] = run.clock()-started
+        cell['pending_scheme_ids'] = [sid for sid, _ in queue]
+        cell['endpoints'] = effectiveness_endpoints(cell)
+        cell['capture_accounting'] = effectiveness_accounting(cell['observations'], entry['scheme_id'],
+                                                              cell['counters'].get('capture_drops', 0))
+        write_json(history.parent/'cell.json', cell)
+        save()
+
+
+def summarize_effectiveness(path):
+    path = Path(path).resolve(strict=True)
+    data = json.loads(path.read_text())
+    if data['schema'] != 'fgm-effectiveness-measurement-v1':
+        raise ValueError('not an effectiveness measurement')
+    panel, protocol = load_effectiveness_panel(path.parent/'panel/panel.json', data['protocol'])
+    if data['protocol'] != protocol or digest(path.parent/'panel/panel.json') != data['bindings']['panel_sha256']:
+        raise ValueError('measurement panel/protocol binding mismatch')
+    entries = {entry['id']:entry for entry in panel['entries']}
+    rows = []
+    for cell in data['cells']:
+        if 'evaluations' not in cell and (cell['status'] != 'unrun' or
+                set(cell) - {'id', 'panel', 'seed', 'arm', 'status', 'reference_costs'}):
+            raise ValueError('missing evaluations: only an unrun cell without results may omit evidence')
+        entry = entries[cell['panel']]
+        if cell['reference_costs'] != [r['claimed_additions'] for r in entry['references']]:
+            raise ValueError('cell reference thresholds differ from panel')
+        costs = dict(generation_seconds=0., reduction_seconds=0., independent_verification_seconds=0.,
+                     observation_export_seconds=0.,
+                     headroom_wait_seconds=0.,
+                     native_process_seconds=0., gpu_seconds=0., host_phases_microseconds={},
+                     peak_process_rss_bytes=0, peak_system_wired_bytes=0)
+        if 'evaluations' in cell:
+            evaluations, discoveries, observations, counters = [], [], [], {}
+            seen = {entry['scheme_id']}
+            observed = set()
+            initial = json.loads((path.parent/'panel'/entry['path']).read_text())
+            queue = [(entry['scheme_id'], effective_factor_id(initial))]
+            for reference in cell['steps']:
+                step = checked_effectiveness_step(path.parent, reference, data['bindings'], expected_reducers=protocol['reducers'])
+                if step.get('commands') and (step['started_seconds'] < cell['started_seconds'] or step['started_seconds'] >= cell['started_seconds']+20):
+                    raise ValueError('step launched outside its arm window')
+                key = 'generation_seconds' if step['operation']=='search' else 'reduction_seconds'
+                costs[key] += step['workflow_seconds']
+                costs['independent_verification_seconds'] += step.get('verification_seconds', 0.)
+                costs['observation_export_seconds'] += step.get('observation_export_seconds', 0.)
+                costs['headroom_wait_seconds'] += step.get('headroom_wait_seconds', 0.)
+                costs['native_process_seconds'] += step.get('native_process_seconds', 0.)
+                costs['gpu_seconds'] += step.get('gpu', {}).get('gpu_all_seconds', 0.)
+                for key,value in step.get('host_phases', {}).items():
+                    costs['host_phases_microseconds'][key] = costs['host_phases_microseconds'].get(key, 0)+value
+                for key in ('peak_process_rss_bytes','peak_system_wired_bytes'):
+                    costs[key] = max(costs[key], step.get(key, 0))
+                if step['operation']=='search':
+                    for key,value in step.get('counters', {}).items():
+                        if key != 'discoveries_historical':
+                            counters[key] = counters.get(key, 0)+value
+                if not step['complete']:
+                    continue
+                when = step['verified_at_seconds']-cell['started_seconds']
+                if step['operation']=='reduce':
+                    item = dict(step['evaluation'], verified_seconds=when)
+                    expected_id, expected_factors = queue.pop(0) if queue else (entry['scheme_id'],effective_factor_id(initial))
+                    if item['scheme_id'] != expected_id or item['factors_id'] != expected_factors or (cell['arm']=='generate' and item['scheme_id'] in {e['scheme_id'] for e in evaluations}):
+                        raise ValueError('reduction does not follow the cost-blind candidate queue')
+                    evaluations.append(item)
+                else:
+                    if cell['arm'] != 'generate' or queue:
+                        raise ValueError('search launched before draining evaluations')
+                    for item in step['observations']:
+                        key = (item['sequence'],item['worker'],item['slot'])
+                        if key in observed:
+                            continue
+                        observed.add(key)
+                        observations.append({k:v for k,v in item.items() if k!='scheme'})
+                        if item['rank']==23 and item['scheme_id'] not in seen:
+                            seen.add(item['scheme_id'])
+                            factors = dict(n=item['scheme']['dimensions'],m=23,z2=False, **{k:item['scheme'][k] for k in 'uvw'})
+                            queue.append((item['scheme_id'], effective_factor_id(factors)))
+                            discoveries.append(dict(scheme_id=item['scheme_id'],factors_id=item['factors_id'],verified_seconds=when))
+            if evaluations != cell['evaluations'] or discoveries != cell['discoveries'] or observations != cell['observations'] or counters != cell['counters']:
+                raise ValueError('cell observations/evaluations differ from retained steps')
+            if [item[0] for item in queue] != cell['pending_scheme_ids']:
+                raise ValueError('pending queue differs from retained evidence')
+            expected = effectiveness_endpoints(cell)
+            accounting = effectiveness_accounting(observations, entry['scheme_id'], counters.get('capture_drops', 0))
+            if expected != cell['endpoints'] or accounting != cell['capture_accounting']:
+                raise ValueError('endpoint/capture summary disagrees with completed evidence')
+            costs['complete_elapsed_seconds'] = cell['workflow_seconds']
+            if cell['status']=='complete' and cell['workflow_seconds'] < protocol['arm_seconds']:
+                raise ValueError('completed arm did not reach its endpoint')
+            costs['coordination_seconds'] = max(0.,cell['workflow_seconds']-costs['generation_seconds']-costs['reduction_seconds'])
+        row = {k:cell[k] for k in ('id','panel','seed','arm','status','endpoints','capture_accounting','unexported_native_discoveries') if k in cell}
+        row['costs'] = costs
+        row['late_evaluations'] = sum(e['verified_seconds']>20 for e in cell.get('evaluations', []))
+        row['improved_between_endpoints'] = bool(cell.get('endpoints',{}).get('10',{}).get('best_additions') is not None and
+            cell['endpoints']['20']['best_additions'] < cell['endpoints']['10']['best_additions'])
+        rows.append(row)
+    roster = {(p,s,a) for p in FGM1_PANEL for s in (7,19,41) for a in ('fixed','generate')}
+    if len(rows) != 30 or {(r['panel'],r['seed'],r['arm']) for r in rows} != roster:
+        raise ValueError('measurement roster differs from protocol')
+    acquired = all(row['status'] == 'complete' for row in rows)
+    if data['complete'] and not acquired:
+        raise ValueError('measurement completion disagrees with cell roster')
+    complete = data['complete'] and acquired
+    aggregates = {}
+    for arm in ('fixed', 'generate'):
+        entries = [r for r in rows if r['arm'] == arm and r['status'] == 'complete']
+        endpoints = {}
+        for endpoint in ('10', '20'):
+            costs = [r['endpoints'][endpoint]['best_additions'] for r in entries
+                     if r['endpoints'][endpoint]['best_additions'] is not None]
+            endpoints[endpoint] = dict(cells_with_circuits=len(costs), best=min(costs) if costs else None,
+                                      median_best=statistics.median(costs) if costs else None,
+                                      discoveries=sum(r['endpoints'][endpoint]['distinct_discoveries'] for r in entries))
+        aggregates[arm] = dict(complete_cells=len(entries), endpoints=endpoints)
+    return dict(schema='fgm-effectiveness-summary-v1', complete=complete, cells=rows,
+                aggregates=aggregates, elapsed_seconds=data.get('elapsed_seconds'), error=data.get('error'),
+                protocol_version=protocol['version'],
+                reference_verification=data['reference_verification'],
+                naive_additions={e['id']:verify(json.loads((path.parent/'panel'/e['path']).read_text()))['additions'] for e in panel['entries']},
+                optimized_reference_unavailable=[e['id'] for e in panel['entries'] if not e['references']],
+                scope='descriptive short-run quality; no general equivalence, optimizer optimality or long-run effectiveness claim')
+
+
+def effectiveness_report(summary):
+    lines = ['# FGM-1 effectiveness baseline', '',
+             'Status: '+('complete' if summary['complete'] else 'incomplete')+'.', '',
+             f'Protocol version: {summary.get("protocol_version", "unavailable")}. Elapsed: {summary.get("elapsed_seconds", "unavailable")} seconds.', '',
+             'Costs below are independently verified circuits found from factors. Supplied reference circuits are verified separately.', '',
+             '| Start | Seed | Arm | Status | Best at 10 s | Best at 20 s | Discoveries at 20 s | Pending at 20 s |',
+             '|---|---:|---|---|---:|---:|---:|---:|']
+    for row in summary['cells']:
+        end = row.get('endpoints', {})
+        first, last = end.get('10', {}), end.get('20', {})
+        values = [row['panel'],row['seed'],row['arm'],row['status'],first.get('best_additions'),
+                  last.get('best_additions'),last.get('distinct_discoveries'),last.get('unevaluated_discoveries')]
+        lines.append('| '+' | '.join('unavailable' if v is None else str(v) for v in values)+' |')
+    if summary.get('error'):
+        lines.extend(['', 'Incomplete reason: '+summary['error']+'.'])
+    lines.extend(['', 'Supplied circuit verification: '+', '.join(
+        f'{r["id"]} = {r["additions"]} ({r["additions_by_stage"]["u"]}/{r["additions_by_stage"]["v"]}/{r["additions_by_stage"]["w"]} U/V/W)'
+        for r in summary.get('reference_verification', []))+'.',
+        'No optimized reference circuit is retained for: '+', '.join(summary.get('optimized_reference_unavailable', []))+'.',
+        'Naive factor counts: '+', '.join(f'{k} = {v}' for k,v in summary.get('naive_additions', {}).items())+'.', '',
+        '| Arm | Complete cells | Generation s | Reduction s | GPU s | Independent verification s | Export s | Headroom wait s |',
+        '|---|---:|---:|---:|---:|---:|---:|---:|'])
+    for arm in ('fixed','generate'):
+        cells = [c for c in summary['cells'] if c['arm']==arm and c['status']=='complete']
+        values = [arm,len(cells)]+[f'{sum(c["costs"].get(k,0) for c in cells):.3f}' for k in
+            ('generation_seconds','reduction_seconds','gpu_seconds','independent_verification_seconds','observation_export_seconds','headroom_wait_seconds')]
+        lines.append('| '+' | '.join(map(str,values))+' |')
+    lines.extend(['', 'Generation uses cost-blind reseeded blocks and charges startup, resume, export, persistence and verification.',
+                  'GPU, verification, export and headroom timings are included in generation/reduction totals; they are not additive partitions.',
+                  'Canonical IDs remove term-order and sign-gauge aliases only. Capture drops count encounters, not known lost novel schemes.',
+                  'Unevaluated candidates and late completions remain visible. Three seeds describe this protocol; longer runs remain unmeasured.', ''])
+    return '\n'.join(lines)
+
+
+def execute_effectiveness(panel_path, binary_dir, output, calibration_path=None):
+    panel_path = Path(panel_path).resolve(strict=True)
+    panel, protocol = load_effectiveness_panel(panel_path)
+    binary_dir = Path(binary_dir).resolve(strict=True)
+    bindings = effectiveness_identity(binary_dir, panel_path)
+    output = Path(output).absolute()
+    output.mkdir(parents=True, exist_ok=False)
+    shutil.copytree(panel_path.parent, output/'panel')
+    for name in bindings['build_inventory']:
+        destination = output/'binaries'/name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(binary_dir/name, destination)
+    for name in bindings['source_inventory']:
+        destination = output/'source'/name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT/name, destination)
+    shutil.copy2(ROOT/'makefile', output/'source/makefile')
+    write_json(output/'bindings.json', bindings)
+    data = dict(schema='fgm-effectiveness-measurement-v1', complete=False, bindings=bindings,
+                protocol=protocol, reference_verification=[], cells=[])
+    for trial_index, seed in enumerate(protocol['seeds']):
+        for panel_index, entry in enumerate(panel['entries']):
+            arms = ['fixed','generate'] if (trial_index+panel_index)%2 == 0 else ['generate','fixed']
+            for arm in arms:
+                data['cells'].append(dict(id=f'{entry["id"]}-{seed}-{arm}', panel=entry['id'], seed=seed,
+                    arm=arm, status='unrun', reference_costs=[r['claimed_additions'] for r in entry['references']]))
+    def save():
+        write_json(output/'measurement.json', data)
+    save()
+    run = EffectivenessRun(output, output/'binaries')
+    try:
+        # Supplied-circuit verification is preparation, never rediscovery evidence.
+        preparation = run.clock()
+        for entry in panel['entries']:
+            for reference in entry['references']:
+                attempt = output/'references'/reference['id']
+                attempt.mkdir(parents=True)
+                record = dict(commands=[])
+                destination = attempt/'verified.jsonl'
+                run.command([str(run.binary_dir/'scheme_tool'), 'verify', '--input', str(output/'panel'/reference['path']),
+                             '--format', 'circuit-json', '--output', str(destination)], attempt, record)
+                verified = json.loads(destination.read_text())
+                expected = json.loads((output/'panel'/entry['path']).read_text())
+                if any(verified[k] != expected[k] for k in 'uvw') or verified['verified_circuit_additions'] != reference['claimed_additions']:
+                    raise ValueError('native reference factor/count mismatch')
+                if verified['verified_circuit_additions_by_stage'] != reference['claimed_additions_by_stage']:
+                    raise ValueError('native reference stage count mismatch')
+                data['reference_verification'].append(dict(id=reference['id'], additions=verified['verified_circuit_additions'],
+                    additions_by_stage=verified['verified_circuit_additions_by_stage'], status='verified supplied circuit',
+                    source_sha256=reference['source_sha256'], circuit_sha256=reference['sha256']))
+                save()
+        data['preparation_seconds'] = run.clock()-preparation
+        run.started = run.clock()
+        run.deadline = run.started+protocol['total_seconds']
+        if wired_memory() > LIMIT:
+            raise RuntimeError('wired memory exceeds existing guard cutoff')
+        if calibration_path is not None:
+            calibration_path = Path(calibration_path).resolve(strict=True)
+            calibration = json.loads(calibration_path.read_text())
+            if not calibration_valid(calibration, bindings, calibration_path.parent):
+                raise ValueError('calibration identity or evidence mismatch; recalibrate without --calibration')
+            calibration = copy.deepcopy(calibration)
+            # Retain the evidence required to validate this reused calibration again.
+            for row in calibration['pilots']:
+                for step in row.get('steps', []):
+                    source = calibration_path.parent/step['path']
+                    destination = output/'calibration-evidence'/step['path']
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(source.parent, destination.parent, dirs_exist_ok=True)
+                    step['path'] = str(destination.relative_to(output))
+            calibration['reused_from_sha256'] = digest(calibration_path)
+            write_json(output/'calibration.json', calibration)
+            data['calibration_reused'] = True
+        else:
+            calibration = calibrate_effectiveness(run, panel['entries'], output/'panel', bindings,
+                                                  lambda c:write_json(output/'calibration.json', c))
+            data['calibration_reused'] = False
+        data['calibration_sha256'] = digest(output/'calibration.json')
+        save()
+        for cell in data['cells']:
+            run.check_launch()
+            entry = next(e for e in panel['entries'] if e['id'] == cell['panel'])
+            run_effectiveness_cell(run, cell, entry, output/'panel', calibration['settings'], save)
+            if cell['status'] != 'complete':
+                break
+        data['complete'] = all(cell['status'] == 'complete' for cell in data['cells'])
+    except Exception as error:
+        data['error'] = str(error)
+        if not isinstance(error, EffectivenessStop):
+            data['failure'] = True
+    finally:
+        finalization_started = run.clock()
+        data['elapsed_seconds'] = run.clock()-run.started if run.started is not None else 0
+        if data['elapsed_seconds'] > protocol['total_seconds']:
+            data['complete'] = False
+            data['error'] = 'overall envelope exceeded'
+        if any(digest(output/'binaries'/name) != value for name,value in bindings['build_inventory'].items()):
+            data['complete'] = False
+            data['error'] = 'frozen binary inventory changed'
+        save()
+        summary = summarize_effectiveness(output/'measurement.json')
+        write_json(output/'summary.json', summary)
+        (output/'report.md').write_text(effectiveness_report(summary))
+        inventory = {str(p.relative_to(output)):digest(p) for p in sorted(output.rglob('*')) if p.is_file()}
+        data['finalization_seconds'] = run.clock()-finalization_started
+        data['elapsed_seconds'] = run.clock()-run.started if run.started is not None else 0
+        if data['elapsed_seconds'] > protocol['total_seconds']:
+            data['complete'] = False
+            data['error'] = 'overall envelope exceeded during finalization'
+        data['elapsed_scope'] = 'through independent summary and artifact hashing; excludes final closing JSON/text writes'
+        save()
+        summary.update(complete=data['complete'], elapsed_seconds=data['elapsed_seconds'], error=data.get('error'))
+        write_json(output/'summary.json', summary)
+        (output/'report.md').write_text(effectiveness_report(summary))
+        for name in ('measurement.json','summary.json','report.md'):
+            inventory[name] = digest(output/name)
+        write_json(output/'artifacts.json', inventory)
+        print('FGM-1', 'COMPLETE' if data['complete'] else 'INCOMPLETE', str(output), data.get('error',''))
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     operation = parser.add_mutually_exclusive_group(required=True)
@@ -1025,6 +2051,11 @@ def main():
                            help='Prepare pinned source only; no build or GPU execution')
     operation.add_argument('--source', type=Path, help='Frozen production source to measure')
     operation.add_argument('--native-config', type=Path, help='Measure one configured native workflow')
+    operation.add_argument('--prepare-effectiveness-panel', type=Path, metavar='CORPUS', help='Freeze the FGM-1 panel from a retained corpus without GPU work')
+    operation.add_argument('--effectiveness-panel', type=Path, metavar='PANEL_JSON', help='Run one FGM-1 baseline with a 15-minute measurement cap')
+    operation.add_argument('--summarize-effectiveness', type=Path, metavar='MEASUREMENT_JSON', help='Independently check and summarize retained FGM-1 circuits')
+    parser.add_argument('--binary-dir', type=Path, help='Native binaries for FGM-1 (default build/metal)')
+    parser.add_argument('--calibration', type=Path, help='Reuse matching FGM-1 calibration.json')
     parser.add_argument('--native-binary', type=Path)
     operation.add_argument('--host', type=Path, metavar='NATIVE_BINARY', help='Measure native-host workflows with independent correctness checks')
     operation.add_argument('--qualify-profile', type=Path, metavar='PROFILE_DIRECTORY')
@@ -1036,6 +2067,28 @@ def main():
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
+    if args.prepare_effectiveness_panel or args.effectiveness_panel or args.summarize_effectiveness:
+        if args.output is None or any(v is not None for v in (args.rows,args.protocol,args.baseline,args.production_run,args.repetitions,args.native_binary)):
+            parser.error('FGM-1 requires --output and does not accept legacy measurement options')
+        if args.prepare_effectiveness_panel:
+            if args.binary_dir or args.calibration:
+                parser.error('panel preparation only accepts corpus and output')
+            prepare_effectiveness_panel(args.prepare_effectiveness_panel, args.output)
+        elif args.summarize_effectiveness:
+            if args.binary_dir or args.calibration:
+                parser.error('offline summary only accepts measurement and output')
+            result = summarize_effectiveness(args.summarize_effectiveness)
+            with args.output.open('x') as stream:
+                json.dump(result, stream, indent=2, allow_nan=False)
+                stream.write('\n')
+        else:
+            result = execute_effectiveness(args.effectiveness_panel, args.binary_dir or ROOT/'build/metal',
+                                           args.output, args.calibration)
+            if not result['complete']:
+                raise SystemExit(1)
+        return
+    if args.binary_dir or args.calibration:
+        parser.error('--binary-dir and --calibration require --effectiveness-panel')
     if args.native_config is not None:
         if args.native_binary is None or args.output is None:
             parser.error('--native-config requires --native-binary and --output')

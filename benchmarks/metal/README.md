@@ -43,6 +43,70 @@ exports are independently checked. The result is `NOT EVALUATED` for performance
 and grants no regression budget. Controlled and legacy iteration counts cannot
 be compared as equal work.
 
+## FGM-1 short-run effectiveness baseline
+
+The checked-in panel at `benchmarks/workflow/fixtures/fgm1/panel.json` contains
+five signed rank-23 3×3 factor starts and three supplied reference circuits.
+To reproduce panel preparation from a retained corpus, use a new directory. This
+preparation verifies source hashes, exact factors and reference circuits
+without launching Metal:
+
+```sh
+python3 benchmarks/workflow/baseline.py \
+  --prepare-effectiveness-panel RETAINED_CORPUS --output NEW_PANEL_DIR
+```
+
+After building the native executables and compiled signed Metal library, run
+one measurement into a new directory. A later run can reuse calibration only
+when its retained pilot evidence, build inputs, fixture bytes and hardware
+bindings still match:
+
+```sh
+make metal scheme-tool
+python3 benchmarks/workflow/baseline.py \
+  --effectiveness-panel benchmarks/workflow/fixtures/fgm1/panel.json \
+  --binary-dir build/metal --output NEW_RUN
+python3 benchmarks/workflow/baseline.py \
+  --effectiveness-panel benchmarks/workflow/fixtures/fgm1/panel.json \
+  --binary-dir build/metal --calibration FIRST_RUN/calibration.json \
+  --output NEW_REPEAT
+python3 benchmarks/workflow/baseline.py \
+  --summarize-effectiveness NEW_RUN/measurement.json --output NEW_SUMMARY.json
+```
+
+The timed protocol has a 15-minute envelope after supplied-reference
+verification. Calibration uses the five starts and halves initial rounds or
+workers until the one-second reduction and five-second generation pilot limits
+hold. Three seeds run fixed reduction and cost-blind generation for each start,
+giving 30 paired 20-second arms. The 10- and 20-second endpoints use the time
+when independent verification finishes. Every child retains the existing
+45-second process-group and sampled 3 GiB wired-memory guard; no child launches
+inside the final 50-second cleanup reserve. An incomplete arm stays incomplete.
+Late verified circuits and captures remain in the evidence but earn no earlier
+endpoint credit. A committed native discovery whose observation export could
+not finish is recorded as unexported, not scored as an evaluated circuit.
+
+Protocol versions 2 and 3 wait for 1216 MiB of system wired-memory headroom before
+each GPU child, polling every 25 ms within the pilot or arm deadline. Waiting
+is charged and retained as `headroom_wait_seconds`. This admission heuristic
+was selected from version 1 observations; a later version 2 attempt showed a
+larger transient, so it is not a worst-case memory bound and does not replace
+the hard 3 GiB guard. Version 3 uses 128 reducers in both arms, halving the
+planned reducer buffers from approximately 365 MiB to 182 MiB. Earlier versions
+used 256. Host verification and journal export do not use this GPU reservation.
+Each version requires separate calibration and must not be pooled with the
+others as repetitions. A step canceled before child launch remains unscored
+bookkeeping.
+
+The harness is Python; production search, reduction and journal export are
+native C++/Metal. Python independently verifies tensors, circuit factors,
+identities and addition counts. Supplied reference circuits are checked during
+preparation and reported separately. Their costs do not count as rediscovered
+circuits. `measurement.json`, `calibration.json`, per-step receipts and logs,
+`summary.json` and `report.md` retain complete and incomplete evidence. An
+offline summary checks retained circuit bindings and endpoint arithmetic; it
+does not run a new search. See `docs/performance.md` for measured findings.
+
 ## Complete-walk comparison
 
 `build.py` compiles selected Metal source as the C++ reference and builds the selected GPU implementation. This reference is distinct from the separate `ternary_flip_graph` CPU application. Set both source directories explicitly: omitting them can select the same source for both sides. The general kernel is the build default, so packed validation must select `randomWalkCompactKernel` explicitly.

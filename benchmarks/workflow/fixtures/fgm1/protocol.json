@@ -1,0 +1,47 @@
+{
+  "schema": "fgm-effectiveness-protocol-v1",
+  "version": 3,
+  "panel": [
+    "original",
+    "laderman",
+    "smirnov",
+    "sun",
+    "cn122"
+  ],
+  "seeds": [
+    7,
+    19,
+    41
+  ],
+  "arms": [
+    "fixed",
+    "generate"
+  ],
+  "arm_seconds": 20,
+  "endpoints": [
+    10,
+    20
+  ],
+  "total_seconds": 900,
+  "child_reserve_seconds": 50,
+  "reducers": 128,
+  "initial_rounds": 32,
+  "initial_workers": 32,
+  "reduction_pilot_seconds": 1,
+  "generation_pilot_seconds": 5,
+  "search": {
+    "batch_steps": 64,
+    "flip_budget": 64,
+    "control_budget": 64,
+    "optional_quota": 2,
+    "excursion": 2,
+    "interval_min": 4,
+    "interval_max": 8,
+    "stagnation_limit": 100,
+    "proposal_limit": 64,
+    "reduction_q": 0
+  },
+  "seed_encoding": "SHA256 compact ASCII JSON [panel,trial,stage,block], first 4 bytes little endian; zero becomes one",
+  "launch_wired_reserve_bytes": 1275068416,
+  "headroom_poll_seconds": 0.025
+}

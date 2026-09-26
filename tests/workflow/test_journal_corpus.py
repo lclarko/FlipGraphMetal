@@ -27,6 +27,7 @@ def admission(scheme, origin='import'):
 def transaction(scheme):
     rank = dict(rank=1, members=[member(scheme)])
     return dict(schema='fgm-search-transaction-v1', kind='run_start', stage=1,
+                run_id='test-run', batch=0,
                 workflow=dict(mode='alternatives', domain='ZT', dimensions=[1, 1, 1], collection_rank=1),
                 admissions=[admission(scheme)],
                 pools=dict(schema='active-rank-pool-v1', active=[rank], reserves=[copy.deepcopy(rank)]))
@@ -160,3 +161,89 @@ class JournalCorpusTests(unittest.TestCase):
                                    factors_id='fgm-factors-v1:' + '0'*64)]
         self.fixture([tx])
         self.preflight(expected=1)
+
+    def test_observations_keep_aliases_duplicates_and_order(self):
+        first = transaction(self.scheme)
+        alias = copy.deepcopy(self.scheme)
+        alias['u'] = [[-1]]
+        alias['w'] = [[-1]]
+        self.assertEqual(oracle.identity(alias), oracle.identity(self.scheme))
+        def capture(scheme, slot):
+            return dict(scheme=scheme, scheme_id=oracle.identity(scheme),
+                        factors_id=oracle.identity(scheme, False), parent_id=oracle.identity(self.scheme),
+                        worker=0, slot=slot, mandatory=slot == 0, control=7 + slot,
+                        operation=slot)
+        second = copy.deepcopy(first)
+        second['kind'] = 'batch'
+        second['batch'] = 1
+        second['admissions'] = []
+        second['observations'] = [capture(self.scheme, 0), capture(alias, 1), capture(self.scheme, 2)]
+        self.fixture([first, second])
+        rows = self.corpus('--observations', command='analyze')
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([row['slot'] for row in rows], [0, 1, 2])
+        self.assertEqual([row['factors_id'] for row in rows],
+                         [oracle.identity(self.scheme, False), oracle.identity(alias, False),
+                          oracle.identity(self.scheme, False)])
+        for row in rows:
+            self.assertEqual(row['schema'], 'fgm-journal-observation-v1')
+            self.assertEqual(row['run_id'], 'test-run')
+            self.assertEqual(row['sequence'], 2)
+            self.assertEqual(row['batch'], 1)
+            self.assertEqual(row['rank'], 1)
+            self.assertEqual(row['domain'], 'ZT')
+            self.assertEqual(row['scheme']['schema'], 'fgm-scheme-v1')
+            self.assertEqual(len(row['transaction_sha256']), 64)
+        default = self.corpus(command='analyze')
+        self.assertEqual(len(default), 1)
+        self.assertEqual(default[0]['scheme_id'], oracle.identity(self.scheme))
+        self.corpus('--observations', '--summary', command='analyze', expected=1)
+        self.corpus('--observations', command='verify', expected=1)
+        self.corpus('--observations', command='export', output_format='jsonl', expected=1)
+        self.corpus('--observations', '--record-bytes', '128', command='analyze', expected=2)
+        self.corpus('--observations', '--scan-bytes', str((self.history/'journal.bin').stat().st_size), command='analyze', expected=2)
+
+    def test_observation_export_rejects_invalid_binding_and_empty_is_valid(self):
+        tx = transaction(self.scheme)
+        self.fixture([tx])
+        self.assertEqual(self.corpus('--observations', command='analyze'), [])
+        bad = copy.deepcopy(tx)
+        bad['observations'] = [dict(scheme=self.scheme, scheme_id=oracle.identity(self.scheme),
+                                    factors_id='fgm-factors-v1:' + '0'*64, parent_id='parent',
+                                    worker=0, slot=0, mandatory=True, control=0, operation=0)]
+        self.history = self.root / 'bad-history'
+        self.fixture([bad])
+        self.corpus('--observations', command='analyze', expected=1)
+
+    def test_observation_export_rejects_tensor_domain_and_dimensions(self):
+        variants = []
+        tensor = copy.deepcopy(self.scheme)
+        tensor['w'] = [[0]]
+        variants.append(tensor)
+        variants.append(oracle.schoolbook((1, 1, 1), 'F2'))
+        variants.append(oracle.schoolbook((2, 1, 1)))
+        for number, scheme in enumerate(variants):
+            with self.subTest(number=number):
+                self.history = self.root / f'bad-{number}'
+                tx = transaction(self.scheme)
+                tx['observations'] = [dict(scheme=scheme, scheme_id=oracle.identity(scheme),
+                                           factors_id=oracle.identity(scheme, False), parent_id='parent',
+                                           worker=0, slot=0, mandatory=True, control=0, operation=0)]
+                self.fixture([tx])
+                self.corpus('--observations', command='analyze', expected=1)
+
+    def test_complete_unacknowledged_capture_is_not_exported(self):
+        first = transaction(self.scheme)
+        self.fixture([first])
+        acknowledged_head = (self.history/'committed-head.json').read_bytes()
+        self.history = self.root/'longer-history'
+        tail = copy.deepcopy(first)
+        tail['kind'] = 'batch'
+        tail['batch'] = 1
+        tail['admissions'] = []
+        tail['observations'] = [dict(scheme=self.scheme, scheme_id=oracle.identity(self.scheme),
+                                     factors_id='fgm-factors-v1:'+'0'*64, parent_id='parent',
+                                     worker=0, slot=0, mandatory=True, control=0, operation=0)]
+        self.fixture([first, tail])
+        (self.history/'committed-head.json').write_bytes(acknowledged_head)
+        self.assertEqual(self.corpus('--observations', command='analyze'), [])

@@ -216,16 +216,50 @@ Packaged native analysis and verification need no Python:
 
 ```sh
 scheme_tool analyze --input run.json.journal --format journal --summary --output corpus.json
+scheme_tool analyze --input run.json.journal --format journal --observations \
+  --record-bytes 8388608 --output captures.jsonl
 scheme_tool verify --input reduction.json.circuits.jsonl --format jsonl --output verified.jsonl
 ```
 
 Journal input provides read-only corpus access without resuming the run. Summary
-groups use the existing descriptors and bounded memory. Metadata is optional.
+groups use the existing descriptors and bounded memory. `--observations` is
+available only with `analyze --format journal` and conflicts with `--summary`.
+It exports acknowledged captures in transaction and encounter order, including
+aliases and duplicates, with `fgm-journal-observation-v1` metadata, a transaction
+hash and `fgm-scheme-v1` factors. Each exported capture is checked against its
+tensor, scheme and factor identities, domain and workflow dimensions. Empty
+capture history produces an empty JSONL file. Neither form repairs the journal.
+Metadata is optional.
 Run records bind configuration, input identities, executable/library digests,
 backend, terminal reasons, work and discovery counters. The complete process
 wall time includes verification and persistence. Internal phase clocks cover
 narrower parts of the workflow. These records grant no performance regression
 allowance.
+
+Verified circuit reports and reduction results include
+`verified_circuit_additions_by_stage` with `u`, `v` and `w` counts reconstructed
+for each circuit stage; their sum equals the verified total. The Python verifier
+returns `additions_by_stage`
+for circuit inputs. Top-level run receipts add `admission_microseconds` for
+configuration and input admission, `dispatch_microseconds` for host wall time
+around dispatch call sites, `verification_microseconds` for search capture checks
+or reducer best-circuit reconstruction, and `persistence_microseconds` for journal append
+or circuit artifact publication. `setup_microseconds` is the remaining execution
+time, including allocation and other host work. Reducer dispatch timing also
+wraps `initialize()`, including its host summary calculations and stdout writes;
+reducer and counter-buffer allocation occur outside that timer. These fields do
+not partition host and GPU time; GPU command times are recorded separately.
+They exclude final receipt publication and are narrower than process wall time.
+Timers retain elapsed failed dispatch or verification work without changing
+failure accounting.
+
+The FGM-1 Python harness additionally reports charged GPU headroom waiting.
+Its version 2 and 3 protocols reserve 1216 MiB below the unchanged sampled 3 GiB
+system wired-memory cutoff before GPU launch, with deadline checks around
+each memory sample. This is an empirical admission rule, not a memory guarantee.
+Host verification/export uses the ordinary deadline and process guards.
+Version 3 uses 128 reducers in both measured arms; versions 1 and 2 used 256.
+Changing this population requires fresh calibration and a separate comparison.
 
 Search receipts retain `fgm-search-accounting-v1` snapshots on failure. `counters`
 and `workers` describe the latest fully verified dispatch and completed host

@@ -156,7 +156,9 @@ template<class S> void executeSearch(PreparedRun &run) {
         if(tx.at("kind").str()=="batch")phase.object.at("committed_batches")=runNumber(batch);
         std::array<Json*,6> destinations{&receiptFields.at("counters"),&receiptFields.at("committed_counters"),
             &receiptFields.at("accounting"),&receiptFields.at("journal_sequence"),&receiptFields.at("journal_head_sha256"),&receiptFields.at("final_stage")};
-        auto acknowledged=journal.append(tx,reservation);
+        CommitReceipt acknowledged;
+        { ReceiptPhaseTimer timer(receiptFields.at("persistence_microseconds"));
+          acknowledged=journal.append(tx,reservation); }
         for(const auto &id:acknowledged.creditedIds)if(eligible.count(id)){++historical;++currentDiscoveries;}
         historyCount.integer=committedHistory.integer=int64_t(historical);
         runCount.integer=committedRun.integer=int64_t(currentDiscoveries);
@@ -254,10 +256,11 @@ template<class S> void executeSearch(PreparedRun &run) {
         ++batch;
         run.receipt.object["actual_backend"]=Json(packed?"packed":"general");
         receiptFields.at("accounting").object.at("dispatch_unverified")=Json(true);
-        if(compact)metalDispatch(settings.alternatives?"controlledPackedAlternativesKernel":"controlledPackedReductionKernel",size_t(workers),32,
-            current.data,best.data,states.data,captures.data,metadata.data,settings,workers,config.execution.batchSteps,
-            compact->terms.data,compact->pairs.data,compact->scratch.data,compact->bestTerms.data,compact->bestPairs.data);
-        else metalDispatch("controlledGeneralKernel",size_t(workers),size_t(config.execution.blockSize),current.data,best.data,states.data,captures.data,metadata.data,settings,workers,config.execution.batchSteps);
+        { ReceiptPhaseTimer timer(receiptFields.at("dispatch_microseconds"));
+          if(compact)metalDispatch(settings.alternatives?"controlledPackedAlternativesKernel":"controlledPackedReductionKernel",size_t(workers),32,
+              current.data,best.data,states.data,captures.data,metadata.data,settings,workers,config.execution.batchSteps,
+              compact->terms.data,compact->pairs.data,compact->scratch.data,compact->bestTerms.data,compact->bestPairs.data);
+          else metalDispatch("controlledGeneralKernel",size_t(workers),size_t(config.execution.blockSize),current.data,best.data,states.data,captures.data,metadata.data,settings,workers,config.execution.batchSteps); }
         RankPools next=pools;Json observations=Json::list(),admissions=Json::list();std::set<std::string> unique;
         auto observe=[&](uint64_t w,uint64_t slot,bool mandatory){
             const auto offset=w*slots+slot;auto member=verifiedMember(runScheme(captures.data[offset]),config.limits);
@@ -269,6 +272,7 @@ template<class S> void executeSearch(PreparedRun &run) {
             observation.object["operation"]=runNumber(metadata.data[offset].operation);observations.array.push_back(std::move(observation));
         };
         // Check the complete dispatch before allowing any observation to commit.
+        { ReceiptPhaseTimer timer(receiptFields.at("verification_microseconds"));
         for(uint64_t w=0;w<workers;++w){
             auto &state=states.data[w];if(state.terminal==ControlledOutcome::CapacityError||state.terminal==ControlledOutcome::InvalidState||state.optionalCount>policy.optionalQuota)
                 throw std::runtime_error("controlled dispatch failed validation");
@@ -276,6 +280,7 @@ template<class S> void executeSearch(PreparedRun &run) {
         }
         for(uint64_t w=0;w<workers;++w)if(states.data[w].mandatoryValid){observe(w,0,true);++mandatoryCaptures;}
         for(uint64_t w=0;w<workers;++w){for(uint64_t i=0;i<states.data[w].optionalCount;++i){observe(w,i+1,false);++optionalCaptures;}captureDrops=configCheckedAdd(captureDrops,states.data[w].optionalDrops);}
+        }
         snapshot();
         auto tx=transaction("batch",next);tx.object["admissions"]=std::move(admissions);tx.object["observations"]=std::move(observations);tx.object["workers"]=run.receipt.at("workers");
         commit(tx,reservation);pools=std::move(next);
