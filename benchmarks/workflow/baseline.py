@@ -805,12 +805,227 @@ def execute_host(binary, output, repetitions=6):
     return receipt
 
 
+def native_attempt_config(config, base, attempt):
+    """Isolate writable outputs; never resume or write the supplied history."""
+    import shutil
+    result = copy.deepcopy(config)
+    def absolute(value):
+        path = Path(value)
+        return (path if path.is_absolute() else base/path).resolve(strict=True)
+    route = result['input']
+    if route['kind'] == 'files':
+        for item in route['files']:
+            item['path'] = str(absolute(item['path']))
+    elif route['kind'] == 'selection':
+        route['manifest'] = str(absolute(route['manifest']))
+        if 'ids' in route:
+            route['ids'] = str(absolute(route['ids']))
+    elif route['kind'] == 'resume':
+        source = absolute(route['journal'])
+        files = list(source.rglob('*'))
+        if any(p.is_symlink() or (not p.is_dir() and not p.is_file()) for p in files):
+            raise ValueError('resume history contains links or special files')
+        budget = result.get('history', {}).get('storage_bytes', 268435456)
+        if sum(p.stat().st_size for p in files if p.is_file()) > budget:
+            raise ValueError('resume copy exceeds history storage budget')
+        shutil.copytree(source, attempt/'history')
+        route['journal'] = str(attempt/'history')
+    else:
+        raise ValueError('unsupported native input route')
+    result['output'] = str(attempt/'receipt.json')
+    if 'history' in result:
+        result['history']['path'] = str(attempt/'history')
+    return result
+
+
+def native_verify_record(data):
+    """Independent tensor and identity checks for journal export records."""
+    expected = {key:data[key] for key in ('dimensions','rank','domain','orientation','u','v','w')}
+    return verify_host_record(data, expected)
+
+
+def native_verify_circuits(path, receipt, record_limit=1048576):
+    artifact = receipt['circuit_artifact']
+    if digest(path) != artifact['sha256']:
+        raise ValueError('circuit artifact hash mismatch')
+    count = 0
+    with path.open() as stream:
+        while line := stream.readline(record_limit+1):
+            if len(line.encode()) > record_limit or not line.endswith('\n'):
+                raise ValueError('circuit artifact record exceeds bound')
+            data = json.loads(line)
+            verify(data)
+            result = receipt['results'][count]
+            factors = dict(dimensions=data['n'],rank=data['m'],domain='ZT',orientation='cyclic-w',
+                           **dict(zip('uvw',circuit_factors(data))))
+            identity = host_oracle().identity(factors, False)
+            if (result['circuit_record_index'] != count or result['result_factors_id'] != identity
+                    or result['result_rank'] != data['m']
+                    or result['verified_circuit_additions'] != data['complexity']['reduced']):
+                raise ValueError('retained best circuit binding mismatch')
+            if result['mode'] == 'fixed':
+                source=receipt['presentations'][result['input_presentation_index']]
+                native_verify_record(source)
+                reference=dict(n=source['dimensions'],m=source['rank'],z2=False,
+                               **{key:source['effective_factors'][key] for key in 'uvw'})
+                verify(data,reference)
+                if identity != result['effective_input_factors_id']:
+                    raise ValueError('fixed circuit differs from effective input factors')
+            count += 1
+    if count != artifact['records'] or count != len(receipt['results']):
+        raise ValueError('circuit artifact record count mismatch')
+    return count
+
+
+def native_dispatch_evidence(log, receipt):
+    required=receipt['counters'].get('flip_attempts',0)>0 or bool(receipt.get('results'))
+    if not re.search(r'^Metal dispatch ',log,re.M):
+        if required: raise ValueError('completed native work lacks GPU dispatch evidence')
+        return {'status':'GPU_NOT_RUN','gpu_all_seconds':0.,'dispatches':[]}
+    evidence=dispatch_evidence(log)
+    libraries=re.findall(r'^Metal library: (\S+) SHA256 ([0-9a-f]{64})$',log,re.M)
+    if len(libraries)!=1 or libraries[0][1]!=receipt.get('library_sha256'):
+        raise ValueError('GPU library identity differs from native receipt')
+    names={entry[0] for entry in evidence['dispatches']}
+    config=receipt['configuration']
+    if config['operation']=='search':
+        expected='controlledGeneralKernel'
+        if receipt['actual_backend']=='packed':
+            expected=('controlledPackedReductionKernel' if config['policy']['mode']=='rank-reduction'
+                      else 'controlledPackedAlternativesKernel')
+        if expected not in names: raise ValueError('missing expected controlled kernel')
+    else:
+        if 'initializeReducersKernel' not in names: raise ValueError('missing reducer initialization')
+        if any(result['rounds_completed'] for result in receipt['results']):
+            expected='runDirectReducersKernel' if config['reduction']['max_flips'] else 'runReducersKernel'
+            if expected not in names: raise ValueError('missing expected reducer kernel')
+    return dict(evidence,status='GPU_EXECUTED',library=libraries[0],
+                gpu_all_seconds=sum(item[2] for item in evidence['dispatches'])/1000)
+
+
+def execute_native(config_path, binary, output, repetitions=1):
+    """Bounded descriptive workflow adapter. No regression budget is implied."""
+    if not 1 <= repetitions <= 12:
+        raise ValueError('repetitions must be 1..12')
+    config_path, binary = config_path.resolve(strict=True), binary.resolve(strict=True)
+    tool = binary.with_name('scheme_tool')
+    if not tool.is_file():
+        raise ValueError('native binary directory requires scheme_tool')
+    if config_path.stat().st_size > 1048576:
+        raise ValueError('native configuration exceeds 1 MiB')
+    config = json.loads(config_path.read_text())
+    output = output.absolute()
+    output.mkdir(parents=True,exist_ok=False)
+    identities = {str(path):digest(path) for path in
+                  [binary,tool,*sorted(binary.parent.glob('*.build.json')),
+                   *sorted((binary.parent/'shaders').glob('*.metallib'))]}
+    evidence = dict(schema='fgm-native-workflow-measurement-v1',complete=False,
+                    verdict='NOT EVALUATED',regression_budget=None,
+                    config_sha256=digest(config_path),hardware=host_machine_identity(),
+                    build_inventory=identities,attempts=[])
+    def save():
+        write_json(output/'native-workflow.json',evidence)
+    save()
+    try:
+        for index in range(repetitions):
+            attempt=output/f'attempt-{index:02d}'
+            attempt.mkdir()
+            resolved=native_attempt_config(config,config_path.parent,attempt)
+            write_json(attempt/'config.json',resolved)
+            record=dict(complete=False,commands=[],native_process_seconds=0.,
+                        peak_process_rss_bytes=0,peak_system_wired_bytes=0)
+            evidence['attempts'].append(record)
+            started=time.monotonic()
+            def command(argv):
+                guard_path=attempt/f'guard-{len(record["commands"])}'
+                record['commands'].append(argv);save()
+                guard=guarded_run(['/usr/bin/time','-l','-p',*argv],guard_path)
+                if not guard['complete']:
+                    raise RuntimeError('native guarded process incomplete: '+str(guard.get('error')))
+                log=(guard_path/'run.log').read_text()
+                elapsed=re.findall(r'^real\s+([0-9.]+)$',log,re.M)
+                rss=re.findall(r'^\s*(\d+)\s+maximum resident set size\s*$',log,re.M)
+                if len(elapsed)!=1 or len(rss)!=1 or not math.isfinite(float(elapsed[0])) or int(rss[0])<=0:
+                    raise ValueError('missing process elapsed/RSS evidence')
+                record['native_process_seconds']+=float(elapsed[0])
+                record['peak_process_rss_bytes']=max(record['peak_process_rss_bytes'],int(rss[0]))
+                record['peak_system_wired_bytes']=max(record['peak_system_wired_bytes'],
+                    max(sample['wired_bytes'] for sample in guard['memory']))
+                return log
+            workflow_log=command([str(binary),'--run-config',str(attempt/'config.json')])
+            receipt=json.loads((attempt/'receipt.json').read_text())
+            if receipt['status']!='complete' or not receipt['execution_started']:
+                raise ValueError('native workflow did not complete')
+            if receipt['configuration_sha256']!=digest(attempt/'config.json') or receipt['executable_sha256']!=digest(binary):
+                raise ValueError('native receipt configuration/executable identity mismatch')
+            record['receipt_sha256']=digest(attempt/'receipt.json')
+            record['runtime_identity']={key:receipt[key] for key in
+                ('executable_sha256','library_sha256','library_mode','specification_sha256') if key in receipt}
+            record['counters']=receipt['counters']
+            record['gpu']=native_dispatch_evidence(workflow_log,receipt)
+            record['host_phases']={k:v for k,v in receipt.items() if k.endswith('_microseconds')}
+            record['requested_backend']=receipt['requested_backend']
+            record['actual_backend']=receipt['actual_backend']
+            record['presentations']=receipt['presentations']
+            for source in receipt['presentations']:
+                if all(key in source for key in 'uvw'):
+                    native_verify_record(source)
+            if resolved['input']['kind']=='files':
+                input_hashes={digest(Path(item['path'])) for item in resolved['input']['files']}
+                if any(p['source_sha256'] not in input_hashes for p in receipt['presentations']):
+                    raise ValueError('admitted source hash differs from input files')
+                record['source_sha256']=sorted(input_hashes)
+            verification_start=time.monotonic()
+            if resolved['operation']=='reduce':
+                path=Path(str(attempt/'receipt.json')+'.circuits.jsonl')
+                if Path(receipt['circuit_artifact']['path'])!=path:
+                    raise ValueError('unexpected circuit artifact path')
+                record['verified_records']=native_verify_circuits(path,receipt,
+                    resolved.get('limits',{}).get('record_bytes',1048576))
+            else:
+                history=Path(resolved.get('history',{}).get('path',str(attempt/'receipt.json')+'.journal'))
+                if resolved['input']['kind']=='resume':
+                    history=Path(resolved['input']['journal'])
+                exported=attempt/'committed.jsonl'
+                limits=receipt['configuration']['limits']
+                transaction_bytes=receipt['configuration']['history']['transaction_bytes']
+                command([str(tool),'verify','--format','journal','--input',str(history),
+                         '--output',str(exported),'--record-bytes',str(transaction_bytes),
+                         '--scan-bytes',str(limits['scan_bytes']),
+                         '--verification-work',str(limits['verification_work']),
+                         '--selection-memory',str(limits['selection_memory'])])
+                count=0
+                with exported.open() as stream:
+                    while line := stream.readline(1048577):
+                        if len(line.encode())>1048576 or not line.endswith('\n'):
+                            raise ValueError('journal export record exceeds adapter bound')
+                        native_verify_record(json.loads(line));count+=1
+                record['verified_records']=count
+                record['export_sha256']=digest(exported)
+            record['verification_seconds']=time.monotonic()-verification_start
+            record['verification_timing_scope']='native journal export where required plus independent exact checks'
+            record['workflow_seconds']=time.monotonic()-started
+            record['complete']=True
+            save()
+        if any(digest(Path(path))!=checksum for path,checksum in identities.items()):
+            raise ValueError('native build identity changed during measurement')
+        evidence['complete']=True
+    except Exception as error:
+        evidence['error']=str(error)
+        raise
+    finally:
+        save()
+    return evidence
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     operation = parser.add_mutually_exclusive_group(required=True)
     operation.add_argument('--freeze', type=Path, metavar='NEW_DIRECTORY',
                            help='Prepare pinned source only; no build or GPU execution')
     operation.add_argument('--source', type=Path, help='Frozen production source to measure')
+    operation.add_argument('--native-config', type=Path, help='Measure one configured native workflow')
+    parser.add_argument('--native-binary', type=Path)
     operation.add_argument('--host', type=Path, metavar='NATIVE_BINARY', help='Measure native-host workflows with independent correctness checks')
     operation.add_argument('--qualify-profile', type=Path, metavar='PROFILE_DIRECTORY')
     operation.add_argument('--summarize', type=Path, metavar='QUALIFICATION_JSON')
@@ -821,6 +1036,16 @@ def main():
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
+    if args.native_config is not None:
+        if args.native_binary is None or args.output is None:
+            parser.error('--native-config requires --native-binary and --output')
+        if any(value is not None for value in (args.rows,args.protocol,args.baseline,args.production_run)):
+            parser.error('native workflow adapter accepts configuration, binary, output and repetitions only')
+        execute_native(args.native_config,args.native_binary,args.output,
+                       args.repetitions if args.repetitions is not None else 1)
+        return
+    if args.native_binary is not None:
+        parser.error('--native-binary requires --native-config')
     if args.host is not None:
         if args.output is None:
             parser.error('--host requires --output')

@@ -129,11 +129,13 @@ def evaluate(document):
     integer(budget['version'], 'budget version')
     if budget['direction'] not in ('lower', 'higher') or budget['transform'] not in ('log-ratio', 'difference'):
         raise ValueError('invalid direction or transform')
-    number(budget['margin'], 'margin')
-    if budget['margin'] < 0 or (budget['transform'] == 'log-ratio' and budget['direction'] == 'higher' and budget['margin'] >= 1):
-        raise ValueError('invalid practical margin')
     if budget['status'] not in ('approved', 'unapproved'):
         raise ValueError('invalid approval status')
+    # An unapproved budget may explicitly leave its margin unset.
+    if budget['margin'] is not None or budget['status'] == 'approved':
+        number(budget['margin'], 'margin')
+        if budget['margin'] < 0 or (budget['transform'] == 'log-ratio' and budget['direction'] == 'higher' and budget['margin'] >= 1):
+            raise ValueError('invalid practical margin')
     if budget['status'] == 'approved':
         exact(budget['approval'], 'reference version', 'approval')
         text(budget['approval']['reference'], 'approval reference')

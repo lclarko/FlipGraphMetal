@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
-from freeze_application import parser_files
+from freeze_application import parser_files, workflow_files
 from screen import check_log, check_manifest
 from application import digest, source_identity
 
@@ -85,6 +85,53 @@ class MigrationInterfaces(unittest.TestCase):
             self.assertEqual((output / 'shader-compile/run.log').read_text(), 'retained compiler failure')
             self.assertFalse((output / 'compile').exists())
             self.assertFalse(json.loads((output / 'build.json').read_text())['complete'])
+
+    def test_current_entrypoint_native_workflow_closure(self):
+        # Exercise the actual current entry point, including its layout adapter.
+        files = workflow_files(ROOT)
+        for name in ('execution.h', 'execution_layout.h', 'execution.cpp', 'scheme_io.cpp', 'journal.cpp'):
+            self.assertIn(ROOT / 'src/workflow' / name, files)
+        self.assertNotIn(ROOT / 'src/workflow/scheme_tool.cpp', files)
+
+    def test_native_workflow_snapshot_link_and_old_baseline(self):
+        import freeze_application
+        with tempfile.TemporaryDirectory() as temporary:
+            project, output = Path(temporary).resolve() / 'project', Path(temporary).resolve() / 'freeze'
+            (project / 'src/metal').mkdir(parents=True)
+            (project / 'src/common').mkdir()
+            entry = project / 'src/metal/main.cpp'
+            entry.write_text('#include "../common/arg_parser.cpp"')
+            self.assertEqual(workflow_files(project), [])
+            entry.write_text(entry.read_text() + '\n#include "../workflow/execution_layout.h"')
+            with self.assertRaisesRegex(ValueError, 'workflow source'):
+                workflow_files(project)
+            workflow = project / 'src/workflow'
+            workflow.mkdir()
+            for name in ('execution.h', 'execution_layout.h', 'scheme_io.h', 'json.h', 'run_config.h',
+                         'execution.cpp', 'scheme_io.cpp', 'scheme_tool.cpp'):
+                (workflow / name).write_text('fixture ' + name)
+            self.assertNotIn(workflow / 'scheme_tool.cpp', workflow_files(project))
+            (project / 'src/metal/runtime.mm').write_text('source-mode runtime')
+            for name in ('arg_parser.cpp', 'arg_parser.h'):
+                (project / 'src/common' / name).write_text('parser fixture')
+            def compiled(command, evidence):
+                (output / 'flip_graph').write_bytes(b'fake executable')
+                return {'complete': True}
+            argv = ['freeze_application.py', '--project-root', str(project), '--output', str(output)]
+            with patch.object(sys, 'argv', argv), patch.object(freeze_application, 'run', side_effect=compiled), \
+                    patch.object(freeze_application, 'build_identity'):
+                freeze_application.main()
+            manifest = json.loads((output / 'build.json').read_text())
+            for name in ('scheme_io.cpp', 'execution.cpp'):
+                self.assertIn(str(output / 'source/src/workflow' / name), manifest['commands'][0])
+                self.assertEqual((output / 'source/src/workflow' / name).read_bytes(),
+                                 (workflow / name).read_bytes())
+            self.assertEqual(set(manifest['input_workflow']),
+                             {str(p.relative_to(project)) for p in workflow_files(project)})
+            self.assertFalse((output / 'source/src/workflow/scheme_tool.cpp').exists())
+            (workflow / 'execution.cpp').unlink()
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                workflow_files(project)
 
     def test_snapshot_parser_must_belong_to_selected_project(self):
         with tempfile.TemporaryDirectory() as temporary:

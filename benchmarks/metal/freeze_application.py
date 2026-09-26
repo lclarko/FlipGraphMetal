@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,6 +29,26 @@ def parser_files(project):
     return files
 
 
+def workflow_files(project):
+    """Include the native execution closure only when this entry point uses it."""
+    entry = (project / 'src/metal/main.cpp').read_text()
+    includes = re.findall(r'^\s*#\s*include\s+"\.\./workflow/(execution(?:_layout)?\.h)"',
+                          entry, re.MULTILINE)
+    if not includes:
+        return []
+    source = project / 'src/workflow'
+    if not source.is_dir() or source.is_symlink() or any(p.is_symlink() for p in source.rglob('*')):
+        raise ValueError('selected native workflow source must be a directory without symlinks')
+    implementations = ['scheme_io.cpp', 'execution.cpp']
+    execution = source / 'execution.cpp'
+    if execution.is_file() and '#include "journal.h"' in execution.read_text():
+        implementations.append('journal.cpp')
+    files = sorted(source.glob('*.h')) + [source / name for name in implementations]
+    if any(not (source / name).is_file() for name in ('execution.h', *includes)) or any(not p.is_file() for p in files):
+        raise ValueError('selected native workflow implementation is incomplete')
+    return files
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library-mode', choices=['auto', 'source', 'metallib'], default='auto')
@@ -38,17 +59,18 @@ def main():
     source = project / 'src/metal'
     try:
         shared = parser_files(project)
+        workflow = workflow_files(project)
     except (ValueError, OSError) as error:
         parser.error(str(error))
     if not source.is_dir() or source.is_symlink() or any(p.is_symlink() for p in source.rglob('*')):
         parser.error('selected Metal source must be a directory without symlinks')
-    if output == source or output.is_relative_to(source) or any(output.is_relative_to(p.parent) for p in shared):
+    if output == source or output.is_relative_to(source) or any(output.is_relative_to(p.parent) for p in shared + workflow):
         parser.error('output must be outside the source directories')
     output.mkdir(parents=True, exist_ok=False)
     snapshot = output / 'source'
     shader = snapshot / 'src/metal'
     shutil.copytree(source, shader)
-    for path in shared:
+    for path in shared + workflow:
         target = snapshot / path.relative_to(project)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
@@ -56,7 +78,9 @@ def main():
     command = ['xcrun', 'clang++', '-mmacosx-version-min=15.0', '-std=c++17', '-O2',
                '-fobjc-arc', '-ffp-contract=off', '-framework', 'Foundation', '-framework', 'Metal',
                '-DMETAL_SOURCE_DIR="' + str(shader) + '"', '-DMETAL_PROGRAM=1',
-               str(shader / 'main.cpp'), str(shader / 'runtime.mm'), '-o', str(binary)]
+               str(shader / 'main.cpp'), str(shader / 'runtime.mm'),
+               *[str(snapshot / p.relative_to(project)) for p in workflow if p.suffix == '.cpp'],
+               '-o', str(binary)]
     mode = args.library_mode
     if mode == 'auto':
         mode = 'metallib' if 'METAL_LIBRARY_SHA256' in (shader / 'runtime.mm').read_text() else 'source'
@@ -82,6 +106,7 @@ def main():
                     metal_source_dir=str(shader), binary=str(binary), commands=[command],
                     input_project=str(project), input_source=str(source),
                     input_parser={str(p.relative_to(project)): digest(p) for p in shared},
+                    input_workflow={str(p.relative_to(project)): digest(p) for p in workflow},
                     generator_sha256=digest(Path(__file__)), complete=False)
     if shader_command is not None:
         manifest.pop('metal_source_dir')

@@ -7,6 +7,7 @@ struct ReduceGaussCandidate {
 };
 
 struct SchemeZ2 {
+    friend struct ControlledArithmetic;
     int n[3];
     int nn[3];
     int m;

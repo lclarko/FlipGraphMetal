@@ -134,6 +134,8 @@ private:
     std::string getSavePath(const Scheme &scheme, int iteration, int runId) const;
 };
 
+namespace fgm { struct SchemeRecord; struct AdmissionLimits; struct Json; }
+
 class SchemeAdditionsReducer {
     int n1, n2, n3;
     int m;
@@ -152,11 +154,11 @@ class SchemeAdditionsReducer {
     int bestFreshVars[3];
     std::vector<int> indices[3];
 
-    AdditionsReducer<MAX_U_EXPRESSIONS, MAX_U_FRESH_VARIABLES, MAX_U_REAL_VARIABLES, MAX_U_SUBEXPRESSIONS> *reducersU;
-    AdditionsReducer<MAX_V_EXPRESSIONS, MAX_V_FRESH_VARIABLES, MAX_V_REAL_VARIABLES, MAX_V_SUBEXPRESSIONS> *reducersV;
-    AdditionsReducer<MAX_W_EXPRESSIONS, MAX_W_FRESH_VARIABLES, MAX_W_REAL_VARIABLES, MAX_W_SUBEXPRESSIONS> *reducersW;
-    SchemeInteger *schemes;
-    RandomState *states;
+    AdditionsReducer<MAX_U_EXPRESSIONS, MAX_U_FRESH_VARIABLES, MAX_U_REAL_VARIABLES, MAX_U_SUBEXPRESSIONS> *reducersU=nullptr;
+    AdditionsReducer<MAX_V_EXPRESSIONS, MAX_V_FRESH_VARIABLES, MAX_V_REAL_VARIABLES, MAX_V_SUBEXPRESSIONS> *reducersV=nullptr;
+    AdditionsReducer<MAX_W_EXPRESSIONS, MAX_W_FRESH_VARIABLES, MAX_W_REAL_VARIABLES, MAX_W_SUBEXPRESSIONS> *reducersW=nullptr;
+    SchemeInteger *schemes=nullptr;
+    RandomState *states=nullptr;
 
     void initialize();
     void reduceIteration(int iteration);
@@ -171,7 +173,9 @@ class SchemeAdditionsReducer {
 public:
     SchemeAdditionsReducer(int count, int schemesCount, int maxFlips, int seed, int blockSize, const std::string &outputPath, int topCount = 10);
 
-    bool read(std::ifstream &f);
+    bool read(std::istream &f);
+    bool read(const fgm::SchemeRecord &source);
+    fgm::Json reduceBounded(uint64_t rounds,uint64_t noImprovements,uint64_t targetAdditions,const fgm::AdmissionLimits &limits,const fgm::SchemeRecord &effective);
     void reduce(int maxNoImprovements, int startAdditions);
 
     ~SchemeAdditionsReducer();

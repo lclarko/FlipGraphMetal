@@ -17,6 +17,8 @@ VARIANTS = ('signed', 'f2', 'signed-testing', 'f2-testing')
 PRODUCTION = {'flip_graph': 'signed', 'complexity_minimizer': 'signed',
               'additions_reducer': 'signed', 'flip_graph_f2': 'f2',
               'complexity_minimizer_f2': 'f2'}
+# These native utilities require no shader library or Metal device.
+HOST_PRODUCTION = ('scheme_tool',)
 
 
 def digest(data):
@@ -32,10 +34,12 @@ def assemble(source_dir, variant='signed'):
              'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h']
     if not f2:
         names.append('compact.h')
-    names.append('kernels.metal')
+    names.extend(['controlled.h', 'controlled_capture.h', 'controlled_packed.h', 'kernels.metal', 'controlled_kernels.metal', 'reduction_kernels.metal'])
     if variant.endswith('-testing'):
         names.append('test_kernels.metal')
     source = '#define METAL_F2\n' if f2 else ''
+    if variant.endswith('-testing'):
+        source += '#define METAL_TESTING\n'
     for name in names:
         source += (Path(source_dir) / name).read_bytes().decode('utf-8').replace('#pragma once', '') + '\n'
     return source
@@ -108,8 +112,33 @@ def build_library(source_dir, output, header, *, variant='signed',
             'header': str(header), 'commands': commands, 'source_sha256': digest(source)}
 
 
+def program_receipt(path, header=None):
+    """Validate the existing build receipt without requiring original sources."""
+    receipt = path.with_name(path.name + '.build.json')
+    if receipt.is_symlink() or not receipt.is_file():
+        raise ValueError(f'expected regular build receipt: {path.name}')
+    try:
+        saved = json.loads(receipt.read_text())
+        stat = path.stat()
+        if saved['output'] != {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}:
+            raise ValueError('output metadata differs')
+        inputs = saved['inputs']
+        if not inputs['command'] or not isinstance(inputs['configuration'], dict):
+            raise ValueError('missing build inputs')
+        dependencies = inputs['dependencies']
+        if not isinstance(dependencies, dict) or not dependencies:
+            raise ValueError('missing dependency hashes')
+        if header is not None:
+            matches = [sha for name, sha in dependencies.items()
+                       if Path(name).parts[-2:] == ('shaders', header.name)]
+            if matches != [digest(header.read_bytes())]:
+                raise ValueError('shader header dependency differs')
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f'program/build receipt mismatch: {path.name}: {error}') from error
+
+
 def package(binary_dir, output):
-    """Copy only production programs and their hash-bound shader assets."""
+    """Copy native production programs and required hash-bound shader assets."""
     binary_dir, output = Path(binary_dir), Path(output)
     if output.exists() or output.is_symlink():
         raise ValueError('package output already exists')
@@ -135,14 +164,19 @@ def package(binary_dir, output):
             raise ValueError(f'shader/header binding mismatch: {variant}')
         expected[variant] = (name, sha256)
         files[name] = sha256
-    for name, variant in PRODUCTION.items():
+    for name in (*PRODUCTION, *HOST_PRODUCTION):
+        variant = PRODUCTION.get(name)
         path = binary_dir / name
         if path.is_symlink() or not path.is_file():
             raise ValueError(f'expected regular program: {name}')
         data = path.read_bytes()
-        library_name, sha256 = expected[variant]
-        if library_name.encode() + b'\0' not in data or sha256.encode() + b'\0' not in data:
-            raise ValueError(f'program/shader binding mismatch: {name}')
+        if not path.stat().st_mode & 0o111:
+            raise ValueError(f'program is not executable: {name}')
+        if variant is not None:
+            library_name, sha256 = expected[variant]
+            if library_name.encode() + b'\0' not in data or sha256.encode() + b'\0' not in data:
+                raise ValueError(f'program/shader binding mismatch: {name}')
+        program_receipt(path, binary_dir / 'shaders' / f'{variant}.h' if variant else None)
         files[name] = digest(data)
     # All validation precedes creation; a failed copy leaves an inspectable partial package.
     output.mkdir(parents=True, exist_ok=False)

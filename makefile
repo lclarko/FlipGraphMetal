@@ -39,20 +39,22 @@ build/metal/shaders/%.h: $(SHADER_SOURCES) scripts/metal_library.py scripts/buil
 run_build = python3 scripts/build_config.py build --output=$@ --config=$(1) $(foreach dependency,$(filter-out FORCE $(1),$^),--dependency=$(call shell_quote,$(dependency))) --
 
 METAL_SOURCES = $(wildcard src/metal/*.h src/metal/*.cpp src/metal/*.metal) src/metal/runtime.mm src/common/arg_parser.cpp src/common/arg_parser.h
+NATIVE_WORKFLOW = src/workflow/scheme_io.cpp src/workflow/execution.cpp src/workflow/journal.cpp
+NATIVE_WORKFLOW_HEADERS = $(wildcard src/workflow/*.h)
 .PHONY: metal
 metal: build/metal/flip_graph build/metal/complexity_minimizer build/metal/additions_reducer
 
-build/metal/flip_graph: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed)
+build/metal/flip_graph: $(METAL_SOURCES) $(NATIVE_WORKFLOW) $(NATIVE_WORKFLOW_HEADERS) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed)
 	@mkdir -p build/metal
-	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=1 src/metal/main.cpp src/metal/runtime.mm -o $@
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=1 src/metal/main.cpp src/metal/runtime.mm $(NATIVE_WORKFLOW) -o $@
 
 build/metal/complexity_minimizer: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed)
 	@mkdir -p build/metal
 	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=2 src/metal/main.cpp src/metal/runtime.mm -o $@
 
-build/metal/additions_reducer: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed)
+build/metal/additions_reducer: $(METAL_SOURCES) $(NATIVE_WORKFLOW) $(NATIVE_WORKFLOW_HEADERS) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed)
 	@mkdir -p build/metal
-	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=3 src/metal/main.cpp src/metal/runtime.mm -o $@
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=3 src/metal/main.cpp src/metal/runtime.mm $(NATIVE_WORKFLOW) -o $@
 
 build/metal/correctness: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE tests/metal/correctness.cpp tests/metal/candidate_capacity.h $(call metal_library_dependency,signed-testing)
 	@mkdir -p build/metal
@@ -61,9 +63,9 @@ build/metal/correctness: $(METAL_SOURCES) makefile scripts/build_config.py $(MET
 
 metal: build/metal/flip_graph_f2 build/metal/complexity_minimizer_f2
 
-build/metal/flip_graph_f2: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,f2)
+build/metal/flip_graph_f2: $(METAL_SOURCES) $(NATIVE_WORKFLOW) $(NATIVE_WORKFLOW_HEADERS) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,f2)
 	@mkdir -p build/metal
-	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,f2) -DMETAL_PROGRAM=1 -DMETAL_F2 src/metal/main.cpp src/metal/runtime.mm -o $@
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,f2) -DMETAL_PROGRAM=1 -DMETAL_F2 src/metal/main.cpp src/metal/runtime.mm $(NATIVE_WORKFLOW) -o $@
 
 build/metal/complexity_minimizer_f2: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,f2)
 	@mkdir -p build/metal
@@ -93,7 +95,7 @@ clean:
 
 # Produce a new, relocatable directory without copying build evidence or sources.
 .PHONY: package-metal
-package-metal: metal
+package-metal: metal scheme-tool
 	python3 scripts/metal_library.py package --binary-dir=build/metal --output=$(call shell_quote,$(PACKAGE_DIR))
 
 WORKFLOW_CXX ?= xcrun clang++
@@ -109,9 +111,21 @@ scheme-tool: build/metal/scheme_tool
 
 build/metal/scheme_tool: $(WORKFLOW_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@mkdir -p build/metal
-	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) src/workflow/scheme_tool.cpp -o $@
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) src/workflow/scheme_tool.cpp $(NATIVE_WORKFLOW) -o $@
 
-WORKFLOW_TEST_DRIVERS = build/workflow/test_run_config build/workflow/test_host_rng
+WORKFLOW_TEST_DRIVERS = build/workflow/test_run_config build/workflow/test_host_rng build/workflow/test_execution build/workflow/test_journal build/workflow/test_pool build/workflow/test_reduction_result
+
+build/workflow/test_reduction_result: tests/workflow/reduction_result.cpp $(WORKFLOW_SOURCES) $(SHADER_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow -Isrc/metal tests/workflow/reduction_result.cpp src/workflow/scheme_io.cpp src/workflow/journal.cpp -o $@
+
+build/workflow/test_controlled: tests/workflow/controlled.cpp src/workflow/run_config.h src/workflow/json.h $(SHADER_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow -Isrc/metal tests/workflow/controlled.cpp -o $@
+
+build/metal/controlled_signed: tests/workflow/controlled.cpp $(METAL_SOURCES) src/workflow/run_config.h src/workflow/json.h makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,signed-testing)
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed-testing) -DMETAL_TESTING -DFGM_CONTROLLED_GPU -Isrc/workflow -Isrc/metal tests/workflow/controlled.cpp src/metal/runtime.mm -o $@
+
+build/metal/controlled_f2: tests/workflow/controlled.cpp $(METAL_SOURCES) src/workflow/run_config.h src/workflow/json.h makefile scripts/build_config.py $(METAL_CONFIG) FORCE $(call metal_library_dependency,f2-testing)
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,f2-testing) -DMETAL_TESTING -DMETAL_F2 -DFGM_CONTROLLED_GPU -Isrc/workflow -Isrc/metal tests/workflow/controlled.cpp src/metal/runtime.mm -o $@
 
 build/workflow/test_run_config: tests/workflow/run_config.cpp src/workflow/run_config.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow tests/workflow/run_config.cpp -o $@
@@ -119,8 +133,17 @@ build/workflow/test_run_config: tests/workflow/run_config.cpp src/workflow/run_c
 build/workflow/test_host_rng: tests/workflow/host_rng.cpp makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) tests/workflow/host_rng.cpp -o $@
 
+build/workflow/test_execution: tests/workflow/execution.cpp $(WORKFLOW_SOURCES) $(SHADER_SOURCES) src/metal/host.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -DFGM_JOURNAL_TESTING -DFGM_SEARCH_TESTING -Isrc/workflow tests/workflow/execution.cpp $(NATIVE_WORKFLOW) -o $@
+
+build/workflow/test_pool: src/workflow/journal.cpp src/workflow/journal.h tests/workflow/pool.cpp src/workflow/pool.h src/workflow/run_config.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow tests/workflow/pool.cpp src/workflow/scheme_io.cpp src/workflow/journal.cpp -o $@
+
+build/workflow/test_journal: tests/workflow/journal.cpp src/workflow/journal.cpp src/workflow/journal.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -DFGM_JOURNAL_TESTING -Isrc/workflow tests/workflow/journal.cpp src/workflow/journal.cpp src/workflow/scheme_io.cpp -o $@
+
 test-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
 	python3 tests/workflow/run.py
 
-qualify-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
+qualify-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS) build/workflow/test_controlled
 	python3 tests/workflow/run.py --qualification

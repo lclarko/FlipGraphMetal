@@ -77,11 +77,14 @@ public:
 #ifdef METAL_F2
         [source appendString:@"#define METAL_F2\n"];
 #endif
+#ifdef METAL_TESTING
+        [source appendString:@"#define METAL_TESTING\n"];
+#endif
         for (NSString *name in @[@"core.h", @"addition.h", @"flip_set.h", @"scheme_integer.h", @"scheme_z2.h", @"pairs_counter.h", @"additions_reducer.h",
 #ifndef METAL_F2
             @"compact.h",
 #endif
-            @"kernels.metal"
+            @"controlled.h", @"controlled_capture.h", @"controlled_packed.h", @"kernels.metal", @"controlled_kernels.metal", @"reduction_kernels.metal"
 #ifdef METAL_TESTING
             , @"test_kernels.metal"
 #endif
