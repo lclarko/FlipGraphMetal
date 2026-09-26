@@ -218,6 +218,8 @@ Packaged native analysis and verification need no Python:
 scheme_tool analyze --input run.json.journal --format journal --summary --output corpus.json
 scheme_tool analyze --input run.json.journal --format journal --observations \
   --record-bytes 8388608 --output captures.jsonl
+scheme_tool analyze --input run.json.journal --format journal --observations \
+  --receipt run.json --record-bytes 8388608 --output receipt-captures.jsonl
 scheme_tool verify --input reduction.json.circuits.jsonl --format jsonl --output verified.jsonl
 ```
 
@@ -229,6 +231,15 @@ aliases and duplicates, with `fgm-journal-observation-v1` metadata, a transactio
 hash and `fgm-scheme-v1` factors. Each exported capture is checked against its
 tensor, scheme and factor identities, domain and workflow dimensions. Empty
 capture history produces an empty JSONL file. Neither form repairs the journal.
+The optional `--receipt` binds observation export to an acknowledged sequence,
+head hash and run identity, including its configuration, seed and resume
+predecessor. It exports the cumulative prefix through that receipt even after
+later runs extend the journal. A complete receipt must identify its committed
+run end. Replay reconstructs mandatory/optional capture counts and current/
+historical discovery counts. Other work counters, including capture drops,
+remain native receipt observations; the journal does not retain enough data
+to reconstruct them independently. Missing or inconsistent bindings fail
+before output publication.
 Metadata is optional.
 Run records bind configuration, input identities, executable/library digests,
 backend, terminal reasons, work and discovery counters. The complete process

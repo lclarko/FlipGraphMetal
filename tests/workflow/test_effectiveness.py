@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,9 +23,10 @@ def measurement_with_cell(root, active):
     shutil.copytree(PANEL.parent, root/'panel')
     panel, protocol = baseline.load_effectiveness_panel(root/'panel/panel.json')
     cells = []
-    for entry in panel['entries']:
-        for seed in protocol['seeds']:
-            for arm in protocol['arms']:
+    for seed_index, seed in enumerate(protocol['seeds']):
+        for panel_index, entry in enumerate(panel['entries']):
+            arms = ('fixed', 'generate') if (seed_index + panel_index) % 2 == 0 else ('generate', 'fixed')
+            for arm in arms:
                 cell = dict(id=f"{entry['id']}-{seed}-{arm}",panel=entry['id'],seed=seed,
                             arm=arm,status='unrun',reference_costs=[r['claimed_additions'] for r in entry['references']])
                 if (entry['id'],seed,arm)==('original',7,'generate'):
@@ -32,7 +34,7 @@ def measurement_with_cell(root, active):
                 cells.append(cell)
     measurement = dict(schema='fgm-effectiveness-measurement-v1',complete=False,
                        bindings=dict(panel_sha256=baseline.digest(root/'panel/panel.json')),
-                       protocol=protocol,reference_verification=[],cells=cells)
+                       protocol=protocol,reference_verification=[],cells=cells,elapsed_seconds=30.)
     baseline.write_json(root/'measurement.json',measurement)
     return next(e for e in panel['entries'] if e['id']=='original'), measurement
 
@@ -316,9 +318,12 @@ class EffectivenessTests(unittest.TestCase):
                 measurement['protocol'] = protocol
                 measurement['bindings']['panel_sha256'] = baseline.digest(root/'panel/panel.json')
                 baseline.write_json(root/'measurement.json',measurement)
-                reduced = dict(complete=True,operation='reduce',started_seconds=0.,workflow_seconds=1.,
+                reduced = dict(complete=True,operation='reduce',config={},started_seconds=0.,workflow_seconds=1.,
                                verified_at_seconds=.5,evaluation={k:v for k,v in evaluation.items() if k!='verified_seconds'})
-                with mock.patch.object(baseline,'checked_effectiveness_step',return_value=reduced) as checked:
+                with mock.patch.object(baseline,'checked_effectiveness_step',return_value=reduced) as checked, \
+                     mock.patch.object(baseline,'checked_effectiveness_calibration',
+                                       return_value={'settings':{'rounds':16,'workers':2}}), \
+                     mock.patch.object(baseline,'checked_effectiveness_config'):
                     summary = baseline.summarize_effectiveness(root/'measurement.json')
                 self.assertEqual(summary['protocol_version'],protocol['version'])
                 self.assertFalse(summary['complete'])
@@ -480,7 +485,7 @@ class EffectivenessTests(unittest.TestCase):
             binaries = root/'binaries'
             binaries.mkdir()
             (binaries/'flip_graph').write_bytes(b'fake native executable')
-            now = [0.]
+            now = [1.]
             run = baseline.EffectivenessRun(root,binaries,clock=lambda:now[0])
             run.started = 0.
             run.deadline = 1000.
@@ -513,8 +518,9 @@ class EffectivenessTests(unittest.TestCase):
             source = json.loads((root/'panel'/entry['path']).read_text())
             evaluation = dict(scheme_id=entry['scheme_id'],factors_id=baseline.effective_factor_id(source),additions=60,
                               additions_by_stage=dict(u=20,v=20,w=20))
-            reduction = dict(operation='reduce',complete=True,started_seconds=0.,workflow_seconds=1.,
+            reduction = dict(operation='reduce',complete=True,config={},started_seconds=0.,workflow_seconds=1.,
                              verified_at_seconds=1.,evaluation=evaluation)
+            now[0] = 0.
             steps = [0]
             def invoke(config,label,stop):
                 steps[0] += 1
@@ -539,7 +545,10 @@ class EffectivenessTests(unittest.TestCase):
             def checked(base, reference, bindings=None, expected_reducers=None):
                 return (copy.deepcopy(reduction) if reference['path']=='mock-reduce' else
                         original(base,reference,bindings,expected_reducers))
-            with mock.patch.object(baseline,'checked_effectiveness_step',side_effect=checked):
+            with mock.patch.object(baseline,'checked_effectiveness_step',side_effect=checked), \
+                 mock.patch.object(baseline,'checked_effectiveness_calibration',
+                                   return_value={'settings':{'rounds':16,'workers':2}}), \
+                 mock.patch.object(baseline,'checked_effectiveness_config'):
                 summary = baseline.summarize_effectiveness(root/'measurement.json')
             self.assertFalse(summary['complete'])
             self.assertEqual(next(item for item in summary['cells'] if item['id']==cell['id'])
@@ -561,9 +570,12 @@ class EffectivenessTests(unittest.TestCase):
             active = next(item for item in document['cells'] if item['id']=='original-7-generate')
             active.update(cell)
             baseline.write_json(root/'measurement.json',document)
-            step = dict(operation='reduce',complete=True,started_seconds=0.,workflow_seconds=1.,
+            step = dict(operation='reduce',complete=True,config={},started_seconds=0.,workflow_seconds=1.,
                         verified_at_seconds=1.,evaluation={k:v for k,v in evaluation.items() if k!='verified_seconds'})
-            with mock.patch.object(baseline,'checked_effectiveness_step',return_value=step):
+            with mock.patch.object(baseline,'checked_effectiveness_step',return_value=step), \
+                 mock.patch.object(baseline,'checked_effectiveness_calibration',
+                                   return_value={'settings':{'rounds':16,'workers':2}}), \
+                 mock.patch.object(baseline,'checked_effectiveness_config'):
                 self.assertFalse(baseline.summarize_effectiveness(root/'measurement.json')['complete'])
                 for field, value in (('additions_by_stage',dict(u=21,v=20,w=20)),
                                      ('verified_seconds',2.)):
@@ -610,13 +622,16 @@ class EffectivenessTests(unittest.TestCase):
             document = json.loads((root/'measurement.json').read_text())
             next(item for item in document['cells'] if item['id']=='original-7-generate').update(cell)
             baseline.write_json(root/'measurement.json',document)
-            reduction = dict(operation='reduce',complete=True,started_seconds=0.,workflow_seconds=1.,
+            reduction = dict(operation='reduce',complete=True,config={},started_seconds=0.,workflow_seconds=1.,
                              verified_at_seconds=1.,evaluation={k:v for k,v in evaluation.items() if k!='verified_seconds'})
             original = baseline.checked_effectiveness_step
             def checked(base,reference,bindings=None,expected_reducers=None):
                 return (copy.deepcopy(reduction) if reference['path']=='mock-reduce' else
                         original(base,reference,bindings,expected_reducers))
-            with mock.patch.object(baseline,'checked_effectiveness_step',side_effect=checked):
+            with mock.patch.object(baseline,'checked_effectiveness_step',side_effect=checked), \
+                 mock.patch.object(baseline,'checked_effectiveness_calibration',
+                                   return_value={'settings':{'rounds':16,'workers':2}}), \
+                 mock.patch.object(baseline,'checked_effectiveness_config'):
                 summary = baseline.summarize_effectiveness(root/'measurement.json')
             self.assertFalse(summary['complete'])
             self.assertEqual(next(row for row in summary['cells'] if row['id']=='original-7-generate')
@@ -697,6 +712,246 @@ class EffectivenessTests(unittest.TestCase):
                     guarded.assert_not_called()
                 self.assertEqual(record['commands'],[])
                 self.assertGreaterEqual(record['headroom_wait_seconds'],.05)
+
+
+class ReplayEvidenceTests(unittest.TestCase):
+    def test_expected_configuration_rejects_quantum_policy_seed_and_history_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = dict(path='blocks/00001-search/step.json')
+            output = root/'blocks/00001-search/receipt.json'
+            settings = dict(rounds=16, workers=2)
+            history = Path('cells/original-7-generate/history')
+            for operation in ('reduce', 'search'):
+                seed = baseline.effectiveness_seed('original', 7, operation, 0)
+                config = baseline.effectiveness_config(None, seed, settings, operation,
+                    output.with_name('input.json'), root/history, resume=False)
+                config['output'] = str(output)
+                step = dict(operation=operation, config=config)
+                def check(value, trial=7, resume=False):
+                    baseline.checked_effectiveness_config(root, reference, value, None,
+                        baseline.effectiveness_seed('original', trial, operation, 0), settings,
+                        operation, history, baseline.FGM1_PROTOCOL, resume=resume)
+                check(step)
+                variants = [('execution', 'workers', 4)]
+                if operation == 'reduce':
+                    variants += [('reduction', 'rounds', 32), ('reduction', 'seed', seed+1)]
+                else:
+                    variants += [('policy', 'optional_quota', 1), ('policy', 'seed', seed+1),
+                                 ('pool', 'selector', 'weighted'),
+                                 ('history', 'path', str(root/'cells/another-cell/history'))]
+                for section, key, value in variants:
+                    with self.subTest(operation=operation, field=key):
+                        changed = copy.deepcopy(step)
+                        changed['config'][section][key] = value
+                        with self.assertRaisesRegex(ValueError, 'calibrated deterministic'):
+                            check(changed)
+                with self.assertRaisesRegex(ValueError, 'calibrated deterministic'):
+                    check(step, trial=19)
+                if operation == 'search':
+                    with self.assertRaisesRegex(ValueError, 'calibrated deterministic'):
+                        check(step, resume=True)
+                changed = copy.deepcopy(step)
+                changed['receipt'] = dict(configuration=dict(config, operation='wrong'))
+                with self.assertRaisesRegex(ValueError, 'receipt configuration'):
+                    check(changed)
+
+    def test_calibration_hash_bindings_and_frozen_artifacts_are_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, data = measurement_with_cell(root, {})
+            data['bindings'].update(protocol_sha256=baseline.content_hash(data['protocol']),
+                                    build_inventory={}, source_inventory={})
+            with self.assertRaises(OSError):
+                baseline.checked_effectiveness_calibration(root, data)
+            calibration = dict(schema='fgm-effectiveness-calibration-v1', complete=True,
+                               settings=dict(rounds=16, workers=2), bindings=data['bindings'], pilots=[])
+            baseline.write_json(root/'calibration.json', calibration)
+            data['calibration_sha256'] = baseline.digest(root/'calibration.json')
+            # Isolate inventory/hash admission; existing calibration tests check pilot evidence.
+            with mock.patch.object(baseline, 'calibration_valid', return_value=True) as validate:
+                self.assertEqual(baseline.checked_effectiveness_calibration(root, data), calibration)
+                validate.assert_called_once_with(calibration, data['bindings'], root)
+                (root/'calibration.json').write_text('{}')
+                with self.assertRaisesRegex(ValueError, 'calibration hash'):
+                    baseline.checked_effectiveness_calibration(root, data)
+                baseline.write_json(root/'calibration.json', calibration)
+                data['bindings']['protocol_sha256'] = '0'*64
+                with self.assertRaisesRegex(ValueError, 'protocol binding'):
+                    baseline.checked_effectiveness_calibration(root, data)
+                data['bindings']['protocol_sha256'] = baseline.content_hash(data['protocol'])
+                data['bindings']['build_inventory'] = {'missing-tool':'0'*64}
+                with self.assertRaises(OSError):
+                    baseline.checked_effectiveness_calibration(root, data)
+                data['bindings']['build_inventory'] = {}
+            with self.assertRaisesRegex(ValueError, 'calibration or bindings'):
+                baseline.checked_effectiveness_calibration(root, data)
+
+    def test_calibration_queue_binds_first_retained_factor_presentation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            measurement_with_cell(root, {})
+            panel, protocol = baseline.load_effectiveness_panel(root/'panel/panel.json')
+            bindings = dict(protocol_sha256=baseline.content_hash(protocol))
+            rows, steps = [], {}
+            first_candidate = None
+            for kind in ('reduce', 'search'):
+                for index, entry in enumerate(panel['entries']):
+                    initial = json.loads((root/'panel'/entry['path']).read_text())
+                    ref = dict(path=kind+'-'+entry['id'], sha256='isolated-step-check')
+                    step = dict(complete=True, operation=kind, workflow_seconds=.05, started_seconds=0.,
+                        input_factors_id=baseline.effective_factor_id(initial), config=dict(operation=kind,
+                        execution=dict(workers=16), reduction=dict(rounds=16)))
+                    row = dict(kind=kind, setting=16, panel=entry['id'], complete=True, seconds=.2, steps=[ref])
+                    if kind == 'search':
+                        candidate = json.loads((root/'panel'/panel['entries'][(index+1)%5]['path']).read_text())
+                        scheme = dict(dimensions=candidate['n'], rank=23, domain='ZT', orientation='cyclic-w',
+                                      **{k:candidate[k] for k in 'uvw'})
+                        sid = baseline.host_oracle().identity(scheme)
+                        step['observations'] = [dict(scheme_id=sid, rank=23, scheme=scheme)]
+                        evaluated = dict(complete=True, operation='reduce', workflow_seconds=.05, started_seconds=.1,
+                            config=dict(operation='reduce', reduction=dict(rounds=16)),
+                            evaluation=dict(scheme_id=sid, factors_id=baseline.effective_factor_id(candidate)))
+                        evaluation_ref = dict(path='evaluate-'+entry['id'], sha256='isolated-step-check')
+                        row['steps'].append(evaluation_ref)
+                        steps[evaluation_ref['path']] = evaluated
+                        if first_candidate is None:
+                            first_candidate = candidate, evaluated
+                    steps[ref['path']] = step
+                    rows.append(row)
+            calibration = dict(schema='fgm-effectiveness-calibration-v1', complete=True, bindings=bindings,
+                               settings=dict(rounds=16,workers=16), pilots=rows)
+            with mock.patch.object(baseline, 'checked_effectiveness_step', side_effect=lambda base,ref,*a,**kw:steps[ref['path']]), \
+                 mock.patch.object(baseline, 'checked_effectiveness_config'):
+                self.assertTrue(baseline.calibration_valid(calibration, bindings, root))
+                candidate, evaluated = first_candidate
+                alias = dict(candidate, **{k:list(reversed(candidate[k])) for k in 'uvw'})
+                self.assertNotEqual(baseline.effective_factor_id(alias), evaluated['evaluation']['factors_id'])
+                evaluated['evaluation']['factors_id'] = baseline.effective_factor_id(alias)
+                self.assertFalse(baseline.calibration_valid(calibration, bindings, root))
+
+    def test_journal_replay_rejects_omission_substitution_and_later_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def search(index, cell, resume=False):
+                attempt = root/'blocks'/f'{index:05d}-search'
+                attempt.mkdir(parents=True)
+                source = attempt/'input.json'
+                shutil.copyfile(PANEL.parent/'factors/original.json', source)
+                history = root/'cells'/cell/'history'
+                history.parent.mkdir(parents=True, exist_ok=True)
+                config = baseline.effectiveness_config(None, 7+index, dict(rounds=16,workers=1),
+                    'search', source, history, resume=resume)
+                # The existing CPU dispatch stand-in exercises real native journal production.
+                config['execution'].update(backend='general', batch_steps=4)
+                config['policy'].update(flip_budget=8, control_budget=8)
+                config['output'] = str(attempt/'receipt.json')
+                baseline.write_json(attempt/'config.json', config)
+                result = subprocess.run([str(ROOT/'build/workflow/test_execution'), '--run-config',
+                    str(attempt/'config.json')], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                exported = attempt/'observations.jsonl'
+                result = subprocess.run([str(ROOT/'build/metal/scheme_tool'), 'analyze', '--format', 'journal',
+                    '--observations', '--receipt', config['output'], '--input', str(history),
+                    '--output', str(exported), '--record-bytes', '8388608'],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return config, dict(path=str((attempt/'step.json').relative_to(root))), baseline.checked_observations(exported)
+            config, reference, rows = search(1, 'original-7-generate')
+            self.assertTrue(rows)
+            receipt = Path(config['output'])
+            baseline.checked_effectiveness_journal(root, reference, config, receipt, rows)
+            _, _, later = search(2, 'original-7-generate', resume=True)
+            self.assertGreater(len(later), len(rows))
+            _, _, other = search(3, 'original-19-generate')
+            modified = copy.deepcopy(rows)
+            modified[0]['transaction_sha256'] = '0'*64
+            for name, changed in (('omitted', rows[1:]), ('other cell', other),
+                                   ('transaction', modified), ('later prefix', later)):
+                with self.subTest(export=name), self.assertRaisesRegex(ValueError, 'acknowledged journal prefix'):
+                    baseline.checked_effectiveness_journal(root, reference, config, receipt, changed)
+            baseline.checked_effectiveness_journal(root, reference, config, receipt, rows)
+            history = Path(config['history']['path'])
+            history.rename(history.with_name('missing'))
+            with self.assertRaises(OSError):
+                baseline.checked_effectiveness_journal(root, reference, config, receipt, rows)
+            # Reused calibration must resolve its copied journal, not the original absolute path.
+            repeat = root/'repeat'
+            destination = repeat/'calibration-evidence'/receipt.parent.relative_to(root)
+            shutil.copytree(receipt.parent, destination)
+            shutil.copytree(history.with_name('missing'), repeat/'calibration-evidence'/history.relative_to(root))
+            baseline.checked_effectiveness_journal(repeat, dict(path='calibration-evidence/'+reference['path']),
+                                                  config, destination/'receipt.json', rows)
+
+
+class TimelineTests(unittest.TestCase):
+    def timeline(self):
+        data = dict(protocol=dict(total_seconds=900), complete=True,
+                    elapsed_seconds=51.5, finalization_seconds=1.)
+        cells = [
+            (dict(started_seconds=5., workflow_seconds=22.), [
+                dict(started_seconds=5.5, workflow_seconds=2., commands=['reduce']),
+                dict(started_seconds=20.1, workflow_seconds=6., commands=[])]),
+            (dict(started_seconds=30., workflow_seconds=20.5), [
+                dict(started_seconds=30., workflow_seconds=1., commands=['reduce'])]),
+        ]
+        return data, cells
+
+    def test_accepts_late_completion_and_finalization(self):
+        data, cells = self.timeline()
+        self.assertIsNone(baseline.validate_effectiveness_timeline(data, cells))
+        del data['finalization_seconds']
+        data['elapsed_seconds'] = 50.5
+        self.assertIsNone(baseline.validate_effectiveness_timeline(data, cells))
+        data['elapsed_seconds'] -= 5e-9
+        self.assertIsNone(baseline.validate_effectiveness_timeline(data, cells))
+
+    def test_rejects_overlapping_steps_and_arms(self):
+        for change in ('step', 'arm'):
+            with self.subTest(change=change):
+                data, cells = self.timeline()
+                if change == 'step':
+                    cells[0][1][1]['started_seconds'] = 7.4
+                else:
+                    cells[1][0]['started_seconds'] = 26.9
+                with self.assertRaisesRegex(ValueError, 'overlap'):
+                    baseline.validate_effectiveness_timeline(data, cells)
+
+    def test_rejects_step_outside_arm_and_negative_residual(self):
+        data, cells = self.timeline()
+        cells[0][1][1]['workflow_seconds'] = 7.
+        with self.assertRaisesRegex(ValueError, 'beyond its arm'):
+            baseline.validate_effectiveness_timeline(data, cells)
+
+        data, cells = self.timeline()
+        cells[0][0]['workflow_seconds'] = 6.
+        cells[0][1][:] = [dict(started_seconds=start, workflow_seconds=2.000000006)
+                          for start in (5., 7., 9.)]
+        with self.assertRaisesRegex(ValueError, 'steps exceed arm elapsed'):
+            baseline.validate_effectiveness_timeline(data, cells)
+
+    def test_rejects_total_too_short_and_overbudget_completion(self):
+        data, cells = self.timeline()
+        data['elapsed_seconds'] = 51.5 - 1e-7
+        with self.assertRaisesRegex(ValueError, 'finalization exceed elapsed'):
+            baseline.validate_effectiveness_timeline(data, cells)
+        data, cells = self.timeline()
+        data['elapsed_seconds'] = 900.000001
+        with self.assertRaisesRegex(ValueError, 'exceeds protocol time'):
+            baseline.validate_effectiveness_timeline(data, cells)
+
+    def test_rejects_nonfinite_and_negative_times(self):
+        locations = ((0, 'elapsed_seconds'), (0, 'finalization_seconds'),
+                     (1, 'started_seconds'), (1, 'workflow_seconds'),
+                     (2, 'started_seconds'), (2, 'workflow_seconds'))
+        for value in (-0.1, float('nan'), float('inf'), True):
+            for location, field in locations:
+                with self.subTest(value=value, location=location, field=field):
+                    data, cells = self.timeline()
+                    target = data if location == 0 else (cells[0][0] if location == 1 else cells[0][1][0])
+                    target[field] = value
+                    with self.assertRaises(ValueError):
+                        baseline.validate_effectiveness_timeline(data, cells)
 
 
 if __name__ == '__main__':

@@ -104,8 +104,14 @@ identities and addition counts. Supplied reference circuits are checked during
 preparation and reported separately. Their costs do not count as rediscovered
 circuits. `measurement.json`, `calibration.json`, per-step receipts and logs,
 `summary.json` and `report.md` retain complete and incomplete evidence. An
-offline summary checks retained circuit bindings and endpoint arithmetic; it
-does not run a new search. See `docs/performance.md` for measured findings.
+offline summary checks calibration and frozen artifacts, deterministic step
+configurations, sequential timelines, the 900-second completion limit, and
+retained circuit bindings. It uses the current `build/metal/scheme_tool` to
+replay each search receipt's acknowledged journal prefix and compare its
+ordered captures with the retained export. Run `make scheme-tool` before
+replaying older bundles. Calibration reuse retains pilot journals as well as
+step evidence. Replay is read-only and does not launch Metal.
+See `docs/performance.md` for measured findings.
 
 ## Complete-walk comparison
 

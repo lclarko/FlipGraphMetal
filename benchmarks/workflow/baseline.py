@@ -15,6 +15,7 @@ import statistics
 import subprocess
 import shutil
 import sys
+import tempfile
 import time
 import tarfile
 
@@ -1219,16 +1220,17 @@ def load_effectiveness_panel(path, expected_protocol=None):
     return panel, protocol
 
 
-def effectiveness_config(entry, seed, calibration, operation, source, history):
+def effectiveness_config(entry, seed, calibration, operation, source, history, protocol=None, resume=None):
+    protocol = protocol or FGM1_PROTOCOL
     config = dict(schema='fgm-run-v1', operation=operation, output='receipt.json',
                   input={'kind':'files', 'files':[{'path':str(source), 'format':'json', 'domain':'ZT'}]},
                   execution=dict(workers=1, batch_steps=64, block_size=32, backend='general', memory_bytes=536870912))
     if operation == 'reduce':
         rounds = calibration['rounds']
-        config['reduction'] = dict(domain='ZT', seed=seed, rounds=rounds, reducers=FGM1_PROTOCOL['reducers'],
+        config['reduction'] = dict(domain='ZT', seed=seed, rounds=rounds, reducers=protocol['reducers'],
                                    schemes=1, max_flips=0, no_improvements=rounds, target_additions=0)
     else:
-        policy = copy.deepcopy(FGM1_PROTOCOL['search'])
+        policy = copy.deepcopy(protocol['search'])
         policy.pop('batch_steps')
         policy.update(schema='fgm-controlled-config-v1', policy='controlled-v1', mode='alternatives',
                       domain='ZT', dimensions=[3, 3, 3], seed=seed, collection_rank=23, target_rank=None)
@@ -1239,7 +1241,9 @@ def effectiveness_config(entry, seed, calibration, operation, source, history):
         # Reserve bounded evidence for 32 workers and three capture slots each.
         config['history'] = dict(path=str(history), storage_bytes=268435456,
                                  transaction_bytes=8388608, index_memory_bytes=1048576)
-        if history.exists():
+        if resume is None:
+            resume = history.exists()
+        if resume:
             config['input'] = dict(kind='resume', journal=str(history))
     return config
 
@@ -1489,27 +1493,95 @@ def checked_observations(path):
     return rows
 
 
+def retained_effectiveness_layout(base, reference, config):
+    """Resolve relocated evidence without following paths recorded by a past run."""
+    parts = PurePosixPath(reference['path']).parts
+    if len(parts) < 3 or parts[-3] != 'blocks' or parts[-1] != 'step.json' or any(
+            part != 'calibration-evidence' for part in parts[:-3]):
+        raise ValueError('unexpected effectiveness step location')
+    output = Path(config['output'])
+    if not output.is_absolute() or output.parts[-3:] != ('blocks', parts[-2], 'receipt.json'):
+        raise ValueError('configuration output differs from retained step')
+    return Path(base).joinpath(*parts[:-3]), output.parents[2]
+
+
+def checked_effectiveness_config(base, reference, step, entry, seed, settings, operation,
+                                 history, protocol, resume=False):
+    config = step['config']
+    _, recorded_root = retained_effectiveness_layout(base, reference, config)
+    output = Path(config['output'])
+    expected = effectiveness_config(entry, seed, settings, operation, output.with_name('input.json'),
+                                    recorded_root/history, protocol=protocol, resume=resume)
+    expected['output'] = str(output)
+    if config != expected or step['operation'] != operation:
+        raise ValueError('step configuration differs from calibrated deterministic protocol')
+    if 'receipt' in step:
+        resolved = copy.deepcopy(expected)
+        resolved.setdefault('history', dict(path=str(output)+'.journal', storage_bytes=536870912,
+            transaction_bytes=1048576, index_memory_bytes=1048576))
+        resolved.update(discovery_target=None, limits=dict(record_bytes=1048576, scan_bytes=268435456,
+            selection_memory=67108864, verification_work=10000000))
+        if step['receipt']['configuration'] != resolved:
+            raise ValueError('receipt configuration differs from calibrated deterministic protocol')
+    if step.get('commands'):
+        binary = 'additions_reducer' if operation == 'reduce' else 'flip_graph'
+        expected_command = [str(recorded_root/'binaries'/binary), '--run-config', str(output.with_name('config.json'))]
+        if step['commands'][0] != expected_command:
+            raise ValueError('step command differs from retained configuration')
+
+
+def retained_effectiveness_history(base, reference, config):
+    retained_root, recorded_root = retained_effectiveness_layout(base, reference, config)
+    relative = Path(config['history']['path']).relative_to(recorded_root)
+    if not relative.parts or '..' in relative.parts or relative.parts[0] not in ('cells', 'pilots'):
+        raise ValueError('journal is not owned by this effectiveness run')
+    history = retained_root/relative
+    if not history.resolve(strict=True).is_relative_to(Path(base).resolve()):
+        raise ValueError('journal escapes retained evidence')
+    return history
+
+
+def checked_effectiveness_journal(base, reference, config, receipt_path, observations):
+    history = retained_effectiveness_history(base, reference, config)
+    with tempfile.TemporaryDirectory(prefix='fgm-journal-replay-') as temporary:
+        exported = Path(temporary)/'observations.jsonl'
+        result = subprocess.run([str(ROOT/'build/metal/scheme_tool'), 'analyze', '--format', 'journal',
+            '--observations', '--receipt', str(receipt_path), '--input', str(history), '--output', str(exported),
+            '--record-bytes', str(config['history']['transaction_bytes']), '--scan-bytes', '268435456'],
+            capture_output=True, text=True, timeout=45)
+        if result.returncode:
+            raise ValueError('journal receipt replay failed: '+result.stderr.strip())
+        if observations is not None and checked_observations(exported) != observations:
+            raise ValueError('observation export differs from acknowledged journal prefix')
+
+
 def checked_effectiveness_step(base, reference, bindings=None, expected_reducers=None):
     path = panel_artifact(Path(base), reference['path'], reference['sha256'])
     step = json.loads(path.read_text())
     for field in ('workflow_seconds', 'started_seconds'):
         if type(step[field]) not in (int, float) or not math.isfinite(step[field]) or step[field] < 0:
             raise ValueError('invalid retained step timing')
+    config_path = path.parent/'config.json'
+    if config_path.exists():
+        step['config'] = json.loads(config_path.read_text())
     if not step['complete']:
         if 'native_receipt_sha256' in step:
             receipt_path = path.parent/'receipt.json'
             if digest(receipt_path) != step['native_receipt_sha256']:
                 raise ValueError('partial step receipt hash mismatch')
             receipt = json.loads(receipt_path.read_text())
-            if step['counters'] != receipt['counters']:
+            if digest(config_path) != receipt['configuration_sha256'] or step['counters'] != receipt['counters']:
                 raise ValueError('partial step counters differ from receipt')
+            step['receipt'] = receipt
+            if step['operation'] == 'search' and receipt.get('run_id'):
+                checked_effectiveness_journal(base, reference, step['config'], receipt_path, None)
         return step
-    config_path = path.parent/'config.json'
     receipt_path = path.parent/'receipt.json'
     receipt = json.loads(receipt_path.read_text())
     if digest(receipt_path) != step['native_receipt_sha256'] or digest(config_path) != receipt['configuration_sha256']:
         raise ValueError('step receipt/configuration hash mismatch')
     config = json.loads(config_path.read_text())
+    step['receipt'] = receipt
     if receipt['status'] != 'complete' or receipt['configuration']['operation'] != step['operation']:
         raise ValueError('step operation or completion mismatch')
     if not step.get('guards') or len(step['guards']) != len(step['commands']):
@@ -1564,6 +1636,7 @@ def checked_effectiveness_step(base, reference, bindings=None, expected_reducers
         if digest(observations) != step['observations_sha256']:
             raise ValueError('observation artifact hash mismatch')
         step['observations'] = checked_observations(observations)
+        checked_effectiveness_journal(base, reference, config, receipt_path, step['observations'])
     step['config'] = config
     return step
 
@@ -1585,20 +1658,24 @@ def calibration_valid(calibration, bindings, base=None):
                or not row.get('steps') for row in rows):
             return False
     if base is not None:
-        expected_reducers = next((p['reducers'] for p in (FGM1_PROTOCOL, FGM1_HEADROOM_PROTOCOL, FGM1_PREVIOUS_PROTOCOL)
-                                  if content_hash(p)==bindings.get('protocol_sha256')), FGM1_PROTOCOL['reducers'])
+        protocol = next((p for p in (FGM1_PROTOCOL, FGM1_HEADROOM_PROTOCOL, FGM1_PREVIOUS_PROTOCOL)
+                         if content_hash(p)==bindings.get('protocol_sha256')), None)
+        if protocol is None:
+            return False
         for row in calibration['pilots']:
             checked_steps = []
-            for step in row.get('steps', []):
+            for index, step in enumerate(row.get('steps', [])):
                 try:
-                    checked = checked_effectiveness_step(base, step, bindings, expected_reducers=expected_reducers)
+                    checked = checked_effectiveness_step(base, step, bindings, expected_reducers=protocol['reducers'])
                     if not checked.get('complete'):
                         return False
-                    config = checked['config']
-                    if config['operation'] == 'reduce' and config['reduction']['rounds'] != (row['setting'] if row['kind']=='reduce' else settings['rounds']):
-                        return False
-                    if config['operation'] == 'search' and config['execution']['workers'] != row['setting']:
-                        return False
+                    operation = row['kind'] if index == 0 else 'reduce'
+                    stage = 'pilot-'+row['kind'] if index == 0 else 'pilot-evaluate'
+                    seed = effectiveness_seed(row['panel'], 7, stage, row['setting'] if index == 0 else index+1)
+                    quantum = dict(settings, rounds=row['setting'] if row['kind']=='reduce' else settings['rounds'],
+                                   workers=row['setting'] if row['kind']=='search' else settings['workers'])
+                    checked_effectiveness_config(base, step, checked, None, seed, quantum, operation,
+                        Path('pilots')/f'{row["kind"]}-{row["setting"]}-{row["panel"]}'/'history', protocol)
                     checked_steps.append(checked)
                 except (KeyError, ValueError, OSError):
                     return False
@@ -1619,11 +1696,32 @@ def calibration_valid(calibration, bindings, base=None):
                     initial = json.loads((Path(base)/'panel'/f'factors/{row["panel"]}.json').read_text())
                     seed_id = host_oracle().identity(dict(dimensions=initial['n'],rank=23,domain='ZT',orientation='cyclic-w',
                                                          **{k:initial[k] for k in 'uvw'}))
-                    pending = list(dict.fromkeys(o['scheme_id'] for o in checked_steps[0]['observations']
-                                                  if o['rank']==23 and o['scheme_id'] != seed_id))
-                    if [s.get('evaluation',{}).get('scheme_id') for s in checked_steps[1:]] != pending:
+                    pending = {}
+                    for observation in checked_steps[0]['observations']:
+                        sid = observation['scheme_id']
+                        if observation['rank']==23 and sid != seed_id and sid not in pending:
+                            scheme = observation['scheme']
+                            pending[sid] = effective_factor_id(dict(n=scheme['dimensions'], m=23, z2=False,
+                                                                  **{k:scheme[k] for k in 'uvw'}))
+                    if [(s['evaluation']['scheme_id'],s['evaluation']['factors_id']) for s in checked_steps[1:]] != list(pending.items()):
                         return False
     return True
+
+
+def checked_effectiveness_calibration(base, data):
+    calibration_path = Path(base)/'calibration.json'
+    if digest(calibration_path) != data.get('calibration_sha256'):
+        raise ValueError('measurement calibration hash mismatch')
+    calibration = json.loads(calibration_path.read_text())
+    bindings = data['bindings']
+    if bindings['protocol_sha256'] != content_hash(data['protocol']):
+        raise ValueError('measurement protocol binding mismatch')
+    for folder, key in (('binaries', 'build_inventory'), ('source', 'source_inventory')):
+        for name, checksum in bindings[key].items():
+            panel_artifact(Path(base)/folder, name, checksum)
+    if not calibration_valid(calibration, bindings, base):
+        raise ValueError('retained calibration or bindings are invalid')
+    return calibration
 
 
 def candidate_file(run, row):
@@ -1774,6 +1872,55 @@ def run_effectiveness_cell(run, cell, entry, panel_root, settings, save):
         save()
 
 
+def validate_effectiveness_timeline(data, checked_cells):
+    """Check that retained arm and step intervals fit the measurement clock."""
+    tolerance = 1e-8
+
+    def seconds(record, field):
+        if field not in record:
+            raise ValueError(f'missing {field} timing')
+        value = record[field]
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f'invalid {field} timing')
+        return value
+
+    elapsed = seconds(data, 'elapsed_seconds')
+    finalization = seconds(data, 'finalization_seconds') if 'finalization_seconds' in data else 0
+    total = seconds(data['protocol'], 'total_seconds')
+    if data['complete'] and elapsed > total + tolerance:
+        raise ValueError('completed measurement exceeds protocol time')
+
+    previous_arm_end = 0
+    for cell, checked_steps in checked_cells:
+        arm_start = seconds(cell, 'started_seconds')
+        arm_duration = seconds(cell, 'workflow_seconds')
+        arm_end = arm_start + arm_duration
+        if not math.isfinite(arm_end):
+            raise ValueError('invalid arm end timing')
+        if arm_start < previous_arm_end - tolerance:
+            raise ValueError('measurement arms overlap or are out of order')
+        previous_step_end = arm_start
+        durations = []
+        for step in checked_steps:
+            step_start = seconds(step, 'started_seconds')
+            step_duration = seconds(step, 'workflow_seconds')
+            step_end = step_start + step_duration
+            if not math.isfinite(step_end):
+                raise ValueError('invalid step end timing')
+            if step_start < previous_step_end - tolerance:
+                raise ValueError('measurement steps overlap or are out of order')
+            if step_end > arm_end + tolerance:
+                raise ValueError('measurement step extends beyond its arm')
+            previous_step_end = step_end
+            durations.append(step_duration)
+        if math.fsum(durations) > arm_duration + tolerance:
+            raise ValueError('measurement steps exceed arm elapsed time')
+        previous_arm_end = arm_end
+
+    if previous_arm_end + finalization > elapsed + tolerance:
+        raise ValueError('measurement arms and finalization exceed elapsed time')
+
+
 def summarize_effectiveness(path):
     path = Path(path).resolve(strict=True)
     data = json.loads(path.read_text())
@@ -1783,12 +1930,17 @@ def summarize_effectiveness(path):
     if data['protocol'] != protocol or digest(path.parent/'panel/panel.json') != data['bindings']['panel_sha256']:
         raise ValueError('measurement panel/protocol binding mismatch')
     entries = {entry['id']:entry for entry in panel['entries']}
+    calibration = checked_effectiveness_calibration(path.parent, data) if any(
+        'evaluations' in cell for cell in data['cells']) else None
+    checked_cells = []
     rows = []
     for cell in data['cells']:
         if 'evaluations' not in cell and (cell['status'] != 'unrun' or
                 set(cell) - {'id', 'panel', 'seed', 'arm', 'status', 'reference_costs'}):
             raise ValueError('missing evaluations: only an unrun cell without results may omit evidence')
         entry = entries[cell['panel']]
+        if cell['id'] != f'{cell["panel"]}-{cell["seed"]}-{cell["arm"]}':
+            raise ValueError('cell identity differs from panel/seed/arm')
         if cell['reference_costs'] != [r['claimed_additions'] for r in entry['references']]:
             raise ValueError('cell reference thresholds differ from panel')
         costs = dict(generation_seconds=0., reduction_seconds=0., independent_verification_seconds=0.,
@@ -1802,8 +1954,18 @@ def summarize_effectiveness(path):
             observed = set()
             initial = json.loads((path.parent/'panel'/entry['path']).read_text())
             queue = [(entry['scheme_id'], effective_factor_id(initial))]
-            for reference in cell['steps']:
+            checked_steps = []
+            block = reduction = 0
+            for index, reference in enumerate(cell['steps']):
                 step = checked_effectiveness_step(path.parent, reference, data['bindings'], expected_reducers=protocol['reducers'])
+                checked_steps.append(step)
+                operation = 'reduce' if queue or cell['arm']=='fixed' else 'search'
+                if 'config' in step:
+                    seed = effectiveness_seed(entry['id'], cell['seed'], operation, reduction if operation=='reduce' else block)
+                    checked_effectiveness_config(path.parent, reference, step, entry, seed, calibration['settings'],
+                        operation, Path('cells')/cell['id']/'history', protocol, resume=block > 0)
+                elif step['complete'] or step.get('commands'):
+                    raise ValueError('missing step configuration')
                 if step.get('commands') and (step['started_seconds'] < cell['started_seconds'] or step['started_seconds'] >= cell['started_seconds']+20):
                     raise ValueError('step launched outside its arm window')
                 key = 'generation_seconds' if step['operation']=='search' else 'reduction_seconds'
@@ -1822,6 +1984,8 @@ def summarize_effectiveness(path):
                         if key != 'discoveries_historical':
                             counters[key] = counters.get(key, 0)+value
                 if not step['complete']:
+                    if index != len(cell['steps'])-1:
+                        raise ValueError('arm continued after an incomplete step')
                     continue
                 when = step['verified_at_seconds']-cell['started_seconds']
                 if step['operation']=='reduce':
@@ -1830,9 +1994,13 @@ def summarize_effectiveness(path):
                     if item['scheme_id'] != expected_id or item['factors_id'] != expected_factors or (cell['arm']=='generate' and item['scheme_id'] in {e['scheme_id'] for e in evaluations}):
                         raise ValueError('reduction does not follow the cost-blind candidate queue')
                     evaluations.append(item)
+                    reduction += 1
                 else:
                     if cell['arm'] != 'generate' or queue:
                         raise ValueError('search launched before draining evaluations')
+                    if block == 0 and step.get('input_factors_id') != effective_factor_id(initial):
+                        raise ValueError('search did not start from the panel factors')
+                    block += 1
                     for item in step['observations']:
                         key = (item['sequence'],item['worker'],item['slot'])
                         if key in observed:
@@ -1855,7 +2023,8 @@ def summarize_effectiveness(path):
             costs['complete_elapsed_seconds'] = cell['workflow_seconds']
             if cell['status']=='complete' and cell['workflow_seconds'] < protocol['arm_seconds']:
                 raise ValueError('completed arm did not reach its endpoint')
-            costs['coordination_seconds'] = max(0.,cell['workflow_seconds']-costs['generation_seconds']-costs['reduction_seconds'])
+            costs['coordination_seconds'] = cell['workflow_seconds']-costs['generation_seconds']-costs['reduction_seconds']
+            checked_cells.append((cell, checked_steps))
         row = {k:cell[k] for k in ('id','panel','seed','arm','status','endpoints','capture_accounting','unexported_native_discoveries') if k in cell}
         row['costs'] = costs
         row['late_evaluations'] = sum(e['verified_seconds']>20 for e in cell.get('evaluations', []))
@@ -1865,6 +2034,12 @@ def summarize_effectiveness(path):
     roster = {(p,s,a) for p in FGM1_PANEL for s in (7,19,41) for a in ('fixed','generate')}
     if len(rows) != 30 or {(r['panel'],r['seed'],r['arm']) for r in rows} != roster:
         raise ValueError('measurement roster differs from protocol')
+    expected_order = [(p, s, a) for si, s in enumerate(protocol['seeds'])
+        for pi, p in enumerate(FGM1_PANEL)
+        for a in (('fixed','generate') if (si+pi)%2 == 0 else ('generate','fixed'))]
+    if [(r['panel'],r['seed'],r['arm']) for r in rows] != expected_order:
+        raise ValueError('arm order differs from frozen protocol')
+    validate_effectiveness_timeline(data, checked_cells)
     acquired = all(row['status'] == 'complete' for row in rows)
     if data['complete'] and not acquired:
         raise ValueError('measurement completion disagrees with cell roster')
@@ -1992,6 +2167,11 @@ def execute_effectiveness(panel_path, binary_dir, output, calibration_path=None)
                     destination = output/'calibration-evidence'/step['path']
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(source.parent, destination.parent, dirs_exist_ok=True)
+                    config = json.loads((source.parent/'config.json').read_text())
+                    if config['operation'] == 'search':
+                        history = retained_effectiveness_history(calibration_path.parent, step, config)
+                        shutil.copytree(history, output/'calibration-evidence'/history.relative_to(calibration_path.parent),
+                                        dirs_exist_ok=True)
                     step['path'] = str(destination.relative_to(output))
             calibration['reused_from_sha256'] = digest(calibration_path)
             write_json(output/'calibration.json', calibration)
