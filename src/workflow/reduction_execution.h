@@ -3,6 +3,28 @@
 #include "execution.h"
 
 namespace fgm {
+// The reducer is also called by legacy entry points. Controlled execution
+// installs receipt fields only for the duration of its bounded call.
+inline thread_local Json *reductionDispatchField=nullptr;
+inline thread_local Json *reductionVerificationField=nullptr;
+struct ReductionTimingBinding {
+    ReductionTimingBinding(Json &dispatch,Json &verification) {
+        reductionDispatchField=&dispatch;reductionVerificationField=&verification;
+    }
+    ~ReductionTimingBinding() { reductionDispatchField=nullptr;reductionVerificationField=nullptr; }
+};
+struct ReductionPhaseTimer {
+    uint64_t &local;
+    Json *receipt;
+    std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
+    ReductionPhaseTimer(uint64_t &value,Json *field):local(value),receipt(field) {}
+    ~ReductionPhaseTimer() {
+        auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-started).count());
+        local+=elapsed;
+        if(receipt)receipt->integer+=int64_t(elapsed);
+    }
+};
 // This stream checks the record bound before every append. ostream badbit
 // exceptions preserve Resource from overflow/xsputn instead of swallowing it.
 class ReductionRecordBuffer : public std::streambuf {
@@ -56,6 +78,7 @@ inline void executeReduction(PreparedRun &run) {
         SchemeAdditionsReducer reducer(int(settings.reducers),int(settings.schemes),int(settings.maxFlips),
             int(settings.seed),int(run.config.execution.blockSize),"",1);
         if(!reducer.read(input.effective)) throw std::runtime_error("effective input exceeds signed reducer capacity");
+        ReductionTimingBinding timing(run.receipt.object.at("dispatch_microseconds"),run.receipt.object.at("verification_microseconds"));
         auto result=reducer.reduceBounded(settings.rounds,settings.noImprovements,settings.targetAdditions,run.config.limits,input.effective);
         result.object["submitted_factors_id"]=input.report.at("factors_id");
         result.object["effective_input_factors_id"]=input.report.at("effective_factors_id");
@@ -89,7 +112,8 @@ inline void executeReduction(PreparedRun &run) {
         run.receipt.object["results"].array.push_back(std::move(result));
     }
     if(attempted>INT64_MAX || applied>INT64_MAX || rounds>INT64_MAX) throw Resource("reduction run counters exceed JSON integer capacity");
-    publishNew(circuitPath,circuits);
+    { ReceiptPhaseTimer timer(run.receipt.object.at("persistence_microseconds"));
+      publishNew(circuitPath,circuits); }
     auto artifact=Json::dict();
     artifact.object["path"]=Json(circuitPath.string());
     artifact.object["sha256"]=Json(sha256Bytes(circuits));

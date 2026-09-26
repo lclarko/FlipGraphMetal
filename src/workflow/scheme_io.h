@@ -1,6 +1,7 @@
 #pragma once
 #include "json.h"
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -18,8 +19,20 @@ struct SchemeRecord {
     std::array<Matrix,3> f;
     bool circuit=false;
     uint64_t operations=0;
+    std::array<uint64_t,3> operationsByStage{};
     std::string sourceOrientation="cyclic-w";
     Json sourceMetadata=Json::dict();
+};
+// Receipt fields are installed before execution. Destruction records elapsed
+// time even when the timed call throws, without allocating during unwinding.
+struct ReceiptPhaseTimer {
+    Json &field;
+    std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
+    explicit ReceiptPhaseTimer(Json &value):field(value) {}
+    ~ReceiptPhaseTimer() {
+        field.integer += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-started).count();
+    }
 };
 struct AdmittedScheme {
     SchemeRecord source;

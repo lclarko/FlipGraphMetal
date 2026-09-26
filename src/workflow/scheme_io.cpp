@@ -379,7 +379,9 @@ SchemeRecord fromJson(const Json&j,const std::string&explicitDomain) {
     for(int p=0; p<3; ++p) {
         std::string key(1,"uvw"[p]);
         if(s.circuit) {
+            const auto before=s.operations;
             Matrix m=reconstruct(j.at(key),j.at(key+"_fresh"),p==2?s.rank:w[p],s.f2,s.operations);
+            s.operationsByStage[p]=s.operations-before;
             if(m.size()!=(p==2?w[p]:s.rank))throw std::runtime_error("incorrect circuit outputs");
             if(p==2) {
                 s.f[p].assign(s.rank,std::vector<int64_t>(w[p]));
@@ -592,7 +594,12 @@ Json report(const SchemeRecord&s,const std::string&artifact,const Json&binding=J
     j.object["eligibility"]=assess(s);
     j.object["verification_work_used"]=Json(int64_t(recordWork));
     j.object["verification_work_model"]=Json("cumulative reconstruction cells, circuit coefficient terms, tensor summands and conservative analysis operations");
-    if(s.circuit)j.object["verified_circuit_additions"]=Json(int64_t(s.operations));
+    if(s.circuit) {
+        j.object["verified_circuit_additions"]=Json(int64_t(s.operations));
+        Json stages=Json::dict();
+        for(int p=0;p<3;++p)stages.object[std::string(1,"uvw"[p])]=Json(int64_t(s.operationsByStage[p]));
+        j.object["verified_circuit_additions_by_stage"]=std::move(stages);
+    }
     if (binding.kind != Json::Null) {
         Json origins = j.has("source_bindings") ? j.at("source_bindings") : Json::list();
         if (origins.kind != Json::Array) throw std::runtime_error("source_bindings must be array");
@@ -675,6 +682,42 @@ void journalRecords(const fs::path &path,const std::string &domain,
             }
         },[&](uint64_t amount){scan(amount);});
     if(!index)throw std::runtime_error("journal contains no admitted schemes");
+    if(parsedHash)*parsedHash=fileHash(path/"journal.bin");
+}
+void journalObservations(const fs::path &path,const std::string &domain,
+                         const std::function<void(const Json&)> &emit,std::string *parsedHash) {
+    Journal::replayReadOnly(path,{UINT64_MAX,limits.record,std::max<uint64_t>(1024,limits.selection)},
+        [&](const Json &transaction,const CommitReceipt &commit) {
+            if(transaction.at("schema").str()!="fgm-search-transaction-v1")
+                throw std::runtime_error("journal input requires search workflow transactions");
+            if(!commit.acknowledged)return;
+            const auto &workflow=transaction.at("workflow");
+            const auto workflowDomain=workflow.at("domain").str();
+            if(workflowDomain!="ZT"&&workflowDomain!="F2")throw std::runtime_error("journal workflow domain mismatch");
+            if(!domain.empty()&&domain!=workflowDomain)throw std::runtime_error("explicit domain conflicts with journal workflow");
+            if(!transaction.has("observations"))return;
+            const auto &observations=transaction.at("observations");
+            if(observations.kind!=Json::Array)throw std::runtime_error("journal observations must be an array");
+            for(const auto &capture:observations.array) {
+                auto scheme=fromJson(capture.at("scheme"),workflowDomain);
+                if(!verify(scheme)||identity(scheme,true)!=capture.at("scheme_id").str()||
+                   identity(scheme,false)!=capture.at("factors_id").str()||
+                   dump(schemeJson(scheme).at("dimensions"))!=dump(workflow.at("dimensions")))
+                    throw std::runtime_error("invalid historical capture binding");
+                Json observation=Json::dict();
+                observation.object["schema"]=Json("fgm-journal-observation-v1");
+                observation.object["run_id"]=transaction.at("run_id");
+                observation.object["sequence"]=Json(int64_t(commit.sequence));
+                observation.object["transaction_sha256"]=Json(commit.hash);
+                observation.object["batch"]=transaction.at("batch");
+                for(const auto *key:{"worker","slot","mandatory","control","operation","scheme_id","factors_id","parent_id"})
+                    observation.object[key]=capture.at(key);
+                observation.object["rank"]=Json(int64_t(scheme.rank));
+                observation.object["domain"]=Json(workflowDomain);
+                observation.object["scheme"]=schemeJson(scheme);
+                emit(observation);
+            }
+        },[&](uint64_t amount){scan(amount);});
     if(parsedHash)*parsedHash=fileHash(path/"journal.bin");
 }
 void records(const fs::path&path,const std::string&format,const std::string&domain,const std::function<void(const SchemeRecord&,uint64_t)>&emit,uint64_t wanted=UINT64_MAX,std::string *parsedHash=nullptr) {
@@ -1103,7 +1146,7 @@ static void help() {
         "  --domain ZT|F2 (required for text; conflicts rejected for JSON)\n"
         "  export: --output-format cpu-text|metal-search-text|metal-minimizer-text|json|legacy-json|jsonl|json-array\n"
         "  journal: --input DIRECTORY reads unique committed admissions without writes or resume; --record-bytes bounds frames\n"
-        "  analyze: --summary emits one bounded corpus descriptor summary; --selection-memory bounds retained groups\n"
+        "  analyze: --summary emits one bounded corpus descriptor summary; --observations exports acknowledged journal captures\n"
         "  select: versioned JSONL manifest; --count K [--seed UINT64 | --ids JSON_FILE]\n"
         "  filters before selection: --filter-domain ZT|F2 --filter-dimensions A,B,C --filter-rank R\n"
         "  --filter-group namespace:name=value matches metadata.groups arrays; absent fields do not match\n"
@@ -1126,7 +1169,7 @@ int runCli(int argc,char**argv) {
         };
         for(int i=2; i<argc; ++i) {
             const std::string option=argv[i];
-            if(option=="--summary") {
+            if(option=="--summary"||option=="--observations") {
                 if(!args.emplace(option,"1").second)throw std::runtime_error("duplicate summary option");
             } else {
                 if(i+1>=argc||!allowed.count(option)||!args.emplace(option,argv[i+1]).second)
@@ -1135,6 +1178,8 @@ int runCli(int argc,char**argv) {
             }
         }
         if(args.count("--summary")&&command!="analyze")throw std::runtime_error("--summary requires analyze");
+        if(args.count("--observations")&&(command!="analyze"||args.count("--summary")))
+            throw std::runtime_error("--observations requires analyze and conflicts with --summary");
         if(args.count("--record-bytes"))limits.record=u64(args["--record-bytes"]);
         if(args.count("--verification-work"))limits.work=u64(args["--verification-work"]);
         if(args.count("--selection-memory"))limits.selection=u64(args["--selection-memory"]);
@@ -1152,6 +1197,7 @@ int runCli(int argc,char**argv) {
         else {
             fs::path input=required(args,"--input");
             auto format=required(args,"--format");
+            if(args.count("--observations")&&format!="journal")throw std::runtime_error("--observations requires journal input");
             const auto artifact=artifactPath(input,format);
             regularInput(artifact,format!="jsonl"&&format!="json-array"&&format!="journal");
             auto originalHash=fileHash(artifact);
@@ -1162,6 +1208,13 @@ int runCli(int argc,char**argv) {
             uint64_t count=0;
             Json corpus=Json::dict();
             std::string parsedSourceHash;
+            if(args.count("--observations")) {
+                journalObservations(input,domain,[&](const Json &observation){output.write(dump(observation)+"\n");},&parsedSourceHash);
+                if(parsedSourceHash!=originalHash||fileHash(artifact)!=originalHash)
+                    throw std::runtime_error("input changed during processing");
+                output.commit();
+                return 0;
+            }
             records(input,format,domain,[&](const SchemeRecord&s,uint64_t index) {
                 Json record=report(s,originalHash);
                 record.object["source_record_index"]=Json(int64_t(index));

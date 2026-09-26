@@ -6,7 +6,7 @@ from verify import verify, reconstruct
 class VerificationTests(unittest.TestCase):
     def test_integer_and_f2_are_distinct(self):
         data = {"n": [1, 1, 1], "m": 3, "z2": True, "u": [[1]] * 3, "v": [[1]] * 3, "w": [[1]] * 3}
-        verify(data)
+        self.assertNotIn("additions_by_stage", verify(data))
         data["z2"] = False
         with self.assertRaises(ValueError):
             verify(data)
@@ -26,7 +26,15 @@ class VerificationTests(unittest.TestCase):
         for key in "uvw":
             data[key] = [[term.copy()]]
             data[key + "_fresh"] = []
-        verify(data)
+        self.assertEqual(verify(data)["additions_by_stage"], {"u": 0, "v": 0, "w": 0})
+        nontrivial = copy.deepcopy(data)
+        nontrivial["u_fresh"] = [[{"index": 0, "value": 1}, {"index": 0, "value": -1}]]
+        nontrivial["u"] = [[{"index": 0, "value": 1}, {"index": 1, "value": 1}]]
+        nontrivial["complexity"]["reduced"] = 2
+        self.assertEqual(verify(nontrivial)["additions_by_stage"], {"u": 2, "v": 0, "w": 0})
+        nontrivial["u_fresh"][0][0]["index"] = 1
+        with self.assertRaises(ValueError):
+            verify(nontrivial)
         bad = copy.deepcopy(data)
         bad["complexity"]["reduced"] = 1
         with self.assertRaises(ValueError):
