@@ -99,6 +99,81 @@ These workloads completed quickly enough for interactive verification and short 
 
 Reproduce these host workloads with `make scheme-tool` and the native-host measurement command in [the benchmark instructions](../benchmarks/metal/README.md). They require only repository fixtures and generated inventories, without private inputs or the external CPU project.
 
+## FGM-1 effectiveness baseline
+
+The [FGM-1 protocol and commands](../benchmarks/metal/README.md#fgm-1-short-run-effectiveness-baseline)
+completed one baseline on the 8 GB Apple M1 MacBook Air under macOS 27.0.
+Protocol version 3 used 128 reducers, 16 calibrated rounds and two search
+workers. All 30 arms completed in 756.706 seconds, including 45.392 seconds
+of final verification and artifact hashing. Supplied-circuit verification
+preceded the timed envelope. No second successful run was performed.
+
+The retained evidence is in `build/fgm1/baseline-04/`: frozen sources, binaries,
+panel, calibration, histories, configurations, native receipts, circuits,
+logs, `measurement.json`, `summary.json`, `report.md` and `artifacts.json`.
+Independent replay reproduced the summary exactly and checked all 11,301
+artifact hashes. The calibration also validates for reuse against its retained
+bindings. Build, input, hardware or protocol changes require a separate run.
+
+| Start | Naive factor count | Fixed reduction at 20 s | Generation + reduction at 20 s | Verified supplied reference |
+|---|---:|---:|---:|---|
+| Original | 113 | 69 | 66 | unavailable in this panel |
+| Laderman | 98 | 62 | 62 | unavailable in this panel |
+| Smirnov | 84 | 68 | 68 | unavailable in this panel |
+| Sun | 120 | 58 | 58 | 56 |
+| CN122 | 122 | 58 | 58 | 55 and 58 |
+
+Each reported best was reached in all three seeds and was already present at
+10 seconds. No completed arm improved its best between 10 and 20 seconds.
+The verified Sun-56 and CN122-55 supplied circuits were not rediscovered.
+CN122's 58-addition reference cost was reconstructed from factors alone.
+Reference verification is separate from these reconstruction outcomes.
+
+Generation retained 262 distinct alternative canonical identities across the
+15 arms by their 20-second endpoints; 246 received an evaluation by a
+20-second endpoint. Summing each arm's distinct discoveries instead gives 304, up from
+178 at 10 seconds. There were 300 evaluated candidates counted per arm,
+including the 15 starting inputs, and 19 pending discoveries at 20 seconds.
+The complete per-start, per-seed histograms and U/V/W counts are in the summary.
+Canonical identity removes term-order and sign-gauge aliases only; it does not
+establish general mathematical inequivalence.
+
+The observed constraints differ by stage:
+
+- **Generation:** Original consistently benefited. Laderman retained no new
+  canonical rank-23 candidate under this policy. Smirnov, Sun and CN122 generated
+  alternatives without improving the starting factors' best reduced cost.
+- **Retention:** completed generation-arm execution, including late work,
+  recorded 749 optional captures, 443 optional duplicates (59.1%), 335 optional
+  seed rediscoveries, 380 mandatory/optional redundant events and 6,080 dropped
+  encounters. FIFO replay implies 143 active-pool evictions; journal history
+  preserves those identities. Drops do not identify lost novel schemes.
+- **Circuit quality:** Sun's reconstructed U/V/W costs were 14/14/30, versus
+  13/13/30 in its verified 56-addition reference. CN122 reconstructed 14/15/29,
+  versus 13/14/28 in its 55-addition reference. These locate observed gaps in
+  this reducer quantum without claiming that longer reduction cannot close them.
+- **Execution overhead:** the generation arms took 305.106 seconds including
+  late completions, with 125.954 seconds of GPU time. Search blocks consumed
+  128.729 seconds and reduction blocks 175.844 seconds. Independent verification
+  took 31.214 seconds, observation export 27.322 seconds, and headroom waiting
+  3.342 seconds. These narrower timings overlap the block totals. Fixed arms
+  took 303.161 seconds with 202.512 seconds of GPU time. Repeated admission,
+  history replay, startup and verification are material under 20-second windows.
+
+Twenty-five circuit evaluations completed after their arm's 20-second endpoint
+and received no endpoint credit. The maximum sampled wired memory during
+scored-arm execution was 2.624 GiB; no guard failed. Samples are not a continuous
+peak-memory bound.
+
+Three earlier attempts remain incomplete and are excluded from these findings:
+`baseline-01` and `baseline-02` used version 1 with 256 reducers; `baseline-03`
+used version 2 with 256 reducers and charged headroom waiting. They stopped at
+the unchanged 3 GiB guard after zero, 25 and five completed arms respectively.
+Version 3 reduced the population to 128, retained the
+hard guards and recalibrated. These versions are not repeatability samples.
+Longer-run effectiveness and variation between complete repeat runs remain
+unmeasured.
+
 ## Reproduction and new measurements
 
 Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for the CPU/GPU studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.

@@ -22,6 +22,9 @@ int main() {
         auto response=context.schemeJson(result);
         response.object["factors_id"]=fgm::Json(context.identity(result,false));
         response.object["verified_circuit_additions"]=fgm::Json(int64_t(result.operations));
+        auto stages=fgm::Json::dict();
+        for(int p=0;p<3;++p)stages.object[std::string(1,"uvw"[p])]=fgm::Json(int64_t(result.operationsByStage[p]));
+        response.object["verified_circuit_additions_by_stage"]=std::move(stages);
         std::cout<<fgm::dump(response)<<'\n';
         return 0;
     } catch(const fgm::Resource &error) { std::cerr<<error.what()<<'\n'; return 2; }

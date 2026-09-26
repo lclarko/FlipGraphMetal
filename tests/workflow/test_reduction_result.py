@@ -40,6 +40,20 @@ class ReductionResultTests(unittest.TestCase):
         result = self.check(source(), circuit(), True)
         self.assertEqual(result['rank'], 1)
         self.assertEqual(result['verified_circuit_additions'], 0)
+        self.assertEqual(result['verified_circuit_additions_by_stage'], dict(u=0, v=0, w=0))
+
+    def test_stage_counts_follow_verified_reconstruction(self):
+        result = circuit()
+        zero = [dict(index=0, value=1), dict(index=0, value=-1)]
+        result['u_fresh'] = [deepcopy(zero)]
+        result['u'] = [[dict(index=0, value=1), dict(index=1, value=1)]]
+        result['v_fresh'] = [deepcopy(zero)]
+        result['complexity']['reduced'] = 3
+        verified = self.check(source(), result, True)
+        self.assertEqual(verified['verified_circuit_additions'], 3)
+        self.assertEqual(verified['verified_circuit_additions_by_stage'], dict(u=2, v=1, w=0))
+        result['u_fresh'][0][0]['index'] = 1
+        self.check(source(), result, True, expected=1)
 
     def test_mathematically_valid_gauge_change_rejected_only_in_fixed_mode(self):
         self.check(source(), circuit(-1), True, expected=1)

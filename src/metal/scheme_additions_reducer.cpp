@@ -462,17 +462,19 @@ fgm::Json SchemeAdditionsReducer::reduceBounded(uint64_t rounds,uint64_t noImpro
         explicit CounterBuffer(size_t count) { if(count) metalAllocate(&data,count*sizeof(uint64_t)); }
         ~CounterBuffer() { if(data) metalFree(data); }
     } counters(maxFlips?size_t(schemesCount)*2:0);
-    initialize();
-    uint64_t completed=0,stagnant=0;
+    uint64_t completed=0,stagnant=0,dispatchMicroseconds=0,verificationMicroseconds=0;
+    { fgm::ReductionPhaseTimer timer(dispatchMicroseconds,fgm::reductionDispatchField); initialize(); }
     std::string terminal="round_budget_exhausted";
     if(targetAdditions && uint64_t(reducedAdditions)<=targetAdditions) terminal="addition_target_met";
     else for(uint64_t round=1;round<=rounds;++round) {
+        { fgm::ReductionPhaseTimer timer(dispatchMicroseconds,fgm::reductionDispatchField);
         if(maxFlips>0 && round>1)
             metalDispatch("directMutationKernel",size_t((schemesCount+blockSize-1)/blockSize)*blockSize,blockSize,schemes,states,counters.data,schemesCount,maxFlips);
         if(maxFlips>0)
             metalDispatch("runDirectReducersKernel",size_t(numBlocks)*blockSize,blockSize,reducersU,reducersV,reducersW,schemes,states,count,schemesCount);
         else
             metalDispatch("runReducersKernel",size_t(numBlocks)*blockSize,blockSize,reducersU,reducersV,reducersW,schemes,states,count,schemesCount,true);
+        }
         bool improved=maxFlips?updateBestTogether():updateBestIndependent();
         reducedAdditions=bestAdditions[0]+bestAdditions[1]+bestAdditions[2];
         reducedFreshVars=bestFreshVars[0]+bestFreshVars[1]+bestFreshVars[2];
@@ -481,13 +483,17 @@ fgm::Json SchemeAdditionsReducer::reduceBounded(uint64_t rounds,uint64_t noImpro
         if(targetAdditions && uint64_t(reducedAdditions)<=targetAdditions) { terminal="addition_target_met"; break; }
         if(stagnant>=noImprovementLimit) { terminal="no_improvement_limit"; break; }
     }
+    fgm::Json circuit;
+    fgm::SchemeRecord reconstructed;
+    fgm::AdmissionContext verifier(limits);
+    { fgm::ReductionPhaseTimer timer(verificationMicroseconds,fgm::reductionVerificationField);
     if(!reducersU[count].isValid() || !reducersV[count].isValid() || !reducersW[count].isValid()) throw std::runtime_error("invalid retained best reducer state");
     fgm::ReductionRecordBuffer buffer(limits.record);
     std::ostream encoded(&buffer);
     encoded.exceptions(std::ios::badbit | std::ios::failbit);
     encoded<<'{'; reducersU[count].write(encoded,"u",""); encoded<<',';
     reducersV[count].write(encoded,"v",""); encoded<<','; reducersW[count].write(encoded,"w",""); encoded<<'}';
-    fgm::Json circuit=fgm::Parser(buffer.str()).parse();
+    circuit=fgm::Parser(buffer.str()).parse();
     auto dimensions=fgm::Json::list(); for(int n:{n1,n2,n3}) dimensions.array.emplace_back(int64_t(n));
     circuit.object["n"]=dimensions;
     // Each retained U output is one multiplication. The best may precede the
@@ -497,10 +503,10 @@ fgm::Json SchemeAdditionsReducer::reduceBounded(uint64_t rounds,uint64_t noImpro
     auto complexity=fgm::Json::dict();
     complexity.object["naive"]=fgm::Json(int64_t(reducersU[count].getNaiveAdditions()+reducersV[count].getNaiveAdditions()+reducersW[count].getNaiveAdditions()));
     complexity.object["reduced"]=fgm::Json(int64_t(reducedAdditions)); circuit.object["complexity"]=complexity;
-    fgm::AdmissionContext verifier(limits);
-    auto reconstructed=fgm::verifyReductionCircuit(circuit,effective,limits,maxFlips==0);
+    reconstructed=fgm::verifyReductionCircuit(circuit,effective,limits,maxFlips==0);
     circuit.object["scheme_id"]=fgm::Json(verifier.identity(reconstructed,true));
     circuit.object["factors_id"]=fgm::Json(verifier.identity(reconstructed,false));
+    }
     uint64_t attempted=0,applied=0;
     if(counters.data) for(int i=0;i<schemesCount;++i) {
         attempted=fgm::configCheckedAdd(attempted,counters.data[2*i]);
@@ -514,6 +520,11 @@ fgm::Json SchemeAdditionsReducer::reduceBounded(uint64_t rounds,uint64_t noImpro
     result.object["rounds_completed"]=fgm::Json(int64_t(completed));
     result.object["flip_attempts"]=fgm::Json(int64_t(attempted)); result.object["flips_applied"]=fgm::Json(int64_t(applied));
     result.object["verified_circuit_additions"]=fgm::Json(int64_t(reconstructed.operations));
+    auto stages=fgm::Json::dict();
+    for(int p=0;p<3;++p)stages.object[std::string(1,"uvw"[p])]=fgm::Json(int64_t(reconstructed.operationsByStage[p]));
+    result.object["verified_circuit_additions_by_stage"]=std::move(stages);
+    result.object["dispatch_microseconds"]=fgm::Json(int64_t(dispatchMicroseconds));
+    result.object["verification_microseconds"]=fgm::Json(int64_t(verificationMicroseconds));
     result.object["terminal_reason"]=fgm::Json(terminal);
     result.object["verification"]=fgm::Json("exact-Z circuit reconstruction and tensor");
     return result;

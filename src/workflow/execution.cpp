@@ -377,6 +377,10 @@ int runConfigured(int argc, char **argv, const std::string &operation, const std
     }
     if (configuration.empty()) throw std::runtime_error("--run-config requires a file");
     auto run = prepareRun(configuration, layout, operation, domain);
+    const auto admissionFinished=std::chrono::steady_clock::now();
+    run.receipt.object["admission_microseconds"]=integer(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(admissionFinished-started).count()));
+    for(const auto *phase:{"setup_microseconds","dispatch_microseconds","verification_microseconds","persistence_microseconds"})
+        run.receipt.object[phase]=integer(0);
     if (!validateOnly && !execute) throw std::runtime_error("this executable only supports configuration validation");
     uint32_t size = 0;
     _NSGetExecutablePath(nullptr, &size);
@@ -393,10 +397,20 @@ int runConfigured(int argc, char **argv, const std::string &operation, const std
     run.receipt.object["library_mode"] = Json("host-only");
 #endif
     if(!validateOnly) {
-        try {execute(run);}
+        const auto executionStarted=std::chrono::steady_clock::now();
+        auto finishExecutionTiming=[&] {
+            const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-executionStarted).count());
+            uint64_t measured=0;
+            for(const auto *phase:{"dispatch_microseconds","verification_microseconds","persistence_microseconds"})
+                measured+=uint64_t(run.receipt.at(phase).num());
+            run.receipt.object.at("setup_microseconds")=integer(elapsed>measured?elapsed-measured:0);
+        };
+        try {execute(run);finishExecutionTiming();}
         catch(const std::exception &error) {
+            finishExecutionTiming();
             run.receipt.object["status"]=Json("failed");run.receipt.object["error"]=Json(error.what());
-            publishNew(run.config.output,dump(run.receipt)+"\n");throw;
+            publishNew(run.config.output,dump(run.receipt)+"\n");
+            throw;
         }
     }
     run.receipt.object["through_final_journal_commit_microseconds"]=integer(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count()));

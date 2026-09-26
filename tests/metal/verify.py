@@ -50,10 +50,12 @@ def verify(data, reference=None):
     circuit = "u_fresh" in data
     matrices = []
     operations = 0
+    operations_by_stage = {}
     for p, key in enumerate("uvw"):
         if circuit:
             forms, count = reconstruct(data[key], data[key + "_fresh"], lengths[p] if p < 2 else m, modulo)
             operations += count
+            operations_by_stage[key] = count
             require(len(forms) == (m if p < 2 else lengths[p]), "incorrect circuit output count")
             matrix = forms if p < 2 else [list(row) for row in zip(*forms)]
         else:
@@ -85,7 +87,10 @@ def verify(data, reference=None):
         require(integer(data["complexity"]["naive"]) == naive, "incorrect naive operation count")
     elif "complexity" in data:
         require(integer(data["complexity"]) == naive, "incorrect complexity")
-    return {"domain": "F2" if modulo else "ZT", "rank": m, "equations": a*b*b*c*c*a, "additions": operations if circuit else naive}
+    result = {"domain": "F2" if modulo else "ZT", "rank": m, "equations": a*b*b*c*c*a, "additions": operations if circuit else naive}
+    if circuit:
+        result["additions_by_stage"] = operations_by_stage
+    return result
 
 
 def main():

@@ -1,0 +1,46 @@
+{
+  "schema": "fgm-panel-provenance-v1",
+  "factors": [
+    {
+      "id": "original",
+      "source_sha256": "66f775c64774d766a03922fa121aa37fcf2e331afdca015169c126670a166597",
+      "lineage": "Prior Metal rank26 seed19 export",
+      "source_metadata": {}
+    },
+    {
+      "id": "laderman",
+      "source_sha256": "419556a5662374f402f00b43846a256042f7a8e1f173d18c572f263a35ba934c",
+      "lineage": "Laderman-333-23-98",
+      "source_metadata": {
+        "repository": "dronperminov/FastMatrixMultiplication",
+        "source_commit": "98ba522db92b74f1f8c561a78038ff3091356d73"
+      }
+    },
+    {
+      "id": "smirnov",
+      "source_sha256": "4f1ebaede232215f1824ff7b38a66a1b108e1b1a0f4934e6605bb4dd499fd96d",
+      "lineage": "Smirnov-333-23-139",
+      "source_metadata": {
+        "repository": "dronperminov/FastMatrixMultiplication",
+        "source_commit": "98ba522db92b74f1f8c561a78038ff3091356d73"
+      }
+    },
+    {
+      "id": "sun",
+      "source_sha256": "87fdcee988eb790c31d53a3a1a87c01da4dfe661f8ddf72e1de554d7c50417fa",
+      "lineage": "sun2026_56-v1",
+      "source_metadata": {
+        "source_commit": "2917e6dedb624340a7a75fbb0214627ed545ea84"
+      }
+    },
+    {
+      "id": "cn122",
+      "source_sha256": "7a74b1bd57cf844aa22f005017a0ce75fd66cbc66340fab13281c8deca3ea738",
+      "lineage": "karunaratne_idamekorala2026_55-v1",
+      "source_metadata": {
+        "source_commit": "34949f9ce50a89a5ad6b47a17f5834ad5a87a2fb"
+      }
+    }
+  ],
+  "conversion": "CN122 uses cyclic-W raw output; Sun row-major outputs permuted to cyclic-W; term order and signs preserved"
+}

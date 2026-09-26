@@ -27,6 +27,7 @@ def admission(scheme, origin='import'):
 def transaction(scheme):
     rank = dict(rank=1, members=[member(scheme)])
     return dict(schema='fgm-search-transaction-v1', kind='run_start', stage=1,
+                run_id='test-run', batch=0,
                 workflow=dict(mode='alternatives', domain='ZT', dimensions=[1, 1, 1], collection_rank=1),
                 admissions=[admission(scheme)],
                 pools=dict(schema='active-rank-pool-v1', active=[rank], reserves=[copy.deepcopy(rank)]))
@@ -160,3 +161,203 @@ class JournalCorpusTests(unittest.TestCase):
                                    factors_id='fgm-factors-v1:' + '0'*64)]
         self.fixture([tx])
         self.preflight(expected=1)
+
+    def test_observations_keep_aliases_duplicates_and_order(self):
+        first = transaction(self.scheme)
+        alias = copy.deepcopy(self.scheme)
+        alias['u'] = [[-1]]
+        alias['w'] = [[-1]]
+        self.assertEqual(oracle.identity(alias), oracle.identity(self.scheme))
+        def capture(scheme, slot):
+            return dict(scheme=scheme, scheme_id=oracle.identity(scheme),
+                        factors_id=oracle.identity(scheme, False), parent_id=oracle.identity(self.scheme),
+                        worker=0, slot=slot, mandatory=slot == 0, control=7 + slot,
+                        operation=slot)
+        second = copy.deepcopy(first)
+        second['kind'] = 'batch'
+        second['batch'] = 1
+        second['admissions'] = []
+        second['observations'] = [capture(self.scheme, 0), capture(alias, 1), capture(self.scheme, 2)]
+        self.fixture([first, second])
+        rows = self.corpus('--observations', command='analyze')
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([row['slot'] for row in rows], [0, 1, 2])
+        self.assertEqual([row['factors_id'] for row in rows],
+                         [oracle.identity(self.scheme, False), oracle.identity(alias, False),
+                          oracle.identity(self.scheme, False)])
+        for row in rows:
+            self.assertEqual(row['schema'], 'fgm-journal-observation-v1')
+            self.assertEqual(row['run_id'], 'test-run')
+            self.assertEqual(row['sequence'], 2)
+            self.assertEqual(row['batch'], 1)
+            self.assertEqual(row['rank'], 1)
+            self.assertEqual(row['domain'], 'ZT')
+            self.assertEqual(row['scheme']['schema'], 'fgm-scheme-v1')
+            self.assertEqual(len(row['transaction_sha256']), 64)
+        default = self.corpus(command='analyze')
+        self.assertEqual(len(default), 1)
+        self.assertEqual(default[0]['scheme_id'], oracle.identity(self.scheme))
+        self.corpus('--observations', '--summary', command='analyze', expected=1)
+        self.corpus('--observations', command='verify', expected=1)
+        self.corpus('--observations', command='export', output_format='jsonl', expected=1)
+        self.corpus('--observations', '--record-bytes', '128', command='analyze', expected=2)
+        self.corpus('--observations', '--scan-bytes', str((self.history/'journal.bin').stat().st_size), command='analyze', expected=2)
+
+    def test_observation_export_rejects_invalid_binding_and_empty_is_valid(self):
+        tx = transaction(self.scheme)
+        self.fixture([tx])
+        self.assertEqual(self.corpus('--observations', command='analyze'), [])
+        bad = copy.deepcopy(tx)
+        bad['observations'] = [dict(scheme=self.scheme, scheme_id=oracle.identity(self.scheme),
+                                    factors_id='fgm-factors-v1:' + '0'*64, parent_id='parent',
+                                    worker=0, slot=0, mandatory=True, control=0, operation=0)]
+        self.history = self.root / 'bad-history'
+        self.fixture([bad])
+        self.corpus('--observations', command='analyze', expected=1)
+
+    def test_observation_export_rejects_tensor_domain_and_dimensions(self):
+        variants = []
+        tensor = copy.deepcopy(self.scheme)
+        tensor['w'] = [[0]]
+        variants.append(tensor)
+        variants.append(oracle.schoolbook((1, 1, 1), 'F2'))
+        variants.append(oracle.schoolbook((2, 1, 1)))
+        for number, scheme in enumerate(variants):
+            with self.subTest(number=number):
+                self.history = self.root / f'bad-{number}'
+                tx = transaction(self.scheme)
+                tx['observations'] = [dict(scheme=scheme, scheme_id=oracle.identity(scheme),
+                                           factors_id=oracle.identity(scheme, False), parent_id='parent',
+                                           worker=0, slot=0, mandatory=True, control=0, operation=0)]
+                self.fixture([tx])
+                self.corpus('--observations', command='analyze', expected=1)
+
+    def test_complete_unacknowledged_capture_is_not_exported(self):
+        first = transaction(self.scheme)
+        self.fixture([first])
+        acknowledged_head = (self.history/'committed-head.json').read_bytes()
+        self.history = self.root/'longer-history'
+        tail = copy.deepcopy(first)
+        tail['kind'] = 'batch'
+        tail['batch'] = 1
+        tail['admissions'] = []
+        tail['observations'] = [dict(scheme=self.scheme, scheme_id=oracle.identity(self.scheme),
+                                     factors_id='fgm-factors-v1:'+'0'*64, parent_id='parent',
+                                     worker=0, slot=0, mandatory=True, control=0, operation=0)]
+        self.fixture([first, tail])
+        (self.history/'committed-head.json').write_bytes(acknowledged_head)
+        self.assertEqual(self.corpus('--observations', command='analyze'), [])
+
+    def execute_receipt(self, *, resume=False, empty=False, failure=''):
+        self.serial += 1
+        output = self.root / f'run-{self.serial}.json'
+        policy = dict(settings(), seed=7, collection_rank=26, interval_min=100,
+                      interval_max=100, stagnation_limit=100, flip_budget=6,
+                      control_budget=100, optional_quota=8)
+        if empty:
+            policy.update(dimensions=[1, 1, 1], collection_rank=1, target_rank=1)
+            source = self.root / 'scalar.json'
+            source.write_text(json.dumps(self.scheme))
+            inputs = dict(kind='files', files=[dict(path=str(source), format='json', domain='ZT')])
+        else:
+            inputs = dict(kind='files', files=[dict(path=str(ROOT / 'tests/metal/fixtures/strassen_3x3.txt'),
+                                                   format='cpu-text', domain='ZT')])
+        if resume:
+            inputs = dict(kind='resume', journal=str(self.history))
+        config = dict(schema='fgm-run-v1', operation='search', policy=policy, input=inputs,
+                      execution=dict(workers=1, batch_steps=3, block_size=32, backend='general', memory_bytes=256*1024*1024),
+                      history=dict(path=str(self.history), storage_bytes=64*1024*1024,
+                                   transaction_bytes=1024*1024, index_memory_bytes=1024*1024),
+                      output=str(output))
+        path = self.root / f'config-{self.serial}.json'
+        path.write_text(json.dumps(config))
+        result = subprocess.run([str(EXECUTION), '--run-config', str(path)],
+                                capture_output=True, text=True, timeout=30,
+                                env={**os.environ, 'PATH': '', 'FGM_TEST_SEARCH_FAILURE': failure})
+        if failure:
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return output, json.loads(output.read_text())
+
+    def test_receipt_prefix_survives_later_resumed_history(self):
+        path, receipt = self.execute_receipt()
+        before = self.corpus('--observations', '--receipt', str(path), command='analyze')
+        self.assertTrue(before)
+        self.assertGreater(receipt['committed_counters']['discoveries_current_run'], 0)
+        later_path, later_receipt = self.execute_receipt(resume=True)
+        self.assertGreater(later_receipt['journal_sequence'], receipt['journal_sequence'])
+        self.assertEqual(self.corpus('--observations', '--receipt', str(path), command='analyze'), before)
+        all_rows = self.corpus('--observations', command='analyze')
+        self.assertGreater(len(all_rows), len(before))
+        self.assertEqual(self.corpus('--observations', '--receipt', str(later_path), command='analyze'), all_rows)
+        self.assertEqual({row['run_id'] for row in all_rows}, {receipt['run_id'], later_receipt['run_id']})
+
+    def test_receipt_rejects_wrong_identity_configuration_and_counters(self):
+        path, receipt = self.execute_receipt()
+        variants = []
+        for field, value in [('run_id', '0'*64), ('journal_head_sha256', '0'*64),
+                             ('journal_sequence', receipt['journal_sequence'] + 1),
+                             ('configuration_sha256', '0'*64)]:
+            changed = copy.deepcopy(receipt)
+            changed[field] = value
+            variants.append(changed)
+        changed = copy.deepcopy(receipt)
+        changed['configuration']['policy']['seed'] += 1
+        variants.append(changed)
+        changed = copy.deepcopy(receipt)
+        changed['configuration']['input']['kind'] = 'resume'
+        variants.append(changed)
+        changed = copy.deepcopy(receipt)
+        changed['terminal_reason'] = 'invented'
+        variants.append(changed)
+        last_capture = self.corpus('--observations', command='analyze')[-1]
+        changed = copy.deepcopy(receipt)
+        changed.update(journal_sequence=last_capture['sequence'], journal_head_sha256=last_capture['transaction_sha256'])
+        variants.append(changed)
+        for field in ('mandatory_captures', 'optional_captures', 'discoveries_current_run', 'discoveries_historical'):
+            changed = copy.deepcopy(receipt)
+            changed['committed_counters'][field] += 1
+            changed['counters'][field] += 1
+            variants.append(changed)
+        changed = copy.deepcopy(receipt)
+        changed['counters']['flip_attempts'] += 1
+        variants.append(changed)
+        for number, changed in enumerate(variants):
+            with self.subTest(number=number):
+                path.write_text(json.dumps(changed))
+                self.corpus('--observations', '--receipt', str(path), command='analyze', expected=1)
+        path.write_text(json.dumps(receipt))
+        self.corpus('--receipt', str(path), command='analyze', expected=1)
+        self.corpus('--receipt', str(path), expected=1)
+        self.corpus('--observations', '--receipt', str(path), '--record-bytes', '128', command='analyze', expected=2)
+
+    def test_receipt_empty_run_end_and_failed_acknowledged_prefix(self):
+        path, receipt = self.execute_receipt(empty=True)
+        self.assertEqual(receipt['journal_sequence'], 2)
+        self.assertEqual(self.corpus('--observations', '--receipt', str(path), command='analyze'), [])
+        receipt['committed_counters']['discoveries_historical'] = 1
+        receipt['counters']['discoveries_historical'] = 1
+        path.write_text(json.dumps(receipt))
+        self.corpus('--observations', '--receipt', str(path), command='analyze', expected=1)
+        self.history = self.root / 'start-only-history'
+        start_path, start_receipt = self.execute_receipt(empty=True, failure='end')
+        self.assertEqual(start_receipt['journal_sequence'], 1)
+        self.assertEqual(self.corpus('--observations', '--receipt', str(start_path), command='analyze'), [])
+        self.history = self.root / 'failed-history'
+        path, receipt = self.execute_receipt(failure='end')
+        self.assertEqual(receipt['status'], 'failed')
+        self.assertTrue(self.corpus('--observations', '--receipt', str(path), command='analyze'))
+
+    def test_receipt_missing_or_unacknowledged_target(self):
+        path, receipt = self.execute_receipt()
+        prefix = (self.history / 'journal.bin').read_bytes()
+        head = (self.history / 'committed-head.json').read_bytes()
+        later_path, _ = self.execute_receipt(resume=True)
+        (self.history / 'committed-head.json').write_bytes(head)
+        self.corpus('--observations', '--receipt', str(later_path), command='analyze', expected=1)
+        self.assertTrue(self.corpus('--observations', '--receipt', str(path), command='analyze'))
+        (self.history / 'journal.bin').write_bytes(prefix)
+        self.corpus('--observations', '--receipt', str(later_path), command='analyze', expected=1)
+        (self.history / 'committed-head.json').unlink()
+        self.corpus('--observations', '--receipt', str(path), command='analyze', expected=1)

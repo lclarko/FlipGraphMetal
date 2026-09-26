@@ -1,0 +1,111 @@
+{
+  "schema": "fgm-effectiveness-panel-v1",
+  "entries": [
+    {
+      "id": "original",
+      "path": "factors/original.json",
+      "sha256": "66f775c64774d766a03922fa121aa37fcf2e331afdca015169c126670a166597",
+      "format": "json",
+      "domain": "ZT",
+      "references": []
+    },
+    {
+      "id": "laderman",
+      "path": "factors/laderman.json",
+      "sha256": "419556a5662374f402f00b43846a256042f7a8e1f173d18c572f263a35ba934c",
+      "format": "json",
+      "domain": "ZT",
+      "references": []
+    },
+    {
+      "id": "smirnov",
+      "path": "factors/smirnov.json",
+      "sha256": "4f1ebaede232215f1824ff7b38a66a1b108e1b1a0f4934e6605bb4dd499fd96d",
+      "format": "json",
+      "domain": "ZT",
+      "references": []
+    },
+    {
+      "id": "sun",
+      "path": "factors/sun.json",
+      "sha256": "87fdcee988eb790c31d53a3a1a87c01da4dfe661f8ddf72e1de554d7c50417fa",
+      "format": "json",
+      "domain": "ZT",
+      "references": [
+        {
+          "id": "sun-56",
+          "path": "circuits/sun-56.json",
+          "sha256": "f66ca380007b9aac445ce8dbf9546841a4de6466a5e518459fcad6124beb5d35",
+          "source": "sources/sun-56.py",
+          "source_sha256": "3b7fb40aae051fcc2236dd151ad60f802fb68244df296686667d9a313fb18033",
+          "repository": "https://github.com/sunyinqi0508/3by3r23-56a",
+          "commit": "2917e6dedb624340a7a75fbb0214627ed545ea84",
+          "claimed_additions": 56,
+          "claimed_additions_by_stage": {
+            "u": 13,
+            "v": 13,
+            "w": 30
+          }
+        }
+      ]
+    },
+    {
+      "id": "cn122",
+      "path": "factors/cn122.json",
+      "sha256": "7a74b1bd57cf844aa22f005017a0ce75fd66cbc66340fab13281c8deca3ea738",
+      "format": "json",
+      "domain": "ZT",
+      "references": [
+        {
+          "id": "cn122-55",
+          "path": "circuits/cn122-55.json",
+          "sha256": "906cce3d0800f20da7bfa235cf9b3aa13f626e3a015668f6fbf5874ec8b663bf",
+          "source": "sources/cn122-55.json",
+          "source_sha256": "91c36b1165a71d4ba78cd8eb9c51ef9666d05e9162fdef5cba28d1d697a17dff",
+          "repository": "https://github.com/trylogical/cn122_add55",
+          "commit": "34949f9ce50a89a5ad6b47a17f5834ad5a87a2fb",
+          "claimed_additions": 55,
+          "claimed_additions_by_stage": {
+            "u": 13,
+            "v": 14,
+            "w": 28
+          }
+        },
+        {
+          "id": "cn122-58",
+          "path": "circuits/cn122-58.json",
+          "sha256": "d99d0b2facbc00248aefe85115ea4ddc5b0e831470d5eb9c3ce69063c6bfc24c",
+          "source": "sources/cn122-58.json",
+          "source_sha256": "80bb4187ddf0cfc04654ca3e524f4d311c5a62245ee231a1101280b43fd2ae3a",
+          "repository": "https://github.com/dronperminov/FastMatrixMultiplication",
+          "commit": "98ba522db92b74f1f8c561a78038ff3091356d73",
+          "claimed_additions": 58,
+          "claimed_additions_by_stage": {
+            "u": 14,
+            "v": 15,
+            "w": 29
+          }
+        }
+      ]
+    }
+  ],
+  "protocol": "protocol.json",
+  "artifacts": {
+    "circuits/cn122-55.json": "906cce3d0800f20da7bfa235cf9b3aa13f626e3a015668f6fbf5874ec8b663bf",
+    "circuits/cn122-58.json": "d99d0b2facbc00248aefe85115ea4ddc5b0e831470d5eb9c3ce69063c6bfc24c",
+    "circuits/sun-56.json": "f66ca380007b9aac445ce8dbf9546841a4de6466a5e518459fcad6124beb5d35",
+    "factors/cn122.json": "7a74b1bd57cf844aa22f005017a0ce75fd66cbc66340fab13281c8deca3ea738",
+    "factors/laderman.json": "419556a5662374f402f00b43846a256042f7a8e1f173d18c572f263a35ba934c",
+    "factors/original.json": "66f775c64774d766a03922fa121aa37fcf2e331afdca015169c126670a166597",
+    "factors/smirnov.json": "4f1ebaede232215f1824ff7b38a66a1b108e1b1a0f4934e6605bb4dd499fd96d",
+    "factors/sun.json": "87fdcee988eb790c31d53a3a1a87c01da4dfe661f8ddf72e1de554d7c50417fa",
+    "protocol.json": "dfbd0cbe4e80471e6e78f7d7ba6e5b8dea0fe5b6b71f715f5028cf64527c213c",
+    "provenance.json": "e012d4a986ba4399540c46f6d0962c6fd057bf3c45507f50e347745e5c62a74c",
+    "sources/LICENSE-cn122.txt": "fbc8a49d050ae3893c179841f0f2de74923b15e16b195fdc087f41eca657668b",
+    "sources/LICENSE-perminov.txt": "6fb12f5da62f0da3a305708e94993e9aaa4209a191498ca677fc14e97017ed51",
+    "sources/LICENSE-sun.txt": "a17406bff7ec371920faed399efe749d09a7651de1f7635ae5cf83c9ac67b630",
+    "sources/cn122-55.json": "91c36b1165a71d4ba78cd8eb9c51ef9666d05e9162fdef5cba28d1d697a17dff",
+    "sources/cn122-58.json": "80bb4187ddf0cfc04654ca3e524f4d311c5a62245ee231a1101280b43fd2ae3a",
+    "sources/sun-56.py": "3b7fb40aae051fcc2236dd151ad60f802fb68244df296686667d9a313fb18033"
+  }
+}
