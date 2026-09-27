@@ -320,10 +320,6 @@ class NativeHostMeasurementTests(unittest.TestCase):
                 b.verify_host_record(dict(row,**{key:value}),scheme)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class FGM2DeadlineTests(unittest.TestCase):
     def test_supplied_public_witnesses_bind_raw_factors_without_synthesis(self):
         private=b.ROOT/'benchmarks/workflow/fixtures/fgm1/factors/original.json'
@@ -556,3 +552,7 @@ class FGM2DeadlineTests(unittest.TestCase):
             popen.assert_not_called()
             self.assertFalse(result['complete'])
             self.assertIn('time limit before launch',result['error'])
+
+
+if __name__ == '__main__':
+    unittest.main()
