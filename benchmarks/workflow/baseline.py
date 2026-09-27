@@ -883,7 +883,10 @@ def native_verify_circuits(path, receipt, record_limit=1048576):
 
 
 def native_dispatch_evidence(log, receipt):
-    required=receipt['counters'].get('flip_attempts',0)>0 or bool(receipt.get('results'))
+    config=receipt['configuration']
+    additive=config.get('workflow')=='additive-search'
+    evaluated=additive and receipt.get('evaluated_current_run',0)>0
+    required=receipt['counters'].get('flip_attempts',0)>0 or bool(receipt.get('results')) or evaluated
     if not re.search(r'^Metal dispatch ',log,re.M):
         if required: raise ValueError('completed native work lacks GPU dispatch evidence')
         return {'status':'GPU_NOT_RUN','gpu_all_seconds':0.,'dispatches':[]}
@@ -892,13 +895,15 @@ def native_dispatch_evidence(log, receipt):
     if len(libraries)!=1 or libraries[0][1]!=receipt.get('library_sha256'):
         raise ValueError('GPU library identity differs from native receipt')
     names={entry[0] for entry in evidence['dispatches']}
-    config=receipt['configuration']
     if config['operation']=='search':
         expected='controlledGeneralKernel'
         if receipt['actual_backend']=='packed':
             expected=('controlledPackedReductionKernel' if config['policy']['mode']=='rank-reduction'
                       else 'controlledPackedAlternativesKernel')
-        if expected not in names: raise ValueError('missing expected controlled kernel')
+        if (not additive or receipt['counters'].get('flip_attempts',0)>0) and expected not in names:
+            raise ValueError('missing expected controlled kernel')
+        if evaluated and not {'initializeReducersKernel','runReducersKernel'}<=names:
+            raise ValueError('missing additive evaluation kernels')
     else:
         if 'initializeReducersKernel' not in names: raise ValueError('missing reducer initialization')
         if any(result['rounds_completed'] for result in receipt['results']):

@@ -372,7 +372,7 @@ committed circuits are partial correctness evidence, with no endpoint or
 comparison credit. The source/build snapshot, journal, guard log and partial
 verification are retained under `build/fgm3/gpu-smoke/`.
 
-The final host suite passed 255 tests with no failures or skips; the independent
+The final host suite passed 256 tests with no failures or skips; the independent
 verifier's four focused tests also passed. Native programs and the package built,
 and relocated host commands plus additive preflight passed with Python absent
 from PATH. Host tests cover score binding, population selection, resume,
