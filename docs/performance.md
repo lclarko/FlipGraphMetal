@@ -449,6 +449,49 @@ report contains snapshots labelled 60/90 seconds despite stopping earlier;
 The harness now reports only elapsed endpoints and can pass an explicit scan
 budget consistently to native execution and both read-only exports.
 
+A fresh comparison with a 1-GiB cumulative-read budget and the same 4-GiB
+memory guard is retained under `build/fgm3/comparison-03/`. Preparation and
+qualification took 88.242 seconds; the measured schedule took 540.120 seconds.
+Five arms completed. Seed 19's cost-diverse arm remained unrun because the
+prelaunch headroom requirement was not met within its admission window.
+The matrix is incomplete and selection benefit remains inconclusive.
+
+| Seed | Selector | Verified evaluations | New alternatives | Best new cost | New-parent installations |
+|---:|---|---:|---:|---:|---:|
+| 7 | Uniform | 20 | 4 | 64 | 0 |
+| 7 | Cost-diverse | 38 | 22 | 60 | 2 |
+| 19 | Cost-diverse | 0, unrun | 0 | unavailable | 0 |
+| 19 | Uniform | 46 | 30 | 57 | 4 |
+| 41 | Uniform | 41 | 25 | 57 | 3 |
+| 41 | Cost-diverse | 35 | 19 | 62 | 1 |
+
+All 180 measured evaluations passed native and independent verification. Each
+completed arm retained a starting-parent cost of 55 at all three endpoints;
+none reached 54. Counts include 16 freshly evaluated starting parents per
+completed arm. New alternatives are distinct within each arm, not necessarily
+across arms: the 100 new evaluations represent 99 canonical identities. The
+two new 57-addition circuits have U/V/W counts of 14/15/28 and 13/13/31.
+All ten new-parent installations occurred when initializing new
+walkers on resume; none occurred at an in-invocation restart.
+
+All 48 supervised children, including qualification, completed without a
+read-budget failure, forced termination or cleanup failure. Peak sampled wired
+memory was 3,456,958,464 bytes (3.220 GiB). Measured arms spent 124.003 seconds
+in native execution, including 93.383 seconds of GPU dispatch, plus 26.747
+seconds in exports and 55.942 seconds waiting for headroom. Native and GPU
+times overlap. Maximum native input reads were 125,824,280 bytes, below the
+previous 256-MiB cap; export read consumption is not reported. These shorter
+histories do not establish longer-run replay scalability. The inputs, receipts,
+circuits and read-only audit are sealed with the comparison bundle.
+
+Qualification's slowest chunk included a 30.45-second headroom wait, so the
+unchanged allowance rule reserved 59 seconds for each new chunk. That left
+about 31 seconds of each arm in which to admit work. Seed 7 uniform's second
+attempt exhausted that admission window while waiting; seed 19 cost-diverse
+never launched. Other arms completed two or three chunks. Unequal headroom
+waits and the conservative allowance limit what the observed differences can
+say about parent selection. The experiment was not repeated.
+
 The last full host suite passed 260 tests with no failures or skips; the independent
 verifier's four focused tests also passed. The scan-budget and endpoint changes
 passed 16 additive-workflow tests and 41 execution/supervision tests.
