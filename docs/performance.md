@@ -400,11 +400,39 @@ by uniform selection at resume initialization. This is evidence of parent
 reuse, not cost-diverse feedback or a selection benefit. These partial results
 receive no measured endpoint credit, and the original history was unchanged.
 
-The final host suite passed 257 tests with no failures or skips; the independent
+With an explicitly authorized 4-GiB guard, full qualification passed at two
+workers in 53.863 seconds, including preparation. The prelaunch wired-memory
+ceiling remained 1,946,157,056 bytes; the 45-second child timeout and fixed
+128-reducer/16-round quantum were unchanged. Both selectors completed
+initialization and resume with 16 starting parents and four 32-step batches
+per invocation.
+
+| Selector | Chunk | Verified evaluations added | Complete elapsed seconds |
+|---|---|---:|---:|
+| Uniform | Initialization | 20 | 15.799 |
+| Uniform | Resume | 10 | 11.829 |
+| Cost-diverse | Initialization | 23 | 15.278 |
+| Cost-diverse | Resume | 5 | 9.682 |
+
+All 58 evaluations across the two fresh histories passed native and independent
+verification, representing 41 canonical identities across both. Best cost
+remained 55; none reached 54. Peak sampled wired memory was 3,370,205,184 bytes
+(3.139 GiB). The slower chunk gives a 22-second admission allowance under the
+existing rule. No fallback was needed. One newly discovered parent was installed
+by uniform selection at resume; cost-diverse selected starting parents only.
+Qualification does not establish a selection benefit. No measured comparison
+was launched. The sealed inputs, settings, commands, guard records and circuits
+are retained under `build/fgm3/qualification-4g-01/`; earlier attempts are unchanged.
+
+The supervisor's optional `wired_limit_bytes` argument records and enforces the
+per-call allowance. Its default, other workflows and the checked-in comparison
+protocol retain 3 GiB. The 4-GiB qualification has its own frozen resource policy.
+
+The final host suite passed 260 tests with no failures or skips; the independent
 verifier's four focused tests also passed. Native programs and the package built,
 and relocated host commands plus additive preflight passed with Python absent
 from PATH. Host tests cover score binding, population selection, resume,
-transaction failures and malformed histories. Full GPU qualification at the
-frozen comparison settings and matched-time selection benefit remain
-**unverified**. The small packaged checks and the retrospective reconstruction
+transaction failures and malformed histories. Full GPU qualification passed
+under the recorded 4-GiB policy; matched-time selection benefit remains
+**unmeasured**. These qualification checks and the retrospective reconstruction
 pass do not establish a uniform versus cost-diverse selection result.

@@ -375,7 +375,10 @@ Arm summaries preserve earlier independently verified endpoint results when a
 later chunk fails.
 
 Small packaged initialization and resume checks passed for both selectors.
-The full-population qualification completed initialization, then its resume hit
-the wired-memory guard; no measured comparison arm started.
-Retained-candidate results and the qualification gap are reported
+After a full-population resume hit the 3-GiB guard, a separately authorized
+qualification passed with a 4-GiB per-call limit and the original prelaunch
+ceiling. `guard.run(..., wired_limit_bytes=...)` supports that explicit override;
+the default and checked-in comparison protocol remain at 3 GiB. The frozen
+qualification is retained under `build/fgm3/qualification-4g-01/`. No measured
+comparison arm has started. Retained-candidate and qualification results are reported
 in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).
