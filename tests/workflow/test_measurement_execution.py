@@ -714,6 +714,59 @@ class FGM2DeadlineTests(unittest.TestCase):
             self.assertFalse(result['complete'])
             self.assertIn('time limit before launch',result['error'])
 
+    def test_guard_default_limit_and_positive_byte_validation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for index,value in enumerate((0,-1,True,1.5,'4 GiB',None)):
+                with self.subTest(value=value),self.assertRaisesRegex(ValueError,'positive integer'):
+                    metal_guard.run(['synthetic'],root/str(index),wired_limit_bytes=value)
+                self.assertFalse((root/str(index)).exists())
+            with mock.patch.object(metal_guard,'wired_memory',return_value=metal_guard.LIMIT+1), \
+                 mock.patch.object(metal_guard.subprocess,'Popen') as popen:
+                result=metal_guard.run(['synthetic'],root/'default')
+            popen.assert_not_called()
+            self.assertEqual(result['wired_limit'],3*1024**3)
+            self.assertEqual(result['error'],'wired memory exceeded 3 GiB before launch')
+            self.assertFalse(result['forced_termination'])
+
+    def test_guard_four_gib_allows_samples_below_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            process=mock.Mock()
+            process.poll.side_effect=(None,0,0)
+            process.returncode=0
+            limit=4*1024**3
+            with mock.patch.object(metal_guard,'wired_memory',side_effect=(3*1024**3+1,limit-1)), \
+                 mock.patch.object(metal_guard.subprocess,'Popen',return_value=process), \
+                 mock.patch.object(metal_guard,'terminate') as terminate:
+                result=metal_guard.run(['synthetic'],Path(temporary)/'guard',wired_limit_bytes=limit)
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['wired_limit'],limit)
+            self.assertEqual([row['wired_bytes'] for row in result['memory']],[3*1024**3+1,limit-1])
+            self.assertEqual(result['time_limit'],45)
+            self.assertFalse(result['forced_termination'])
+            terminate.assert_called_once_with(process)
+
+    def test_guard_four_gib_terminates_on_runtime_excess(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            process=mock.Mock()
+            process.poll.side_effect=(None,None)
+            process.returncode=None
+            limit=4*1024**3
+            def terminated(child):
+                self.assertIs(child,process)
+                child.returncode=-15
+            with mock.patch.object(metal_guard,'wired_memory',side_effect=(limit-1,limit+1)), \
+                 mock.patch.object(metal_guard.subprocess,'Popen',return_value=process), \
+                 mock.patch.object(metal_guard,'terminate',side_effect=terminated) as terminate:
+                result=metal_guard.run(['synthetic'],Path(temporary)/'guard',wired_limit_bytes=limit)
+            self.assertFalse(result['complete'])
+            self.assertEqual(result['wired_limit'],limit)
+            self.assertEqual(result['error'],'wired memory exceeded 4 GiB')
+            self.assertTrue(result['forced_termination'])
+            self.assertFalse(result['cleanup_failure'])
+            self.assertEqual(result['exit_code'],-15)
+            terminate.assert_called_once_with(process)
+
 
 if __name__ == '__main__':
     unittest.main()
