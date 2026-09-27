@@ -263,24 +263,48 @@ order rotates deterministically. The comparison measures fixed work plus
 extensions, not matched-time algorithm effectiveness.
 
 Each trial includes configuration, input checks, resource waiting, supervision,
-publication, and independent verification. The entire native invocation has an
-absolute eight-second deadline. The existing Python verifier runs only when at
-least two seconds remain before the ten-second result deadline, with a reference
-derived independently from retained input factors. Successful cleanup and final
-byte/count/binding checks must finish by that deadline. Early completion earns
-no extra work. An overrun yields no timely verified result, not a claim that no
-circuit exists; the internal baseline is not published early or borrowed from
-another trial.
+publication, and independent verification. Preparation and headroom waiting
+consume the overall budget. After those finish, the entire native invocation
+receives a 45-second supervision allowance. The independent Python verifier
+receives a separate 45-second allowance, with its reference derived independently
+from retained input factors. Neither allowance resets within a child process.
+Early completion advances the schedule and earns no extra reduction work.
 
-The overall envelope is 900 seconds with a 50-second cleanup reserve. Trial
-admission requires 60 seconds remaining. The nominal 720 seconds of result
-windows leave 130 seconds for other overhead and termination overruns. The
-45-second emergency supervisor ceiling remains the default for other callers.
+The overall envelope remains 900 seconds with a 50-second finalization reserve.
+Before launching native work, at least 150 seconds must remain: 45 for native
+execution, 45 for verification, five for bookkeeping before and after
+verification, and 50 for finalization. Verifier admission requires 100 seconds:
+45 for its execution, five for final binding and bookkeeping, and 50 for
+finalization. These are conservative admission reserves, not mandatory waits.
+Headroom waiting stops when native admission is no longer possible, and the
+harness rechecks the budget immediately before each supervised call.
+
+The 3-GiB wired-memory cutoff and existing launch-headroom reserve are unchanged.
 A forced GPU-child termination or failed cleanup stops further GPU trials;
-killing a process does not prove cancellation of submitted Metal work. Unrun,
-failed, awaiting-verification, and late results remain visible. All 72 timely
-verified results and finalization within the envelope are required for a
-complete comparison. The harness does not retry or launch a second campaign.
+killing a process does not prove cancellation of submitted Metal work. Resource
+or budget exhaustion before launch leaves the trial unrun. A published circuit
+without completed independent verification remains awaiting verification.
+Late results remain evidence but receive no completed-result credit. An overrun
+does not establish that no circuit exists, and the internal baseline is not
+published early or borrowed from another trial.
+
+Reports distinguish preparation, headroom waiting, supervised execution,
+independent verification, binding checks, persistence, and finalization. Existing
+GPU and native phase timings describe work inside the supervised invocation;
+they are not additional elapsed costs. Intermediate persistence overlaps the
+active phase. Per-trial timing ends before its final record write, which remains
+charged to overall elapsed time. All 72 independently verified results and
+finalization within 900 seconds are required for a complete comparison. The
+harness does not retry or launch a second campaign.
+
+The report and measurement use the same finalization timing snapshot, taken
+before closing summary, report, measurement, and checksum writes. The overall
+budget is checked after those writes. A closing-write overrun records the check's
+elapsed time and changes the retained result to `budget-exceeded`.
+
+The frozen protocol records its revision and hash. The original comparison's
+eight-/ten-second deadlines remain documented with its retained evidence; its
+results are not pooled with measurements using the revised admission policy.
 
 Native construction, materialization, and verification require no Python.
 Python is used for this experiment's coordination and independent checking;

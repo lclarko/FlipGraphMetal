@@ -221,7 +221,7 @@ observed input/seed group.
 
 Across these incomplete observations, median incremental extension time was
 50.9 ms for transpose, 12.5 ms for cancellation, and 79.8 ms for combined.
-Median complete trial times were 656, 698, 649, and 730 ms for baseline,
+Median recorded trial times were 656, 698, 649, and 730 ms for baseline,
 transpose, cancellation, and combined respectively. These are descriptive
 observations of fixed work plus extensions, not a matched-time comparison or
 a complete-panel performance conclusion. Peak sampled system wired memory was
@@ -260,8 +260,57 @@ operation, and native signed/F2 regressions. The host workflow suite passed
 220 tests.
 
 These results establish useful cancellation construction on Original and covered
-55 reconstruction during qualification. Full-panel comparisons, 54 additions,
-matched-time effectiveness, and longer runs remain unmeasured.
+55 reconstruction during qualification. This attempt did not establish full-panel
+results.
+
+## FGM-2 completed fixed-work comparison
+
+The next single attempt, at revision `6a0af27`, completed all **72 independently
+verified trials in 60.884 seconds**. Evidence is retained locally under
+`build/fgm2/comparison-02/`. The native executable and signed Metal library were
+byte-identical to the previously qualified build. The six inputs, seeds 7/19/41,
+strategy order, and 128-reducer, 16-round baseline work were unchanged.
+
+Every seed produced the following verified totals:
+
+| Input | Baseline | Transpose | Cancellation | Combined |
+|---|---:|---:|---:|---:|
+| Original | 69 | 69 | 67 | 66 |
+| Laderman | 62 | 62 | 62 | 62 |
+| Smirnov | 68 | 68 | 68 | 68 |
+| Sun | 58 | 58 | 57 | 57 |
+| CN122 | 58 | 58 | 56 | 55 |
+| Local private 55 | 58 | 58 | 56 | 55 |
+
+Combined construction improved four of the six inputs. CN122 reached U13/V14/W28
+and the private input reached U14/V13/W28. Original reached U19/V15/W32; Sun
+reached U13/V14/W30 and did not attain its supplied 56-addition reference.
+Transpose alone did not improve any total. The combined route improved W by
+one addition on Original, CN122, and the private input through transposed
+restricted construction.
+
+The restricted constructor exhausted its family on all three Laderman maps,
+Smirnov V/Wᵀ, and Sun V. These are results within the declared family, not general
+circuit lower bounds. All known covered calibration components were reconstructed.
+A further independent replay checked all 72 circuits against frozen input
+factors and confirmed matching baseline stage counts in all 18 input/seed groups.
+
+Headroom waiting totaled 7.478 seconds; the longest wait was 3.080 seconds.
+No process was terminated, and no trial missed verification. The maximum
+supervised native and verifier times were 1.066 and 0.201 seconds. Median
+incremental extension times were 51.8 ms for transpose, 12.1 ms for cancellation,
+and 70.2 ms for combined. Median recorded trial times were 686, 815, 683, and
+822 ms respectively for baseline, transpose, cancellation, and combined, with
+18 observations each. These are fixed-work observations, not matched-time
+effectiveness results. Peak sampled wired memory was 2,778,103,808 bytes, below
+the unchanged 3-GiB cutoff.
+
+The longest trial was 3.951 seconds, so this attempt did not encounter the long
+wait that stopped the earlier one. Host conditions differed; completion alone
+does not isolate the effect of the timing change. Injected-clock tests cover
+waits and valid work beyond the old deadlines. The two protocols remain separate
+measurements. No 54-addition circuit was found, and variation between repeated
+complete campaigns remains unmeasured. No further campaign was launched.
 
 ## Reproduction and new measurements
 
