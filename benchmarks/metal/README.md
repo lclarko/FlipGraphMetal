@@ -297,6 +297,11 @@ charged to overall elapsed time. All 72 independently verified results and
 finalization within 900 seconds are required for a complete comparison. The
 harness does not retry or launch a second campaign.
 
+The report and measurement use the same finalization timing snapshot, taken
+before closing summary, report, measurement, and checksum writes. The overall
+budget is checked after those writes. A closing-write overrun records the check's
+elapsed time and changes the retained result to `budget-exceeded`.
+
 The frozen protocol records its revision and hash. The original comparison's
 eight-/ten-second deadlines remain documented with its retained evidence; its
 results are not pooled with measurements using the revised admission policy.

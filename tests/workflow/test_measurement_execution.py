@@ -388,7 +388,8 @@ class FGM2DeadlineTests(unittest.TestCase):
                       verifier_cleanup_failure=False, verifier_timeout=False, missing_guard_evidence=False,
                       verifier_late_exit=False, headroom_seconds=0, headroom_sample_seconds=0,
                       preparation_seconds=0, final_binding_seconds=0,
-                      schedule_count=2, finalization_seconds=0, preparation_error=False):
+                      schedule_count=2, finalization_seconds=0, preparation_error=False,
+                      headroom_sample_error=None, closing_write_seconds=0):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         root=Path(temporary.name)
         binary=root/'bin';binary.mkdir()
@@ -413,11 +414,17 @@ class FGM2DeadlineTests(unittest.TestCase):
         original_report=b.fgm2_report
         sampled=[False]
         wait_remaining=[headroom_seconds]
+        closing_started=[False]
+        closing_write_recorded=[False]
         def clock():return tick[0]
         def sample(timeout):
             if not sampled[0]:
                 sampled[0]=True
                 tick[0]+=headroom_sample_seconds
+                if headroom_sample_error=='timeout':
+                    raise subprocess.TimeoutExpired(cmd='wired memory sample',timeout=timeout)
+                if headroom_sample_error=='oserror':
+                    raise OSError('wired memory sample failed')
             return 3221225472 if wait_remaining[0] else 0
         def sleep(seconds):
             tick[0]+=wait_remaining[0]
@@ -426,8 +433,13 @@ class FGM2DeadlineTests(unittest.TestCase):
             if Path(path).name=='config.json':
                 tick[0]+=preparation_seconds
                 if preparation_error:raise OSError('config persistence failed')
+            if (closing_started[0] and not closing_write_recorded[0]
+                    and Path(path).name=='measurement.json'):
+                closing_write_recorded[0]=True
+                tick[0]+=closing_write_seconds
             return original_write_json(path,value)
         def report(data,summary):
+            closing_started[0]=True
             tick[0]+=finalization_seconds
             return original_report(data,summary)
         def guarded(argv,directory,*,absolute_deadline):
@@ -581,6 +593,60 @@ class FGM2DeadlineTests(unittest.TestCase):
         data,_,_=self.synthetic_run(schedule_count=72,finalization_seconds=901)
         self.assertFalse(data['complete'])
         self.assertEqual(data['status'],'budget-exceeded')
+
+    def test_finalization_report_matches_retained_measurement(self):
+        data,_,root=self.synthetic_run(schedule_count=72,finalization_seconds=5)
+        output=root/'out'
+        retained=json.loads((output/'measurement.json').read_text())
+        summary=json.loads((output/'summary.json').read_text())
+        report=(output/'report.md').read_text()
+        self.assertEqual(data['status'],'complete')
+        self.assertTrue(data['complete'])
+        self.assertEqual(retained['finalization_seconds'],data['finalization_seconds'])
+        self.assertIn(f"finalization: {retained['finalization_seconds']:.3f} s",report)
+        self.assertEqual(retained['timing_scope'],data['timing_scope'])
+        self.assertIn(retained['timing_scope'],report)
+        self.assertEqual((summary['status'],summary['complete'],summary['verified']),
+                         ('complete',True,72))
+        self.assertIn('Status: complete; verified: 72/72.',report)
+        self.assertEqual((output/'measurement.sha256').read_text().strip(),
+                         b.digest(output/'measurement.json'))
+
+    def test_budget_overrun_during_closing_write_updates_all_outputs(self):
+        data,_,root=self.synthetic_run(schedule_count=72,closing_write_seconds=757)
+        output=root/'out'
+        retained=json.loads((output/'measurement.json').read_text())
+        summary=json.loads((output/'summary.json').read_text())
+        report=(output/'report.md').read_text()
+        self.assertEqual((data['status'],retained['status'],summary['status']),
+                         ('budget-exceeded',)*3)
+        self.assertFalse(data['complete'])
+        self.assertFalse(retained['complete'])
+        self.assertFalse(summary['complete'])
+        self.assertGreater(retained['budget_check_elapsed_seconds'],900)
+        self.assertEqual(retained['budget_check_elapsed_seconds'],
+                         data['budget_check_elapsed_seconds'])
+        self.assertIn(f"Budget check after closing writes: {retained['budget_check_elapsed_seconds']:.3f} s.",
+                      report)
+        self.assertIn('Status: budget-exceeded; verified: 72/72.',report)
+        self.assertEqual((output/'measurement.sha256').read_text().strip(),
+                         b.digest(output/'measurement.json'))
+
+    def test_headroom_sample_timeout_classifies_budget_boundary(self):
+        data,guards,_=self.synthetic_run(preparation_seconds=749.9,
+            headroom_sample_seconds=.2,headroom_sample_error='timeout',schedule_count=1)
+        self.assertEqual(guards,[])
+        self.assertEqual(data['trials'][0]['status'],'unrun')
+        self.assertIn('budget',data['trials'][0]['unrun_reason'])
+        self.assertEqual(data['stop_reason'],'global admission cutoff')
+
+    def test_headroom_sample_timeout_with_budget_is_failure(self):
+        data,guards,_=self.synthetic_run(headroom_sample_seconds=.2,
+            headroom_sample_error='timeout',schedule_count=1)
+        self.assertEqual(guards,[])
+        self.assertEqual(data['trials'][0]['status'],'failed')
+        self.assertNotIn('unrun_reason',data['trials'][0])
+        self.assertIn('wired memory sample',data['trials'][0]['error'])
 
     def test_forced_gpu_termination_stops_future_trials(self):
         data,guards,_=self.synthetic_run(forced=True)

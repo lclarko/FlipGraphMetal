@@ -2472,6 +2472,9 @@ def fgm2_report(data, summary):
             round(gpu,3) if gpu is not None else None,wired)))+' |')
     lines += ['',f"Missing verified results: {', '.join(summary['missing_verified']) or 'none'}.",
               f"Setup: {data.get('setup_seconds',0):.3f} s; finalization: {data.get('finalization_seconds',0):.3f} s.",
+              data.get('timing_scope',''),
+              (f"Budget check after closing writes: {data['budget_check_elapsed_seconds']:.3f} s."
+               if 'budget_check_elapsed_seconds' in data else ''),
               'Per-row elapsed observations (seconds):', '',
               '| Trial | Preparation | Headroom wait | Native guard | Native receipt/binding | Verifier guard | Final binding | Intermediate persistence |',
               '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
@@ -2646,7 +2649,14 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                         row['unrun_reason'] = 'insufficient global budget after preparation or headroom wait'
                         data['stop_reason'] = 'global admission cutoff'
                         break
-                    available = wired_memory(timeout=min(2,sample_allowance)) <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']
+                    try:
+                        available = wired_memory(timeout=min(2,sample_allowance)) <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']
+                    except subprocess.TimeoutExpired:
+                        if deadline-clock() <= native_admission:
+                            row['unrun_reason'] = 'global admission budget exhausted during headroom sample'
+                            data['stop_reason'] = 'global admission cutoff'
+                            break
+                        raise
                     if deadline-clock() < native_admission:
                         row['unrun_reason'] = 'insufficient global budget after headroom sample'
                         data['stop_reason'] = 'global admission cutoff'
@@ -2838,21 +2848,24 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
         summary = fgm2_summary(data)
         write_json(output/'summary.json',summary)
         (output/'report.md').write_text(fgm2_report(data,summary))
-        data['final_elapsed_seconds'] = clock()-started
-        data['finalization_seconds'] = clock()-finalization_started
+        timing_snapshot = clock()
+        data['final_elapsed_seconds'] = timing_snapshot-started
+        data['finalization_seconds'] = timing_snapshot-finalization_started
+        data['timing_scope'] = ('Finalization and final elapsed time end at the snapshot before closing summary, report, '
+                                'measurement, and checksum writes. The budget check includes those writes.')
         if data['final_elapsed_seconds'] > protocol['total_seconds']:
             data['complete'] = False
             data['status'] = 'budget-exceeded'
-            summary = fgm2_summary(data)
-            write_json(output/'summary.json',summary)
-            (output/'report.md').write_text(fgm2_report(data,summary))
+        summary = fgm2_summary(data)
+        write_json(output/'summary.json',summary)
+        (output/'report.md').write_text(fgm2_report(data,summary))
         save()
         (output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
-        if clock()-started > protocol['total_seconds']:
+        checked_elapsed = clock()-started
+        if checked_elapsed > protocol['total_seconds']:
             data['complete'] = False
             data['status'] = 'budget-exceeded'
-            data['final_elapsed_seconds'] = clock()-started
-            data['finalization_seconds'] = clock()-finalization_started
+            data['budget_check_elapsed_seconds'] = checked_elapsed
             write_json(output/'summary.json',fgm2_summary(data))
             (output/'report.md').write_text(fgm2_report(data,fgm2_summary(data)))
             save()
