@@ -372,7 +372,13 @@ termination or uncertain cleanup stops subsequent GPU admission; an unfinished
 matrix or insufficient parent feedback remains incomplete or inconclusive.
 Failed chunk attempts retain their elapsed time and available guard evidence.
 Arm summaries preserve earlier independently verified endpoint results when a
-later chunk fails.
+later chunk fails and omit endpoints not reached before the stop.
+
+An explicit protocol `limits.scan_bytes` applies to native admission and both
+read-only exports. It bounds cumulative read work, not allocated memory. Without
+it, native admission retains its default and exports use `history.storage_bytes`.
+Repeated journal replay can consume much more read work than the journal's size;
+the read budget and the 45-second child guard remain independent limits.
 
 Small packaged initialization and resume checks passed for both selectors.
 After a full-population resume hit the 3-GiB guard, a separately authorized
@@ -380,5 +386,7 @@ qualification passed with a 4-GiB per-call limit and the original prelaunch
 ceiling. `guard.run(..., wired_limit_bytes=...)` supports that explicit override;
 the default and checked-in comparison protocol remain at 3 GiB. The frozen
 qualification is retained under `build/fgm3/qualification-4g-01/`. No measured
-comparison arm has started. Retained-candidate and qualification results are reported
+comparison completed: the first attempt stopped during uniform resume at the
+native scan budget. Its earlier verified results and failed attempt are retained
+under `build/fgm3/comparison-02/`. Retained-candidate and qualification results are reported
 in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).

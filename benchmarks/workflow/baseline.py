@@ -2908,6 +2908,17 @@ def fgm3_admission(now, arm_deadline, global_deadline, allowance, protocol):
     return None
 
 
+def fgm3_scan_bytes(protocol):
+    limits=protocol.get('limits',{})
+    if type(limits) is not dict:
+        raise ValueError('FGM-3 limits must be an object')
+    if 'scan_bytes' not in limits:return None
+    value=limits['scan_bytes']
+    if type(value) is not int or value<=0:
+        raise ValueError('FGM-3 scan_bytes must be a positive integer')
+    return value
+
+
 def fgm3_config(protocol, selector, trial_seed, chunk, workers, population, history, receipt):
     if selector not in protocol['selectors'] or trial_seed not in protocol['seeds']:
         raise ValueError('selector or trial seed outside frozen protocol')
@@ -2927,10 +2938,13 @@ def fgm3_config(protocol, selector, trial_seed, chunk, workers, population, hist
         input_spec=dict(kind='files',files=[dict(path=path,format='json',domain='ZT') for path in paths])
     else:
         input_spec=dict(kind='resume',journal=str(history))
-    return dict(schema='fgm-run-v1',operation='search',workflow='additive-search',
+    config=dict(schema='fgm-run-v1',operation='search',workflow='additive-search',
                 output=str(receipt),input=input_spec,execution=execution,policy=policy,
                 pool=pool,evaluation=evaluation,circuit_target=protocol['circuit_target'],
                 history=dict(path=str(history),**{k:v for k,v in protocol['history'].items() if k!='path'}))
+    scan=fgm3_scan_bytes(protocol)
+    if scan is not None:config['limits']=dict(scan_bytes=scan)
+    return config
 
 
 def fgm3_checked_evaluation(row, expected_settings, producer):
@@ -3163,7 +3177,7 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     tool=binaries/'scheme_tool'
     common=['--format','journal','--receipt',str(receipt_path),'--input',str(history),
             '--record-bytes',str(protocol['history']['transaction_bytes']),
-            '--scan-bytes',str(protocol['history']['storage_bytes'])]
+            '--scan-bytes',str(fgm3_scan_bytes(protocol) or protocol['history']['storage_bytes'])]
     export_path=chunk_dir/'evaluations.jsonl'
     record['status']='evaluation-export-started'
     record['evaluation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--evaluations',
@@ -3435,7 +3449,8 @@ def fgm3_summarize_arm(arm, state, arm_start, protocol):
         eval_phase.update(row['phase_microseconds'])
     timely=[row for row in evaluations if row['verified_seconds']<=arm_start+protocol['arm_seconds']]
     late=[row for row in evaluations if row['verified_seconds']>arm_start+protocol['arm_seconds']]
-    arm.update(endpoints={str(point):fgm3_endpoint(state,arm_start,point) for point in protocol['endpoints']},
+    arm.update(endpoints={str(point):fgm3_endpoint(state,arm_start,point) for point in protocol['endpoints']
+                          if point<=arm['elapsed_seconds']},
         evaluations=evaluations,installations=installations,observations=observations,
         canonical_discoveries=len({row['scheme_id'] for row in observations if row['rank']==23 and
                                    row['scheme_id'] not in state['initial_ids']}),

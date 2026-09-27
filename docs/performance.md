@@ -420,19 +420,42 @@ remained 55; none reached 54. Peak sampled wired memory was 3,370,205,184 bytes
 (3.139 GiB). The slower chunk gives a 22-second admission allowance under the
 existing rule. No fallback was needed. One newly discovered parent was installed
 by uniform selection at resume; cost-diverse selected starting parents only.
-Qualification does not establish a selection benefit. No measured comparison
-was launched. The sealed inputs, settings, commands, guard records and circuits
-are retained under `build/fgm3/qualification-4g-01/`; earlier attempts are unchanged.
+Qualification does not establish a selection benefit. The sealed inputs,
+settings, commands, guard records and circuits are retained under
+`build/fgm3/qualification-4g-01/`; earlier attempts are unchanged.
 
 The supervisor's optional `wired_limit_bytes` argument records and enforces the
 per-call allowance. Its default, other workflows and the checked-in comparison
 protocol retain 3 GiB. The 4-GiB qualification has its own frozen resource policy.
 
-The final host suite passed 260 tests with no failures or skips; the independent
-verifier's four focused tests also passed. Native programs and the package built,
+The first measured attempt under that policy stopped during seed 7's uniform
+arm after 59.264 seconds. Four chunks completed, retaining 47 independently
+verified evaluations: 16 initial parents and 31 new canonical alternatives.
+Best cost remained 55; the best new alternative cost 60. The 30-second endpoint
+retained 30 evaluations and best cost 55. Neither the 60/90-second endpoints nor
+the paired cost-diverse arm completed.
+
+The fifth chunk failed during host admission because cumulative journal reads
+exceeded the default 256-MiB scan budget. No GPU work started in that chunk,
+and the memory guard did not fire. Read-only validation of the same unchanged
+history passed with the existing 1-GiB scan setting, consuming 417,983,508 bytes
+of read work in 5.900 seconds. Replay reads earlier frames repeatedly; this
+limit measures cumulative reads, not resident allocation. A larger read budget
+does not remove that execution overhead or guarantee later chunks will fit.
+
+The incomplete attempt is sealed under `build/fgm3/comparison-02/`. Its original
+report contains snapshots labelled 60/90 seconds despite stopping earlier;
+`audit/findings.json` records that limitation without rewriting the evidence.
+The harness now reports only elapsed endpoints and can pass an explicit scan
+budget consistently to native execution and both read-only exports.
+
+The last full host suite passed 260 tests with no failures or skips; the independent
+verifier's four focused tests also passed. The scan-budget and endpoint changes
+passed 16 additive-workflow tests and 41 execution/supervision tests.
+Native programs and the package built,
 and relocated host commands plus additive preflight passed with Python absent
 from PATH. Host tests cover score binding, population selection, resume,
 transaction failures and malformed histories. Full GPU qualification passed
 under the recorded 4-GiB policy; matched-time selection benefit remains
-**unmeasured**. These qualification checks and the retrospective reconstruction
+**inconclusive**. These qualification checks and the retrospective reconstruction
 pass do not establish a uniform versus cost-diverse selection result.

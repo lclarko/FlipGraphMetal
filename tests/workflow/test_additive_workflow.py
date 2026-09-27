@@ -197,6 +197,59 @@ class AdditiveWorkflowTest(unittest.TestCase):
         self.assertTrue(b.fgm3_export_budget(45,150,1,p))
         self.assertFalse(b.fgm3_export_budget(46,150,1,p))
 
+    def test_optional_scan_limit_reaches_native_config_and_journal_export(self):
+        for scan in (None,1024**3):
+            with self.subTest(scan=scan),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);population=root/'population';population.mkdir()
+                binaries=root/'binaries';binaries.mkdir()
+                inventory={}
+                for name in ('flip_graph','scheme_tool','shaders/signed.metallib'):
+                    path=binaries/name;path.parent.mkdir(parents=True,exist_ok=True)
+                    path.write_text(name);inventory[name]=b.digest(path)
+                protocol=copy.deepcopy(self.protocol)
+                if scan is not None:protocol['limits']=dict(scan_bytes=scan)
+                state=dict(build_inventory=inventory,evaluations=[],installations=[],observations=[])
+                observed=[]
+                def guarded(argv,destination,guard,**kwargs):
+                    observed.append(argv)
+                    if len(observed)==1:
+                        config_path=Path(argv[argv.index('--run-config')+1])
+                        config=json.loads(config_path.read_text())
+                        receipt=Path(config['output'])
+                        b.write_json(receipt,dict(status='complete',execution_started=True,
+                            configuration_sha256=b.digest(config_path),
+                            executable_sha256=inventory['flip_graph'],library_mode='metallib',
+                            library_sha256=inventory['shaders/signed.metallib'],run_id='test',
+                            counters={},seed_duplicates=0,completed_batches=1,pool_evictions=0))
+                        destination.mkdir();(destination/'run.log').write_text('')
+                        return dict(wall_seconds=0)
+                    if len(observed)==2:
+                        Path(argv[argv.index('--output')+1]).write_text('')
+                        return dict(wall_seconds=0)
+                    raise RuntimeError('captured journal export arguments')
+                with mock.patch.object(b,'fgm3_guarded',side_effect=guarded), \
+                     mock.patch.object(b,'native_dispatch_evidence',return_value={}):
+                    with self.assertRaisesRegex(RuntimeError,'captured journal export'):
+                        b.fgm3_run_chunk(root,population,binaries,protocol,'uniform',7,1,
+                            'arm',1,state,900,90,20,clock=lambda:0,sleeper=lambda _:None,
+                            guard=lambda *args:None,memory_sample=lambda timeout:0)
+                config=json.loads((root/'arm/chunks/001/config.json').read_text())
+                if scan is None:self.assertNotIn('limits',config)
+                else:self.assertEqual(config['limits'],dict(scan_bytes=scan))
+                self.assertEqual(len(observed),3)
+                for exported,mode in zip(observed[1:],('--evaluations','--observations')):
+                    self.assertIn(mode,exported)
+                    self.assertEqual(exported[exported.index('--scan-bytes')+1],
+                                     str(scan if scan is not None else protocol['history']['storage_bytes']))
+                    self.assertEqual(exported[exported.index('--record-bytes')+1],
+                                     str(protocol['history']['transaction_bytes']))
+        for invalid in (0,-1,True,1.5,'1073741824',None):
+            with self.subTest(invalid=invalid):
+                protocol=copy.deepcopy(self.protocol);protocol['limits']=dict(scan_bytes=invalid)
+                with self.assertRaisesRegex(ValueError,'positive integer'):
+                    b.fgm3_config(protocol,'uniform',7,1,1,Path('/unused'),
+                                  Path('/unused/history'),Path('/unused/receipt'))
+
     def test_postwrite_change_stops_before_native_and_forced_cleanup_stops(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
@@ -289,6 +342,8 @@ class AdditiveWorkflowTest(unittest.TestCase):
                 self.assertEqual(arm['status'],'incomplete')
                 self.assertEqual(arm['elapsed_seconds'],55)
                 self.assertEqual(arm['endpoints']['30']['best_additions'],55)
+                self.assertNotIn('60',arm['endpoints'])
+                self.assertNotIn('90',arm['endpoints'])
                 self.assertEqual([row['status'] for row in arm['chunks']],['verified','failed'])
                 self.assertEqual(arm['chunks'][1]['elapsed_seconds'],45)
                 self.assertEqual(arm['chunks'][1]['failed_stage'],
