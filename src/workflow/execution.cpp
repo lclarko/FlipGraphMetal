@@ -50,47 +50,75 @@ std::string domainOf(const RunConfig &config) {
 }
 }
 
+ReductionSettings parseReductionSettings(const Json &settings) {
+    fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions", "strategy"});
+    if (settings.at("domain").str() != "ZT") throw std::runtime_error("only signed addition reduction is supported");
+    auto seed = natural(settings.at("seed"), false);
+    if (seed > UINT32_MAX) throw std::runtime_error("seed exceeds uint32");
+    ReductionSettings r{uint32_t(seed), natural(settings.at("rounds")),
+        natural(settings.at("reducers")), natural(settings.at("schemes")),
+        natural(settings.at("max_flips"), false), natural(settings.at("no_improvements")),
+        natural(settings.at("target_additions"), false)};
+    if(settings.has("strategy")) r.strategy=settings.at("strategy").str();
+    if(r.strategy!="baseline" && r.strategy!="transpose" && r.strategy!="cancellation" && r.strategy!="combined")
+        throw std::runtime_error("unknown reduction strategy");
+    if(r.strategy!="baseline" && (r.maxFlips || r.schemes!=1))
+        throw std::runtime_error("construction strategies require max_flips=0 and schemes=1");
+    if (r.schemes > r.reducers || r.reducers > 1048576 || r.maxFlips >= INT32_MAX ||
+        r.rounds > INT32_MAX || r.noImprovements > INT32_MAX || r.targetAdditions > INT32_MAX)
+        throw std::runtime_error("reduction setting exceeds execution capacity");
+    if(configCheckedMultiply(configCheckedMultiply(r.rounds,r.maxFlips),r.schemes-1)>INT64_MAX)
+        throw std::runtime_error("reducer applied-work counters exceed record capacity");
+    return r;
+}
+
+Json additiveContract(const PreparedRun &run) {
+    return additiveContract(run.config.resolved,run.receipt);
+}
+
 RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
                          const std::string &expectedOperation, const std::string &expectedDomain) {
-    fields(value, {"schema", "operation", "policy", "reduction", "input", "execution", "limits", "output", "pool", "history", "discovery_target"});
+    fields(value, {"schema", "operation", "workflow", "policy", "reduction", "evaluation", "circuit_target", "input", "execution", "limits", "output", "pool", "history", "discovery_target"});
     if (value.at("schema").str() != "fgm-run-v1") throw std::runtime_error("unsupported run schema");
     RunConfig result{};
     result.resolved = value;
     result.operation = value.at("operation").str();
+    if(value.has("workflow")) {
+        if(value.at("workflow").str()!="additive-search" || result.operation!="search")
+            throw std::runtime_error("unsupported workflow");
+        result.additive=true;
+    }
+    if(!result.additive && (value.has("evaluation")||value.has("circuit_target")))
+        throw std::runtime_error("evaluation and circuit target require additive-search");
     if (result.operation != "search" && result.operation != "reduce") throw std::runtime_error("unsupported run operation");
     if (!expectedOperation.empty() && result.operation != expectedOperation) throw std::runtime_error("operation conflicts with executable");
     if (result.operation == "search") {
         if (value.has("reduction")) throw std::runtime_error("reduction settings conflict with search");
         result.policy = parseControlledConfig(value.at("policy"), expectedDomain);
         result.resolved.object["policy"] = result.policy->resolved();
+        if(result.additive) {
+            const auto &p=*result.policy;
+            if(p.domain!=ControlledConfig::Domain::Signed || p.mode!=ControlledConfig::Mode::Alternatives ||
+               p.dimensions!=std::array<uint64_t,3>{3,3,3} || p.anchor!=23 || p.excursion>2 || p.targetRank)
+                throw std::runtime_error("additive-search requires fixed signed 3x3 rank-23 alternatives with excursion at most two");
+            result.evaluation=parseReductionSettings(value.at("evaluation"));
+            const auto &r=*result.evaluation;
+            if(r.strategy!="combined" || r.schemes!=1 || r.maxFlips || r.targetAdditions)
+                throw std::runtime_error("additive evaluation requires combined fixed factors and disabled reducer target");
+            if(value.has("circuit_target") && value.at("circuit_target").kind!=Json::Null)
+                result.circuitTarget=natural(value.at("circuit_target"));
+        }
     } else {
         if (value.has("policy") || (!expectedDomain.empty() && expectedDomain != "ZT"))
             throw std::runtime_error("signed reduction requires ZT and reduction settings");
-        const auto &settings = value.at("reduction");
-        fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions", "strategy"});
-        if (settings.at("domain").str() != "ZT") throw std::runtime_error("only signed addition reduction is supported");
-        auto seed = natural(settings.at("seed"), false);
-        if (seed > UINT32_MAX) throw std::runtime_error("seed exceeds uint32");
-        result.reduction = ReductionSettings{uint32_t(seed), natural(settings.at("rounds")),
-            natural(settings.at("reducers")), natural(settings.at("schemes")),
-            natural(settings.at("max_flips"), false), natural(settings.at("no_improvements")),
-            natural(settings.at("target_additions"), false)};
-        auto &r = *result.reduction;
-        if(settings.has("strategy")) r.strategy=settings.at("strategy").str();
-        if(r.strategy!="baseline" && r.strategy!="transpose" && r.strategy!="cancellation" && r.strategy!="combined")
-            throw std::runtime_error("unknown reduction strategy");
-        if(r.strategy!="baseline" && (r.maxFlips || r.schemes!=1))
-            throw std::runtime_error("construction strategies require max_flips=0 and schemes=1");
-        if (r.schemes > r.reducers || r.reducers > 1048576 || r.maxFlips >= INT32_MAX ||
-            r.rounds > INT32_MAX || r.noImprovements > INT32_MAX || r.targetAdditions > INT32_MAX)
-            throw std::runtime_error("reduction setting exceeds execution capacity");
-        if(configCheckedMultiply(configCheckedMultiply(r.rounds,r.maxFlips),r.schemes-1)>INT64_MAX)
-            throw std::runtime_error("reducer applied-work counters exceed record capacity");
+        result.reduction=parseReductionSettings(value.at("reduction"));
     }
     const auto &execution = value.at("execution");
-    fields(execution, {"workers", "batch_steps", "block_size", "backend", "memory_bytes"});
+    fields(execution, {"workers", "batch_steps", "block_size", "backend", "memory_bytes", "max_batches"});
     result.execution = {natural(execution.at("workers")), natural(execution.at("batch_steps")),
         natural(execution.at("block_size")), natural(execution.at("memory_bytes")), execution.at("backend").str()};
+    if(result.additive)result.execution.maxBatches=natural(execution.at("max_batches"));
+    else if(execution.has("max_batches"))throw std::runtime_error("max_batches requires additive-search");
     const auto &e = result.execution;
     if (e.workers > 1048576 || e.blockSize > 1024 || e.batchSteps > UINT32_MAX)
         throw std::runtime_error("execution setting exceeds capacity");
@@ -113,11 +141,17 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
     result.resolved.object["limits"] = resolvedLimits;
     result.output = pathAt(value.at("output"), base);
     result.resolved.object["output"] = Json(result.output.string());
+    if(result.additive)result.pool.memoryBytes=8*1024*1024;
     if(value.has("pool")) {
         if(!result.policy)throw std::runtime_error("retained pool settings require search");
-        const auto &p=value.at("pool");fields(p,{"capacity_per_rank","reserve_per_rank","memory_bytes","stage_threshold","selector"});
+        const auto &p=value.at("pool");fields(p,{"capacity_per_rank","reserve_per_rank","memory_bytes","stage_threshold","selector","elite_capacity"});
         result.pool={natural(p.at("capacity_per_rank")),natural(p.at("reserve_per_rank")),natural(p.at("memory_bytes")),natural(p.at("stage_threshold")),p.at("selector").str()};
+        if(p.has("elite_capacity")) {
+            if(!result.additive)throw std::runtime_error("elite capacity requires additive-search");
+            result.pool.eliteCapacity=natural(p.at("elite_capacity"));
+        }
     }
+    result.pool.additive=result.additive;
     RankPools checkPool(result.pool);
     if(value.has("discovery_target") && value.at("discovery_target").kind!=Json::Null) {
         if(!result.policy||result.policy->mode!=ControlledConfig::Mode::Alternatives)throw std::runtime_error("discovery target requires alternatives");
@@ -126,7 +160,9 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
     result.resolved.object["discovery_target"]=result.discoveryTarget?integer(*result.discoveryTarget):Json();
     Json p=Json::dict();p.object["capacity_per_rank"]=integer(result.pool.capacity);p.object["reserve_per_rank"]=integer(result.pool.reserve);
     p.object["memory_bytes"]=integer(result.pool.memoryBytes);p.object["stage_threshold"]=integer(result.pool.threshold);p.object["selector"]=Json(result.pool.selector);
+    if(result.additive)p.object["elite_capacity"]=integer(result.pool.eliteCapacity);
     if(result.policy)result.resolved.object["pool"]=p;
+    if(result.additive)result.history.transactionBytes=8*1024*1024;
     result.history.path=std::filesystem::path(result.output.string()+".journal");
     if(value.has("history")) {
         const auto &h=value.at("history");fields(h,{"path","storage_bytes","transaction_bytes","index_memory_bytes"});
@@ -206,7 +242,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         throw std::runtime_error("run output already exists");
     if (!std::filesystem::is_directory(config.output.parent_path()))
         throw std::runtime_error("run output parent must exist");
-    if(config.reduction&&(std::filesystem::exists(config.output.string()+".circuits.jsonl")||std::filesystem::is_symlink(config.output.string()+".circuits.jsonl")))
+    if((config.reduction||config.additive)&&(std::filesystem::exists(config.output.string()+".circuits.jsonl")||std::filesystem::is_symlink(config.output.string()+".circuits.jsonl")))
         throw std::runtime_error("circuit artifact output already exists");
     AdmissionContext context(config.limits);
     Json presentations = Json::list();
@@ -219,6 +255,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         if ((source.f2 ? "F2" : "ZT") != domainOf(config)) throw std::runtime_error("input domain conflicts with run");
         const auto &eligibility = item.report.at("eligibility");
         if (config.policy) {
+            if(config.additive && source.rank!=23)throw std::runtime_error("additive starting parents require rank 23");
             for (size_t i = 0; i < 3; ++i)
                 if (source.n[i] != config.policy->dimensions[i]) throw std::runtime_error("input dimensions conflict with policy");
             if (!eligibility.at("search_eligible").boolean)
@@ -237,6 +274,8 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         presentations.array.push_back(item.report);
         const auto id = item.report.at("scheme_id").str();
         if (config.policy && !seen.insert(id).second) { ++duplicates; return; }
+        if(config.additive&&run.inputs.size()>=config.pool.capacity)
+            throw Resource("additive initial population exceeds parent capacity");
         run.inputs.push_back(item);
     };
     if (config.input.kind == RunInput::Kind::Files) {
@@ -246,10 +285,13 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     else {
         if(!config.policy)throw std::runtime_error("journal resume requires search");
         uint64_t stage=config.policy->anchor;
+        AdditiveReplay additiveReplay(config.limits);
         auto recovered=Journal::replayReadOnly(config.input.journal,
             {config.history.storageBytes,config.history.transactionBytes,config.history.indexMemoryBytes},
             [&](const Json &transaction,const CommitReceipt &commit) {
-                if(transaction.at("schema").str()!="fgm-search-transaction-v1")throw std::runtime_error("not a search workflow journal");
+                if(transaction.at("schema").str()!=(config.additive?"fgm-additive-search-transaction-v1":"fgm-search-transaction-v1"))
+                    throw std::runtime_error("search workflow journal mismatch");
+                if(config.additive)additiveReplay.apply(transaction,commit);
                 const auto &binding=transaction.at("workflow");
                 if(binding.at("domain").str()!=domainOf(config)||binding.at("mode").str()!=config.policy->resolved().at("mode").str()||
                     dump(binding.at("dimensions"))!=dump(config.policy->resolved().at("dimensions")))throw std::runtime_error("resume workflow mismatch");
@@ -277,6 +319,12 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
             },[&](uint64_t bytes){context.accountRead(bytes);});
         if(!recovered.sequence||run.recoveredPools.kind==Json::Null)throw std::runtime_error("journal has no committed workflow history");
         run.recoveredHead=recovered.hash;
+        if(config.additive) {
+            run.recoveredAdditive=additiveReplay.state();
+            const auto &contract=run.recoveredAdditive.at("contract");
+            if(dump(contract)!=dump(additiveContract(config.resolved,contract.at("producer"))))
+                throw std::runtime_error("additive resume policy or evaluation settings changed");
+        }
         if(config.policy->mode==ControlledConfig::Mode::RankReduction) {
             if(!stage||stage>350)throw std::runtime_error("invalid recovered stage");
             run.config.policy->anchor=stage;run.config.resolved.object["policy"]=run.config.policy->resolved();
@@ -325,6 +373,12 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
                 configCheckedAdd(layout.controlBytes,configCheckedMultiply(configCheckedAdd(1,config.policy->optionalQuota),16))));
         if(packedEligible&&config.execution.backend!="general")allocation=configCheckedAdd(allocation,
             configCheckedMultiply((config.execution.workers+31)/32*32,26400));
+        if(config.additive) {
+            const auto lanes=config.evaluation->reducers;
+            uint64_t reduction=configCheckedAdd(configCheckedMultiply(lanes+1,layout.reducerLaneBytes),configCheckedMultiply(lanes,layout.rngBytes));
+            reduction=configCheckedAdd(reduction,configCheckedMultiply(lanes,3*sizeof(int)));
+            allocation=configCheckedAdd(allocation,reduction);
+        }
     } else {
         allocation = configCheckedAdd(configCheckedMultiply(config.reduction->reducers + 1,
             layout.reducerLaneBytes), configCheckedMultiply(config.reduction->reducers, layout.rngBytes));
@@ -335,6 +389,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     if(config.policy)reservedHost=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
         configCheckedAdd(configCheckedMultiply(config.history.transactionBytes,4),config.history.indexMemoryBytes));
     else reservedHost=configCheckedMultiply(config.limits.record,128);
+    if(config.additive)reservedHost=configCheckedAdd(reservedHost,configCheckedMultiply(config.limits.record,128));
     if (configCheckedAdd(configCheckedAdd(allocation, admittedBytes),reservedHost) > config.execution.memoryBytes)
         throw Resource("planned buffers and admission exceed run memory budget");
     Json receipt = Json::dict();
@@ -396,7 +451,11 @@ int runConfigured(int argc, char **argv, const std::string &operation, const std
     if (!size || _NSGetExecutablePath(executable.data(), &size)) throw std::runtime_error("cannot resolve native executable");
     AdmissionContext identity;
     run.receipt.object["executable_sha256"] = Json(identity.sha256File(std::filesystem::canonical(executable.data())));
-#ifdef METAL_LIBRARY_SHA256
+#if defined(FGM_SEARCH_TESTING)
+    run.receipt.object["library_mode"]=Json("metallib");
+    run.receipt.object["library_sha256"]=Json(sha256Bytes("host-test-dispatch-no-Metal"));
+    run.receipt.object["test_dispatch"]=Json(true);
+#elif defined(METAL_LIBRARY_SHA256)
     run.receipt.object["library_sha256"] = Json(METAL_LIBRARY_SHA256);
     run.receipt.object["library_mode"] = Json("metallib");
 #elif defined(METAL_SOURCE_DIR)
@@ -404,6 +463,14 @@ int runConfigured(int argc, char **argv, const std::string &operation, const std
 #else
     run.receipt.object["library_mode"] = Json("host-only");
 #endif
+    if(run.config.additive) {
+        if(run.receipt.at("library_mode").str()!="metallib" && !validateOnly)
+            throw std::runtime_error("additive-search requires a compiled, identity-bound Metal library");
+        if(run.recoveredAdditive.kind!=Json::Null &&
+           (!validateOnly || run.receipt.at("library_mode").str()=="metallib") &&
+           dump(run.recoveredAdditive.at("contract"))!=dump(additiveContract(run)))
+            throw std::runtime_error("additive resume producer or evaluation contract changed");
+    }
     if(!validateOnly) {
         const auto executionStarted=std::chrono::steady_clock::now();
         auto finishExecutionTiming=[&] {

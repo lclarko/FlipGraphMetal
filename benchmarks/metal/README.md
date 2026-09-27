@@ -309,3 +309,68 @@ results are not pooled with measurements using the revised admission policy.
 Native construction, materialization, and verification require no Python.
 Python is used for this experiment's coordination and independent checking;
 Objective-C++ continues to own runtime dispatch and GPU timing.
+
+## FGM-3 retained candidates and additive comparison
+
+The retained-candidate pass uses the existing fixed-factor reduction interface,
+`combined`, seed 7 and a 128-reducer/16-round quantum. Preparation and segmented
+launch glue stay with the local evidence under `build/fgm3/retained-rescore/`.
+The frozen roster has 262 first canonical discoveries admitted by FGM-1's
+20-second endpoints. Each invocation runs one 15-minute segment. Continuation
+checks source, build, settings and completed circuit bindings; it skips completed
+evaluations and records failures separately. Original FGM-1 results are unchanged.
+
+The native workflow runs directly with the existing CLI:
+
+```sh
+build/metal/flip_graph --run-config /absolute/path/to/additive-search.json
+```
+
+Its configuration extends the existing search config with `workflow:
+"additive-search"`, `evaluation`, `pool.elite_capacity`, a positive
+`execution.max_batches` and optional `circuit_target`. See the
+[native interface](../../docs/development.md#native-additive-search) and the
+[frozen comparison settings](../workflow/fixtures/fgm3/protocol.json).
+Production execution needs no Python.
+
+After correctness qualification and a reviewed resource envelope, the existing
+Python harness can run one comparison from a locally prepared, factor-only
+16-parent population:
+
+```sh
+python3 benchmarks/workflow/baseline.py --fgm3 \
+  --fgm3-population build/fgm3/population \
+  --binary-dir build/metal --output build/fgm3/comparison-01
+```
+
+Population preparation deduplicates the six calibration inputs canonically,
+then fills ten positions by existing seeded collection selection at seed 7.
+Selection is independent of retrospective scores. Keep its source bindings,
+selection command and hashes with `population.json`. Private input factors and
+all generated histories remain local and uncommitted.
+
+Qualification exercises initialization and resume for both selectors at two
+workers and four 32-step batches. The fixed reducer quantum does not change.
+If complete work exceeds 30 seconds, qualification tries one worker once. A
+resource guard failure stops admission. The slower qualified chunk freezes the
+admission allowance at `ceil(1.25 * elapsed_seconds) + 2`.
+
+Preparation and qualification precede the measured 900-second envelope. The
+comparison has seeds 7/19/41, alternating paired arm order, fresh histories and
+90 seconds per arm, with cumulative endpoints at 30/60/90 seconds. Both arms
+freshly evaluate the same starting factors and continue bounded work while its
+allowance fits. Scores and circuits are never carried between arms.
+
+An endpoint does not shorten the 45-second process guard. Native work, journal
+exports, independent verification, headroom waits, startup, replay and evidence
+writes all consume the arm budget. Native admission reserves 200 seconds globally
+for its child, two bounded read-only exports, bookkeeping and finalization.
+The two exports recheck remaining reserves of 150 and 105 seconds respectively. Only complete, independently verified,
+durably published results receive endpoint credit. Late or missing verification
+is reported separately. Finalization retains 50 seconds globally. Forced
+termination or uncertain cleanup stops subsequent GPU admission; an unfinished
+matrix or insufficient parent feedback remains incomplete or inconclusive.
+
+The first native smoke hit the wired-memory guard, so the comparison has not
+been launched. Retained-candidate results and the qualification gap are reported
+in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).

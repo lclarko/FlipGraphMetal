@@ -1,5 +1,6 @@
 """Native configuration and transaction tests with a host-only search dispatch."""
 import os
+import copy
 import json
 import hashlib
 from pathlib import Path
@@ -395,6 +396,206 @@ class FailedSearchReceiptTests(unittest.TestCase):
         self.assert_acknowledged(again, again_expected)
         self.assertEqual(again['journal_head_sha256'], recovered['journal_head_sha256'])
         self.assertEqual(again['counters']['discoveries_historical'], recovered['counters']['discoveries_historical'])
+
+
+
+class AdditiveNativeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.binary = Path(os.environ.get('FGM_EXECUTION_DRIVER', ROOT/'build/workflow/test_execution'))
+        self.tool = Path(os.environ.get('FGM_SCHEME_TOOL', ROOT/'build/metal/scheme_tool'))
+        self.journal = Path(os.environ.get('FGM_JOURNAL_DRIVER', ROOT/'build/workflow/test_journal'))
+        self.history = self.root/'history'
+        self.serial = 0
+        self.config = dict(schema='fgm-run-v1', operation='search', workflow='additive-search',
+            policy=dict(settings(), seed=7, interval_max=8, optional_quota=2,
+                        flip_budget=512, control_budget=512),
+            evaluation=dict(domain='ZT', strategy='combined', seed=7, reducers=128,
+                            rounds=16, no_improvements=16, schemes=1, max_flips=0, target_additions=0),
+            input=dict(kind='files', files=[dict(path=str(ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json'), format='json')]),
+            execution=dict(workers=2, batch_steps=32, max_batches=4, block_size=32, backend='general', memory_bytes=536870912),
+            pool=dict(capacity_per_rank=16, reserve_per_rank=16, elite_capacity=8,
+                      memory_bytes=8388608, stage_threshold=1, selector='cost-diverse'),
+            history=dict(path=str(self.history), transaction_bytes=8388608, storage_bytes=536870912, index_memory_bytes=1048576))
+
+    def run_native(self, failure='', expected=0, validate=False):
+        self.serial += 1
+        output = self.root/f'receipt-{self.serial}.json'
+        self.config['output'] = str(output)
+        path = self.root/f'config-{self.serial}.json'
+        path.write_text(json.dumps(self.config))
+        process = subprocess.run([str(self.binary), '--run-config', str(path)]+(['--validate-only'] if validate else []),
+                                 env={**os.environ, 'PATH':'', 'FGM_TEST_SEARCH_FAILURE':failure},
+                                 text=True, capture_output=True, timeout=30)
+        self.assertEqual(process.returncode, expected, process.stderr)
+        return json.loads(output.read_text()) if output.exists() else None
+
+    def exported(self, receipt, expected=0):
+        self.serial += 1
+        path = self.root/f'bound-{self.serial}.json'
+        path.write_text(json.dumps(receipt))
+        output = self.root/f'export-{self.serial}.jsonl'
+        result = subprocess.run([str(self.tool), 'analyze', '--format', 'journal', '--evaluations',
+            '--input', str(self.history), '--receipt', str(path), '--record-bytes', '8388608',
+            '--scan-bytes', '1073741824', '--output', str(output)], text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, expected, result.stderr)
+        if expected:
+            self.assertFalse(output.exists())
+            return []
+        return [json.loads(line) for line in output.read_text().splitlines()]
+
+    def test_commit_export_feedback_and_resume(self):
+        first = self.run_native()
+        self.assertEqual(first['terminal_reason'], 'batch_limit')
+        self.assertEqual(first['completed_batches'], 4)
+        rows = self.exported(first)
+        scores = [r for r in rows if r['schema']=='fgm-journal-evaluation-v1']
+        installs = [r for r in rows if r['schema']=='fgm-parent-installation-v1']
+        self.assertEqual(len(scores), first['evaluated_historical'])
+        self.assertEqual(len({r['evaluation']['scheme_id'] for r in scores}), len(scores))
+        new = {r['evaluation']['scheme_id'] for r in scores if r['batch']>0}
+        self.assertTrue(any(r['installed'] and r['selected_parent_id'] in new for r in installs))
+        self.assertEqual(len(Path(first['circuit_artifact']['path']).read_text().splitlines()), 1)
+        self.config['input'] = dict(kind='resume', journal=str(self.history))
+        self.config['policy']['seed'] = 19
+        second = self.run_native()
+        resumed = self.exported(second)
+        self.assertEqual(resumed[:len(rows)], rows)
+        self.assertEqual(second['evaluated_historical']-second['evaluated_current_run'], len(scores))
+        self.assertGreaterEqual(second['pool_evictions'], first['pool_evictions'])
+        self.assertLessEqual(second['best_evaluation']['additions'], first['best_evaluation']['additions'])
+        self.exported(dict(second, evaluated_historical=second['evaluated_historical']+1), expected=1)
+
+    def test_aliases_keep_first_effective_presentation_and_single_evaluation(self):
+        source = json.loads(Path(self.config['input']['files'][0]['path']).read_text())
+        alias = copy.deepcopy(source)
+        for key in 'uvw':
+            alias[key] = list(reversed(alias[key]))
+        for key in 'uw':
+            alias[key][0] = [-value for value in alias[key][0]]
+        path = self.root/'aliases.jsonl'
+        path.write_text(json.dumps(source)+'\n'+json.dumps(alias)+'\n')
+        self.config['input']['files'] = [dict(path=str(path), format='jsonl')]
+        self.config['policy']['flip_budget'] = 0
+        self.config['policy']['control_budget'] = 0
+        receipt = self.run_native()
+        scores = [r['evaluation'] for r in self.exported(receipt) if 'evaluation' in r]
+        self.assertEqual(receipt['seed_duplicates'], 1)
+        self.assertEqual(len(scores), 1)
+        self.assertEqual(scores[0]['factors_id'], receipt['presentations'][0]['effective_factors_id'])
+        self.assertNotEqual(scores[0]['factors_id'], receipt['presentations'][1]['effective_factors_id'])
+
+    def test_exact_scores_and_failure_preserve_acknowledged_population(self):
+        failed = self.run_native('append', expected=1)
+        expected = json.loads(Path(self.config['output']+'.expected.json').read_text())
+        for field in ('best_evaluation', 'evaluated_historical', 'evaluated_current_run', 'pool_evictions', 'journal_head_sha256'):
+            self.assertEqual(failed[field], expected[field])
+        self.assertNotIn('circuit_artifact', failed)
+        self.exported(failed)
+        self.config['input'] = dict(kind='resume', journal=str(self.history))
+        resumed = self.run_native()
+        self.exported(resumed)
+
+    def test_interrupted_resumed_evaluation_keeps_committed_scores(self):
+        first = self.run_native()
+        self.config['input'] = dict(kind='resume', journal=str(self.history))
+        self.config['policy']['seed'] = 19
+        failed = self.run_native('evaluation', expected=1)
+        self.assertEqual(failed['best_evaluation'], first['best_evaluation'])
+        self.assertEqual(failed['evaluated_historical'], first['evaluated_historical'])
+        self.assertEqual(failed['evaluated_current_run'], 0)
+        self.assertNotIn('circuit_artifact', failed)
+        self.exported(failed)
+
+    def test_invalid_evaluation_never_commits_or_publishes(self):
+        result = self.run_native('evaluation-count', expected=1)
+        self.assertIsNone(result['best_evaluation'])
+        self.assertEqual(result['evaluated_historical'], 0)
+        self.assertEqual(result['journal_sequence'], 0)
+        self.assertNotIn('circuit_artifact', result)
+
+    def test_resume_policy_change_rejected_before_execution(self):
+        self.run_native()
+        self.config['input'] = dict(kind='resume', journal=str(self.history))
+        for field, value in (('seed',19), ('rounds',8), ('strategy','baseline')):
+            previous = self.config['evaluation'][field]
+            self.config['evaluation'][field] = value
+            self.assertIsNone(self.run_native(expected=1, validate=True))
+            self.config['evaluation'][field] = previous
+        self.config['pool']['selector'] = 'uniform'
+        self.assertIsNone(self.run_native(expected=1, validate=True))
+
+    def test_preflight_shape_bounds_and_combined_live_allocations(self):
+        receipt = self.run_native(validate=True)
+        self.assertGreater(receipt['planned_buffer_bytes'], 128*1024*1024)
+        self.assertGreater(receipt['reserved_host_bytes'], 128*1024*1024)
+        self.config['execution']['memory_bytes'] = receipt['planned_buffer_bytes']+receipt['reserved_host_bytes']
+        self.assertIsNone(self.run_native(expected=2, validate=True))
+        self.config['execution']['memory_bytes'] = 536870912
+        self.config['policy']['excursion'] = 3
+        self.assertIsNone(self.run_native(expected=1, validate=True))
+        self.config['policy']['excursion'] = 2
+        self.config['execution']['max_batches'] = 0
+        self.assertIsNone(self.run_native(expected=1, validate=True))
+
+    def test_malformed_evaluation_history_and_rng_reset_are_rejected(self):
+        self.run_native()
+        result = subprocess.run([str(self.journal), 'inspect', str(self.history)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        transactions = [json.loads(line) for line in result.stdout.splitlines()]
+        original_history = self.history
+        cases = []
+        for key in ('additions', 'seed', 'factors_id'):
+            txs = copy.deepcopy(transactions)
+            value = txs[0]['evaluations'][0][key]
+            txs[0]['evaluations'][0][key] = value+1 if isinstance(value,int) else value+'x'
+            cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        txs[0]['evaluations'][0]['producer']['executable_sha256'] = '0'*64
+        cases.append(txs)
+        # A consistently rebound producer still cannot resume under this build.
+        txs = copy.deepcopy(transactions)
+        def replace_producer(value):
+            if isinstance(value, dict):
+                if 'executable_sha256' in value:
+                    value['executable_sha256'] = '0'*64
+                for child in value.values():
+                    replace_producer(child)
+            elif isinstance(value, list):
+                for child in value:
+                    replace_producer(child)
+        replace_producer(txs)
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        txs.insert(2, copy.deepcopy(txs[0]))
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        restart = next(t for t in txs if t['kind']=='restart')
+        restart['installations'][0]['installed'] = False
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        txs[1]['kind'] = 'unknown'
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        next(t for t in txs if t['kind']=='batch')['admissions'][0]['origin'] = 'import'
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        del next(t for t in txs if t['kind']=='batch')['workers']
+        cases.append(txs)
+        txs = copy.deepcopy(transactions)
+        txs.pop(next(i for i,t in enumerate(txs) if t['kind']=='restart'))
+        cases.append(txs)
+        for i, txs in enumerate(cases):
+            with self.subTest(case=i):
+                self.history = self.root/f'forged-{i}'
+                result = subprocess.run([str(self.journal), 'fixture-large', str(self.history)], input=json.dumps(txs), capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.config['history']['path'] = str(self.history)
+                self.config['input'] = dict(kind='resume', journal=str(self.history))
+                self.assertIsNone(self.run_native(expected=1, validate=True))
+        self.history = original_history
 
 
 if __name__ == '__main__':

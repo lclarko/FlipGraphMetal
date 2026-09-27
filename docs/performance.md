@@ -319,3 +319,64 @@ Raw measurements, frozen binaries, source snapshots, corpus inputs and verificat
 Use [the benchmark tools](../benchmarks/metal/README.md) for new, separately labeled measurements. Keep source identities, fixtures, commands, raw logs, incomplete runs and timing protocols. Serialize GPU work with the documented process-group and memory supervision. Do not pool incompatible timing methods or replace slow observations selectively.
 
 New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks. Each comparison above applies to its pinned revisions and recorded workload.
+
+## FGM-3 retained candidates and native search
+
+The retrospective pass completed **262/262** first retained canonical FGM-1
+alternatives in one 214.645-second segment. The roster came from the completed
+`baseline-04` discovery records at their 20-second endpoints, with 196 relevant
+receipt-bound journal prefixes replayed natively. It was not selected by circuit
+cost or by enumerating the candidate directory. Original endpoint results were
+preserved.
+
+Each factor-only presentation received one `combined` evaluation at seed 7,
+128 reducers, 16 rounds, `no_improvements=16`, one scheme, no flips and reducer
+target zero. All circuits passed native and independent exact factor/count
+verification.
+
+| Starting family | Alternatives | Best achieved additions |
+|---|---:|---:|
+| Original | 58 | 62 |
+| Laderman | 0 | unavailable |
+| Smirnov | 55 | 66 |
+| Sun | 73 | 59 |
+| CN122 | 76 | 56 |
+
+Against the 246 candidates with timely verified FGM-1 costs, 209 improved,
+37 tied and none worsened. Sixteen had no timely old cost. Against the direct
+baseline phase of these new invocations, 223 improved and 39 tied. Final totals
+ranged from 56 to 73; two reached 56. No 54 was found. These are reconstruction
+results for a fixed retained collection, not evidence that cost-guided selection
+improves search.
+
+The private reproducibility bundle is `build/fgm3/retained-rescore/`, with frozen
+inputs and builds, source/presentation bindings, circuits, logs, `audit.json`
+and a report. An initial sandbox launch failed before Metal dispatch; its
+explicit infrastructure retry and original failure remain recorded. No completed
+evaluation was repeated. Peak sampled wired memory in the successful segment
+was 2,841,739,264 bytes.
+
+The first native additive-search GPU smoke used public CN122, two packed
+workers, four bounded batches and the same 128-reducer/16-round evaluation
+quantum. Its test stagnation limit was 10, to exercise restart feedback. The
+3-GiB system wired-memory guard terminated it after 7.903 seconds: memory rose
+from 1,833,369,600 to a sampled 3,240,722,432 bytes. Process cleanup completed;
+this does not prove cancellation of all submitted Metal work. Further GPU
+admission stopped and the shared-population qualification/comparison was not
+launched.
+
+Eight evaluations had already committed. Read-only native replay and independent
+exact verification checked all eight, including CN122 at U13/V14/W28 = 55.
+The invocation published no final circuit artifact or complete receipt. These
+committed circuits are partial correctness evidence, with no endpoint or
+comparison credit. The source/build snapshot, journal, guard log and partial
+verification are retained under `build/fgm3/gpu-smoke/`.
+
+The final host suite passed 255 tests with no failures or skips; the independent
+verifier's four focused tests also passed. Native programs and the package built,
+and relocated host commands plus additive preflight passed with Python absent
+from PATH. Host tests cover score binding, population selection, resume,
+transaction failures and malformed histories. Full GPU qualification, resumed GPU search,
+packaged additive execution and matched-time selection benefit remain
+**unverified**. No conclusion about uniform versus cost-diverse selection follows
+from this smoke or from the retrospective reconstruction pass.

@@ -19,7 +19,13 @@ std::map<std::string,std::string> inventory(const fs::path &path){std::map<std::
 int main(int argc,char **argv){
     try{
         check(argc==3,"scenario and output directory required");std::string scenario=argv[1];fs::path path=argv[2];JournalLimits limits{4*1024*1024,32768,1024};
-        if(scenario=="fixture"){
+        if(scenario=="inspect"){
+            Journal::replayReadOnly(path,{536870912,8388608,1048576},[&](const Json &tx,const CommitReceipt &){auto value=tx;value.object.erase("_journal");std::cout<<dump(value)<<'\n';});return 0;
+        }else if(scenario=="fixture-large"){
+            std::string text((std::istreambuf_iterator<char>(std::cin)),{});auto transactions=Parser(text).parse();
+            check(transactions.kind==Json::Array,"fixture transaction array required");Journal journal(path,{536870912,8388608,1048576},true);
+            for(const auto &tx:transactions.array)journal.append(tx,journal.reserve(8388608));
+        }else if(scenario=="fixture"){
             std::string text((std::istreambuf_iterator<char>(std::cin)),{});auto transactions=Parser(text).parse();
             check(transactions.kind==Json::Array,"fixture transaction array required");Journal journal(path,limits,true);
             for(const auto &tx:transactions.array)append(journal,tx);

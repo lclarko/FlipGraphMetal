@@ -1,5 +1,6 @@
 #include "scheme_io.h"
 #include "journal.h"
+#include "pool.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <array>
@@ -651,11 +652,18 @@ static fs::path artifactPath(const fs::path &path,const std::string &format) {
 void journalRecords(const fs::path &path,const std::string &domain,
                     const std::function<void(const SchemeRecord&,uint64_t)> &emit,
                     uint64_t wanted,std::string *parsedHash) {
-    uint64_t index=0;
+    uint64_t index=0;AdditiveReplay additiveReplay(limits);std::string schema;
     Journal::replayReadOnly(path,{UINT64_MAX,limits.record,std::max<uint64_t>(1024,limits.selection)},
         [&](const Json &transaction,const CommitReceipt &commit){
-            if(transaction.at("schema").str()!="fgm-search-transaction-v1")
+            const auto currentSchema=transaction.at("schema").str();
+            if(currentSchema!="fgm-search-transaction-v1"&&currentSchema!="fgm-additive-search-transaction-v1")
                 throw std::runtime_error("journal input requires search workflow transactions");
+            if(!schema.empty()&&schema!=currentSchema)throw std::runtime_error("mixed journal workflows");
+            schema=currentSchema;
+            if(schema=="fgm-additive-search-transaction-v1") {
+                if(!commit.acknowledged)return;
+                additiveReplay.apply(transaction,commit);
+            }
             std::set<std::string> novel(commit.novelIds.begin(),commit.novelIds.end());
             const auto &workflow=transaction.at("workflow");
             for(const auto &entry:transaction.at("admissions").array) {
@@ -686,7 +694,9 @@ void journalRecords(const fs::path &path,const std::string &domain,
 }
 void journalObservations(const fs::path &path,const std::string &domain,
                          const std::function<void(const Json&)> &emit,std::string *parsedHash,
-                         const Json *receipt=nullptr) {
+                         const Json *receipt=nullptr,bool evaluations=false) {
+    AdditiveReplay additiveReplay(limits);std::string schema;
+    uint64_t initialEvaluated=0;
     uint64_t target=UINT64_MAX,previousSequence=0,mandatory=0,optional=0,historical=0,current=0;
     std::string runId,previousHash(64,'0');
     bool started=false,found=false;
@@ -706,9 +716,19 @@ void journalObservations(const fs::path &path,const std::string &domain,
     }
     Journal::replayReadOnly(path,{UINT64_MAX,limits.record,std::max<uint64_t>(1024,limits.selection)},
         [&](const Json &transaction,const CommitReceipt &commit) {
-            if(transaction.at("schema").str()!="fgm-search-transaction-v1")
-                throw std::runtime_error("journal input requires search workflow transactions");
             if(!commit.acknowledged||commit.sequence>target)return;
+            const auto currentSchema=transaction.at("schema").str();
+            if(currentSchema!="fgm-search-transaction-v1"&&currentSchema!="fgm-additive-search-transaction-v1")
+                throw std::runtime_error("journal input requires search workflow transactions");
+            if(!schema.empty()&&schema!=currentSchema)throw std::runtime_error("mixed journal workflows");
+            schema=currentSchema;
+            const bool additive=schema=="fgm-additive-search-transaction-v1";
+            if(evaluations&&!additive)throw std::runtime_error("evaluation export requires additive history");
+            if(additive) {
+                if(receipt&&transaction.at("run_id").str()==runId&&transaction.at("kind").str()=="run_start")
+                    initialEvaluated=uint64_t(additiveReplay.state().at("evaluated_count").num());
+                additiveReplay.apply(transaction,commit);
+            }
             const auto &workflow=transaction.at("workflow");
             if(receipt) {
                 const bool thisRun=transaction.at("run_id").str()==runId;
@@ -767,6 +787,29 @@ void journalObservations(const fs::path &path,const std::string &domain,
             const auto workflowDomain=workflow.at("domain").str();
             if(workflowDomain!="ZT"&&workflowDomain!="F2")throw std::runtime_error("journal workflow domain mismatch");
             if(!domain.empty()&&domain!=workflowDomain)throw std::runtime_error("explicit domain conflicts with journal workflow");
+            if(evaluations) {
+                auto row=[&](const char *name) {
+                    Json value=Json::dict();value.object["schema"]=Json(name);
+                    value.object["run_id"]=transaction.at("run_id");value.object["batch"]=transaction.at("batch");
+                    value.object["sequence"]=Json(int64_t(commit.sequence));value.object["transaction_sha256"]=Json(commit.hash);
+                    return value;
+                };
+                for(const auto &evaluation:transaction.at("evaluations").array) {
+                    auto value=row("fgm-journal-evaluation-v1");value.object["evaluation"]=evaluation;
+                    bool bound=false;
+                    for(const auto &entry:transaction.at("admissions").array)
+                        if(entry.at("scheme_id").str()==evaluation.at("scheme_id").str()) {
+                            value.object["source_scheme"]=entry.at("scheme");bound=true;break;
+                        }
+                    if(!bound)throw std::runtime_error("exported evaluation lacks source admission");
+                    emit(value);
+                }
+                if(transaction.has("installations"))for(const auto &event:transaction.at("installations").array) {
+                    auto value=row("fgm-parent-installation-v1");
+                    for(const auto &entry:event.object)value.object[entry.first]=entry.second;
+                    value.object["kind"]=Json(transaction.at("kind").str()=="initialize"?"initial":"restart");emit(value);
+                }
+            }
             if(!transaction.has("observations"))return;
             const auto &observations=transaction.at("observations");
             if(observations.kind!=Json::Array)throw std::runtime_error("journal observations must be an array");
@@ -792,11 +835,20 @@ void journalObservations(const fs::path &path,const std::string &domain,
                 observation.object["rank"]=Json(int64_t(scheme.rank));
                 observation.object["domain"]=Json(workflowDomain);
                 observation.object["scheme"]=schemeJson(scheme);
-                emit(observation);
+                if(!evaluations)emit(observation);
             }
         },[&](uint64_t amount){scan(amount);});
     if(receipt) {
         if(!found||!started)throw std::runtime_error("receipt target is not acknowledged in journal");
+        if(schema=="fgm-additive-search-transaction-v1") {
+            const auto state=additiveReplay.state();
+            if(dump(state.at("best"))!=dump(receipt->at("best_evaluation")) ||
+               state.at("evaluated_count").num()!=receipt->at("evaluated_historical").num() ||
+               state.at("evictions").num()!=receipt->at("pool_evictions").num() ||
+               state.at("evaluated_count").num()-int64_t(initialEvaluated)!=receipt->at("evaluated_current_run").num() ||
+               dump(state.at("contract"))!=dump(additiveContract(receipt->at("configuration"),*receipt)))
+                throw std::runtime_error("receipt evaluated population mismatch");
+        }
         const auto &counters=receipt->at("committed_counters");
         for(const auto &entry:std::map<std::string,uint64_t>{{"mandatory_captures",mandatory},
                 {"optional_captures",optional},{"discoveries_current_run",current},{"discoveries_historical",historical}}) {
@@ -1233,7 +1285,8 @@ static void help() {
         "  export: --output-format cpu-text|metal-search-text|metal-minimizer-text|json|legacy-json|jsonl|json-array\n"
         "  journal: --input DIRECTORY reads unique committed admissions without writes or resume; --record-bytes bounds frames\n"
         "  analyze: --summary emits one bounded corpus descriptor summary; --observations exports acknowledged journal captures\n"
-        "  --receipt FILE binds observation export to that run receipt's acknowledged journal prefix\n"
+        "  --evaluations exports verified additive evaluations and parent installations; requires --receipt\n"
+        "  --receipt FILE binds journal export to that run receipt's acknowledged prefix\n"
         "  select: versioned JSONL manifest; --count K [--seed UINT64 | --ids JSON_FILE]\n"
         "  filters before selection: --filter-domain ZT|F2 --filter-dimensions A,B,C --filter-rank R\n"
         "  --filter-group namespace:name=value matches metadata.groups arrays; absent fields do not match\n"
@@ -1256,7 +1309,7 @@ int runCli(int argc,char**argv) {
         };
         for(int i=2; i<argc; ++i) {
             const std::string option=argv[i];
-            if(option=="--summary"||option=="--observations") {
+            if(option=="--summary"||option=="--observations"||option=="--evaluations") {
                 if(!args.emplace(option,"1").second)throw std::runtime_error("duplicate summary option");
             } else {
                 if(i+1>=argc||!allowed.count(option)||!args.emplace(option,argv[i+1]).second)
@@ -1267,8 +1320,10 @@ int runCli(int argc,char**argv) {
         if(args.count("--summary")&&command!="analyze")throw std::runtime_error("--summary requires analyze");
         if(args.count("--observations")&&(command!="analyze"||args.count("--summary")))
             throw std::runtime_error("--observations requires analyze and conflicts with --summary");
-        if(args.count("--receipt")&&!args.count("--observations"))
-            throw std::runtime_error("--receipt requires analyze --format journal --observations");
+        if(args.count("--evaluations")&&(command!="analyze"||args.count("--summary")||args.count("--observations")||!args.count("--receipt")))
+            throw std::runtime_error("--evaluations requires analyze --receipt and conflicts with other analysis modes");
+        if(args.count("--receipt")&&!args.count("--observations")&&!args.count("--evaluations"))
+            throw std::runtime_error("--receipt requires journal observation or evaluation export");
         if(args.count("--record-bytes"))limits.record=u64(args["--record-bytes"]);
         if(args.count("--verification-work"))limits.work=u64(args["--verification-work"]);
         if(args.count("--selection-memory"))limits.selection=u64(args["--selection-memory"]);
@@ -1286,7 +1341,7 @@ int runCli(int argc,char**argv) {
         else {
             fs::path input=required(args,"--input");
             auto format=required(args,"--format");
-            if(args.count("--observations")&&format!="journal")throw std::runtime_error("--observations requires journal input");
+            if((args.count("--observations")||args.count("--evaluations"))&&format!="journal")throw std::runtime_error("--observations requires journal input");
             const auto artifact=artifactPath(input,format);
             regularInput(artifact,format!="jsonl"&&format!="json-array"&&format!="journal");
             auto originalHash=fileHash(artifact);
@@ -1297,7 +1352,7 @@ int runCli(int argc,char**argv) {
             uint64_t count=0;
             Json corpus=Json::dict();
             std::string parsedSourceHash;
-            if(args.count("--observations")) {
+            if(args.count("--observations")||args.count("--evaluations")) {
                 Json receipt;
                 if(args.count("--receipt")) {
                     const fs::path receiptPath=args.at("--receipt");regularInput(receiptPath,true);
@@ -1306,7 +1361,7 @@ int runCli(int argc,char**argv) {
                     auto bytes=boundedRead(file);scan(bytes.size());receipt=Parser(bytes).parse();
                 }
                 journalObservations(input,domain,[&](const Json &observation){output.write(dump(observation)+"\n");},
-                                    &parsedSourceHash,args.count("--receipt")?&receipt:nullptr);
+                                    &parsedSourceHash,args.count("--receipt")?&receipt:nullptr,args.count("--evaluations"));
                 if(parsedSourceHash!=originalHash||fileHash(artifact)!=originalHash)
                     throw std::runtime_error("input changed during processing");
                 output.commit();
@@ -1446,6 +1501,45 @@ Matrix AdmissionContext::reconstructStage(const Json &outputs,const Json &fresh,
 std::string AdmissionContext::identity(const SchemeRecord &s,bool canonical) { return impl->identity(s,canonical); }
 SchemeRecord AdmissionContext::normalized(const SchemeRecord &s) { impl->shape(s); return impl->executionNormalized(s); }
 bool AdmissionContext::verify(const SchemeRecord &s) { return impl->verify(s); }
+uint32_t evaluationSeed(uint32_t base,const std::string &factorsId) {
+    Json key=Json::dict();key.object["purpose"]=Json("additive-evaluation");
+    key.object["seed"]=Json(int64_t(base));key.object["factors_id"]=Json(factorsId);
+    const auto hash=sha256Bytes(dump(key));
+    const auto seed=uint32_t(std::stoul(hash.substr(0,8),nullptr,16));
+    return seed?seed:1;
+}
+uint64_t AdmissionContext::verifyEvaluation(const Json &evaluation,const SchemeRecord &expected) {
+    if(evaluation.at("schema").str()!="fgm-additive-evaluation-v1" || expected.f2 ||
+       expected.rank!=23 || expected.n!=std::array<uint32_t,3>{3,3,3})
+        throw std::runtime_error("invalid additive evaluation domain or shape");
+    auto circuit=fromJson(evaluation.at("circuit"),"ZT");
+    if(!circuit.circuit || circuit.n!=expected.n || circuit.rank!=expected.rank || circuit.f!=expected.f ||
+       !verify(circuit) || normalized(expected).f!=expected.f)
+        throw std::runtime_error("additive circuit differs from effective factors");
+    const auto factors=identity(expected,false),scheme=identity(expected,true);
+    if(evaluation.at("factors_id").str()!=factors || evaluation.at("scheme_id").str()!=scheme ||
+       evaluation.at("additions").num()!=int64_t(circuit.operations))
+        throw std::runtime_error("additive circuit identity or total mismatch");
+    const auto &counts=evaluation.at("additions_by_stage");
+    if(counts.kind!=Json::Object || counts.object.size()!=3)
+        throw std::runtime_error("additive stage counts required");
+    for(size_t p=0;p<3;++p)if(counts.at(std::string(1,"uvw"[p])).num()!=int64_t(circuit.operationsByStage[p]))
+        throw std::runtime_error("additive stage count mismatch");
+    const auto &settings=evaluation.at("settings");
+    if(settings.at("domain").str()!="ZT" || settings.at("strategy").str()!="combined" ||
+       settings.at("schemes").num()!=1 || settings.at("max_flips").num()!=0 ||
+       settings.at("target_additions").num()!=0 || settings.at("seed").num()<0 || settings.at("seed").num()>UINT32_MAX)
+        throw std::runtime_error("invalid additive evaluator settings");
+    for(const auto *key:{"reducers","rounds","no_improvements"})if(settings.at(key).num()<=0)
+        throw std::runtime_error("invalid additive evaluation quantum");
+    if(evaluation.at("seed").num()!=int64_t(evaluationSeed(uint32_t(settings.at("seed").num()),factors)))
+        throw std::runtime_error("additive evaluation seed mismatch");
+    const auto &producer=evaluation.at("producer");
+    auto digest=[](const Json &j){const auto &s=j.str();return s.size()==64&&s.find_first_not_of("0123456789abcdef")==std::string::npos;};
+    if(producer.at("library_mode").str()!="metallib" || !digest(producer.at("executable_sha256")) ||
+       !digest(producer.at("library_sha256")))throw std::runtime_error("invalid additive producer identity");
+    return circuit.operations;
+}
 Json AdmissionContext::analyze(const SchemeRecord &s) { impl->shape(s); return impl->assess(s); }
 Json AdmissionContext::schemeJson(const SchemeRecord &s) { impl->shape(s); return impl->schemeJson(s); }
 std::string AdmissionContext::sha256File(const fs::path &path) { return impl->fileHash(path); }

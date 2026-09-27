@@ -51,6 +51,38 @@ void searchTestCheckpoint(const char *point,const PreparedRun &run) {
     if(at=="before_start"&&mode=="start")throw Resource("injected resumed start failure");
     if(at=="before_run_end"&&mode=="end")Journal::testFaults(0);
 }
+Json searchTestEvaluation(const SchemeRecord &scheme,const ReductionSettings &,Json &) {
+    // A naive circuit exercises host acceptance and journal failure paths. This
+    // test-only fixture builder is neither the constructor nor GPU evidence.
+    if(failure()=="evaluation")throw std::runtime_error("injected interrupted evaluation");
+    Json circuit=Json::dict(),dimensions=Json::list(),costs=Json::dict();uint64_t total=0;
+    for(auto n:scheme.n)dimensions.array.push_back(Json(int64_t(n)));
+    circuit.object["n"]=dimensions;circuit.object["m"]=Json(int64_t(scheme.rank));circuit.object["z2"]=Json(false);
+    for(size_t p=0;p<3;++p) {
+        const std::string key(1,"uvw"[p]);Json outputs=Json::list();uint64_t cost=0;
+        const auto count=p==2?scheme.f[p][0].size():scheme.rank;
+        for(size_t r=0;r<count;++r) {
+            Json expression=Json::list();
+            const auto width=p==2?scheme.rank:scheme.f[p][r].size();
+            for(size_t i=0;i<width;++i) {
+                const auto coefficient=p==2?scheme.f[p][i][r]:scheme.f[p][r][i];
+                if(coefficient){Json term=Json::dict();term.object["index"]=Json(int64_t(i));term.object["value"]=Json(coefficient);expression.array.push_back(term);}
+            }
+            if(!expression.array.empty())cost+=expression.array.size()-1;
+            outputs.array.push_back(expression);
+        }
+        circuit.object[key]=outputs;circuit.object[key+"_fresh"]=Json::list();costs.object[key]=Json(int64_t(cost));total+=cost;
+    }
+    Json complexity=Json::dict();complexity.object["naive"]=Json(int64_t(total));complexity.object["reduced"]=Json(int64_t(total));
+    circuit.object["complexity"]=complexity;
+    Json result=Json::dict();result.object["circuit"]=circuit;result.object["verified_circuit_additions"]=Json(int64_t(total));
+    result.object["verified_circuit_additions_by_stage"]=costs;
+    result.object["baseline_additions"]=Json(int64_t(total));result.object["baseline_additions_by_stage"]=costs;
+    for(const auto *key:{"phase_microseconds","construction","stage_sources"})result.object[key]=Json::dict();
+    for(const auto *key:{"rounds_completed","flip_attempts","flips_applied"})result.object[key]=Json(int64_t(0));
+    if(failure()=="evaluation-count")result.object["verified_circuit_additions"]=Json(int64_t(total-1));
+    return result;
+}
 void executeHostSearchTest(PreparedRun &run) {
     if(!run.config.policy||run.config.policy->domain!=ControlledConfig::Domain::Signed)
         throw std::runtime_error("CPU integration driver only executes signed search");

@@ -11,6 +11,7 @@
 namespace fgm {
 #ifdef FGM_SEARCH_TESTING
 void searchTestCheckpoint(const char *,const PreparedRun &);
+Json searchTestEvaluation(const SchemeRecord &,const ReductionSettings &,Json &);
 #endif
 inline Json runNumber(uint64_t value) {
     if(value>INT64_MAX)throw Resource("run record integer overflow");return Json(int64_t(value));
@@ -104,8 +105,9 @@ template<class S> void executeSearch(PreparedRun &run) {
     const bool packed=config.execution.backend!="general"&&run.receipt.at("packed_eligible").boolean;
     // Pools are copied transactionally; serialization and recovery buffers have
     // explicit reserves in addition to shared Metal storage and admitted inputs.
-    const auto reserved=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
+    auto reserved=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
         configCheckedAdd(configCheckedMultiply(config.history.transactionBytes,4),config.history.indexMemoryBytes));
+    if(config.additive)reserved=configCheckedAdd(reserved,configCheckedMultiply(config.limits.record,128));
     const auto planned=uint64_t(run.receipt.at("planned_buffer_bytes").num());
     if(configCheckedAdd(configCheckedAdd(planned,uint64_t(run.receipt.at("admission_content_bytes").num())),reserved)>config.execution.memoryBytes)
         throw Resource("run memory budget cannot reserve pools and transactions");
@@ -129,14 +131,69 @@ template<class S> void executeSearch(PreparedRun &run) {
     if(resume)pools.restore(run.recoveredPools,serialization);
     std::mt19937_64 hostRng(policy.seed);uint64_t historical=run.historicalDiscoveries,currentDiscoveries=0,batch=0;
     uint64_t mandatoryCaptures=0,optionalCaptures=0,captureDrops=0;
+    uint64_t evaluatedCount=config.additive&&resume?uint64_t(run.recoveredAdditive.at("evaluated_count").num()):0;
+    const auto initialEvaluated=evaluatedCount;
+    Json bestEvaluation=config.additive&&resume?run.recoveredAdditive.at("best"):Json();
+    Json contract=config.additive?additiveContract(run):Json();
+    if(config.additive) {
+        receiptFields["best_evaluation"]=bestEvaluation;receiptFields["evaluated_historical"]=runNumber(evaluatedCount);
+        receiptFields["evaluated_current_run"]=runNumber(0);
+        receiptFields["pool_evictions"]=pools.snapshot(serialization).at("evictions");
+    }
+    auto evaluate=[&](PoolMember member) {
+#if !defined(METAL_F2)
+        const auto sourceId=serialization.identity(member.scheme,false);
+        member.scheme=serialization.normalized(member.scheme);
+        auto settings=*config.evaluation;
+        const auto factorsId=serialization.identity(member.scheme,false);
+        settings.seed=evaluationSeed(settings.seed,factorsId);
+#ifdef FGM_SEARCH_TESTING
+        Json result=searchTestEvaluation(member.scheme,settings,run.receipt);
+#else
+        Json result=evaluateReduction(member.scheme,settings,config.execution.blockSize,config.limits,run.receipt);
+#endif
+        Json value=Json::dict();value.object["schema"]=Json("fgm-additive-evaluation-v1");
+        value.object["scheme_id"]=Json(member.id);value.object["factors_id"]=Json(factorsId);
+        value.object["source_factors_id"]=Json(sourceId);value.object["seed"]=runNumber(settings.seed);
+        value.object["settings"]=contract.at("evaluation");value.object["producer"]=contract.at("producer");
+        value.object["admission_order"]=runNumber(evaluatedCount);
+        value.object["additions"]=result.at("verified_circuit_additions");
+        value.object["additions_by_stage"]=result.at("verified_circuit_additions_by_stage");
+        for(const auto *key:{"circuit","phase_microseconds","construction","stage_sources","baseline_additions",
+                            "baseline_additions_by_stage","rounds_completed","flip_attempts","flips_applied"})
+            value.object[key]=result.at(key);
+        serialization.verifyEvaluation(value,member.scheme);
+        if(dump(value).size()>65536)throw Resource("evaluation exceeds reserved record capacity");
+        member.evaluation=value;member.admissionOrder=evaluatedCount;
+        member.weight=uint64_t(serialization.analyze(member.scheme).at("potential_pairs").num());
+        evaluatedCount=configCheckedAdd(evaluatedCount,1);runNumber(evaluatedCount);
+        if(bestEvaluation.kind==Json::Null || value.at("additions").num()<bestEvaluation.at("additions").num())bestEvaluation=value;
+        return member;
+#else
+        (void)member;throw std::runtime_error("additive evaluation requires the signed Metal executable");
+        return member;
+#endif
+    };
+    auto publishBest=[&]() {
+        if(!config.additive || receiptFields.at("best_evaluation").kind==Json::Null)return;
+        const auto text=dump(receiptFields.at("best_evaluation").at("circuit"))+"\n";
+        if(text.size()>config.limits.record)throw Resource("best circuit exceeds record limit");
+        const std::filesystem::path path=config.output.string()+".circuits.jsonl";
+        {ReceiptPhaseTimer timer(receiptFields.at("persistence_microseconds"));publishNew(path,text);}
+        Json artifact=Json::dict();artifact.object["path"]=Json(path.string());artifact.object["sha256"]=Json(sha256Bytes(text));
+        artifact.object["format"]=Json("jsonl");artifact.object["records"]=runNumber(1);receiptFields["circuit_artifact"]=std::move(artifact);
+    };
     Json binding=Json::dict();binding.object["domain"]=Json(std::is_same_v<S,SchemeZ2>?"F2":"ZT");
     binding.object["mode"]=policy.resolved().at("mode");binding.object["dimensions"]=policy.resolved().at("dimensions");
     if(settings.alternatives)binding.object["collection_rank"]=runNumber(policy.anchor);
+    if(config.additive)binding.object["additive"]=contract;
     const std::string runId=sha256Bytes(run.receipt.at("configuration_sha256").str()+journal.state().hash+std::to_string(journal.state().sequence));
-    auto transaction=[&](const char *kind,const RankPools &next) {
-        Json value=Json::dict();value.object["schema"]=Json("fgm-search-transaction-v1");value.object["kind"]=Json(kind);
+    auto transaction=[&](const char *kind,const RankPools &next,const Json &evaluations=Json::list()) {
+        Json value=Json::dict();value.object["schema"]=Json(config.additive?"fgm-additive-search-transaction-v1":"fgm-search-transaction-v1");value.object["kind"]=Json(kind);
         value.object["workflow"]=binding;value.object["run_id"]=Json(runId);value.object["batch"]=runNumber(batch);
-        value.object["stage"]=runNumber(policy.anchor);value.object["admissions"]=Json::list();value.object["pools"]=next.snapshot(serialization);return value;
+        value.object["stage"]=runNumber(policy.anchor);value.object["admissions"]=Json::list();value.object["pools"]=next.snapshot(serialization);
+        if(config.additive){value.object["evaluations"]=evaluations;value.object["evaluated_count"]=runNumber(evaluatedCount);value.object["best_evaluation"]=bestEvaluation;}
+        return value;
     };
     auto admission=[&](const PoolMember &member,const char *origin) {
         Json item=Json::dict();item.object["scheme_id"]=Json(member.id);item.object["origin"]=Json(origin);
@@ -151,6 +208,12 @@ template<class S> void executeSearch(PreparedRun &run) {
         runNumber(configCheckedAdd(historical,eligible.size()));runNumber(configCheckedAdd(currentDiscoveries,eligible.size()));
         Json counters=run.receipt.at("counters"),phase=run.receipt.at("accounting");
         Json committed=counters,head(std::string{}),sequence=runNumber(0),stage=tx.at("stage");
+        Json committedBest=bestEvaluation,committedEvaluated=runNumber(evaluatedCount),committedNew=runNumber(evaluatedCount-initialEvaluated);
+        Json *bestDestination=config.additive?&receiptFields.at("best_evaluation"):nullptr;
+        Json *evaluatedDestination=config.additive?&receiptFields.at("evaluated_historical"):nullptr;
+        Json *newDestination=config.additive?&receiptFields.at("evaluated_current_run"):nullptr;
+        Json committedEvictions=config.additive?tx.at("pools").at("evictions"):Json();
+        Json *evictionDestination=config.additive?&receiptFields.at("pool_evictions"):nullptr;
         auto &historyCount=counters.object.at("discoveries_historical"),&runCount=counters.object.at("discoveries_current_run");
         auto &committedHistory=committed.object.at("discoveries_historical"),&committedRun=committed.object.at("discoveries_current_run");
         if(tx.at("kind").str()=="batch")phase.object.at("committed_batches")=runNumber(batch);
@@ -166,20 +229,30 @@ template<class S> void executeSearch(PreparedRun &run) {
         static_assert(std::is_nothrow_move_assignable_v<Json>);
         *destinations[0]=std::move(counters);*destinations[1]=std::move(committed);*destinations[2]=std::move(phase);
         *destinations[3]=std::move(sequence);*destinations[4]=std::move(head);*destinations[5]=std::move(stage);
+        if(config.additive){*bestDestination=std::move(committedBest);*evaluatedDestination=std::move(committedEvaluated);*newDestination=std::move(committedNew);*evictionDestination=std::move(committedEvictions);}
     };
-    Json imports=Json::list();
-    if(!resume)for(const auto &input:run.inputs){auto member=verifiedMember(input.effective,config.limits);pools.admit(member);imports.array.push_back(admission(member,"import"));}
+    const auto initialBound=config.additive?configCheckedAdd(dump(run.receipt).size()+65536,
+        configCheckedMultiply(configCheckedAdd(configCheckedMultiply(run.inputs.size(),3),1),65536)):0;
+    if(initialBound>config.history.transactionBytes)throw Resource("initial evaluations exceed reserved transaction capacity");
+    const auto startReservation=journal.reserve(config.history.transactionBytes);
+    Json imports=Json::list(),initialEvaluations=Json::list();
+    if(!resume)for(const auto &input:run.inputs){
+        auto member=verifiedMember(input.effective,config.limits);imports.array.push_back(admission(member,"import"));
+        if(config.additive){member=evaluate(std::move(member));initialEvaluations.array.push_back(member.evaluation);}
+        pools.admit(member);
+    }
     if(!resume)pools.stageEntry(uint32_t(policy.anchor));
     pools.refill(uint32_t(policy.anchor));
-    auto start=transaction("run_start",pools);start.object["admissions"]=std::move(imports);start.object["run_record"]=run.receipt;
+    auto start=transaction("run_start",pools,initialEvaluations);start.object["admissions"]=std::move(imports);start.object["run_record"]=run.receipt;
     start.object["seed"]=runNumber(policy.seed);start.object["resume"]=Json(resume);start.object["walker_continuation"]=Json(false);
 #ifdef FGM_SEARCH_TESTING
     searchTestCheckpoint("before_start",run);
 #endif
-    commit(start,journal.reserve(config.history.transactionBytes));
+    commit(start,startReservation);
     run.receipt.object["run_id"]=Json(runId);run.receipt.object["execution_started"]=Json(true);
     std::string terminal;
     if(config.discoveryTarget&&historical>=*config.discoveryTarget)terminal="discovery_target_met";
+    if(config.circuitTarget && bestEvaluation.kind!=Json::Null && uint64_t(bestEvaluation.at("additions").num())<=*config.circuitTarget)terminal="circuit_target_met";
     // All explicit starting parents are target-checked in input order before any
     // worker or host selection RNG is consumed.
     for(const auto &input:run.inputs)if(controlledTarget(settings,int(input.effective.rank))){terminal="existing_target_met";break;}
@@ -191,7 +264,7 @@ template<class S> void executeSearch(PreparedRun &run) {
 #endif
         commit(end,journal.reserve(config.history.transactionBytes));
         run.receipt.object["status"]=Json("complete");run.receipt.object["terminal_reason"]=Json(terminal);
-        run.receipt.object["counters"].object["discoveries_historical"]=runNumber(historical);return;
+        run.receipt.object["counters"].object["discoveries_historical"]=runNumber(historical);publishBest();return;
     }
     RunBuffer<S> current(workers),best(workers),captures(configCheckedMultiply(workers,slots));
     RunBuffer<ControlledState> states(workers);RunBuffer<ControlledCaptureMeta> metadata(configCheckedMultiply(workers,slots));
@@ -199,12 +272,21 @@ template<class S> void executeSearch(PreparedRun &run) {
     if(packed)compact=std::make_unique<PackedRunBuffers>((workers+31)/32*32);
     std::vector<std::string> parents(static_cast<size_t>(workers));
     auto parent=std::make_unique<S>();
+    Json initialInstallations=Json::list();
+    auto installation=[&](const PoolMember &member,uint64_t worker,const std::string &group,bool installed) {
+        Json event=Json::dict();event.object["worker"]=runNumber(worker);event.object["selected_parent_id"]=Json(member.id);
+        event.object["installed"]=Json(installed);
+        if(config.additive){event.object["selection_group"]=Json(group);event.object["selected_factors_id"]=Json(serialization.identity(member.scheme,false));
+            event.object["selected_additions"]=member.evaluation.at("additions");}
+        return event;
+    };
     for(uint64_t w=0;w<workers;++w){
-        const auto *member=pools.select(uint32_t(policy.anchor),hostRng);
+        std::string group;const auto *member=pools.select(uint32_t(policy.anchor),hostRng,&group);
         if(!member)throw std::runtime_error("eligible initial parent roster disappeared");
         parents[w]=member->id;
         loadRunScheme(member->scheme,*parent);
         if(!controlledInitialize(settings,states.data[w],*parent,current.data[w],best.data[w],policy.seed,uint32_t(w)))throw std::runtime_error("worker initialization rejected");
+        if(config.additive)initialInstallations.array.push_back(installation(*member,w,group,true));
     }
     auto workerRecords=[&](){Json all=Json::list();for(uint64_t w=0;w<workers;++w){auto item=workerRecord(states.data[w],w,current.data[w].m,best.data[w].m);
         item.object["parent_id"]=Json(parents[w]);item.object["remaining_flips"]=runNumber(settings.flipBudget-states.data[w].flips);
@@ -225,6 +307,10 @@ template<class S> void executeSearch(PreparedRun &run) {
         receiptFields.at("accounting")=std::move(phase);receiptFields.at("completed_batches")=std::move(completed);
     };
     snapshot();
+    if(config.additive) {
+        auto initialized=transaction("initialize",pools);initialized.object["installations"]=std::move(initialInstallations);
+        initialized.object["workers"]=workerRecords();commit(initialized,journal.reserve(config.history.transactionBytes));
+    }
     auto started=std::chrono::steady_clock::now();
     while(terminal.empty()) {
         bool live=false;
@@ -242,8 +328,9 @@ template<class S> void executeSearch(PreparedRun &run) {
         for(uint64_t w=0;w<workers;++w)maxRank=std::max(maxRank,uint64_t(current.data[w].m));
         const auto perCapture=configCheckedAdd(configCheckedMultiply(maxRank,configCheckedAdd(configCheckedMultiply(width,3),16)),2048);
         const auto maxCaptures=configCheckedMultiply(workers,slots);
-        const auto evidenceBound=configCheckedAdd(dump(pools.snapshot(serialization)).size(),
+        auto evidenceBound=configCheckedAdd(dump(pools.snapshot(serialization)).size(),
             configCheckedAdd(configCheckedMultiply(maxCaptures,configCheckedMultiply(perCapture,3)),configCheckedAdd(32768,workers*4096)));
+        if(config.additive)evidenceBound=configCheckedAdd(evidenceBound,configCheckedMultiply(configCheckedAdd(configCheckedMultiply(maxCaptures,2),1),65536));
         if(evidenceBound>config.history.transactionBytes)throw Resource("transaction limit cannot reserve all bounded capture evidence");
         const auto jsonBound=configCheckedAdd(jsonMemoryBytes(pools.snapshot(serialization))*2,
             configCheckedMultiply(configCheckedMultiply(maxCaptures,maxRank),configCheckedMultiply(width+6,sizeof(Json)*6)));
@@ -264,7 +351,7 @@ template<class S> void executeSearch(PreparedRun &run) {
         RankPools next=pools;Json observations=Json::list(),admissions=Json::list();std::set<std::string> unique;
         auto observe=[&](uint64_t w,uint64_t slot,bool mandatory){
             const auto offset=w*slots+slot;auto member=verifiedMember(runScheme(captures.data[offset]),config.limits);
-            next.admit(member);if(unique.insert(member.id).second)admissions.array.push_back(admission(member,"discovery"));
+            if(!config.additive)next.admit(member);if(unique.insert(member.id).second)admissions.array.push_back(admission(member,"discovery"));
             Json observation=Json::dict();observation.object["worker"]=runNumber(w);observation.object["mandatory"]=Json(mandatory);
             observation.object["slot"]=runNumber(slot);observation.object["scheme_id"]=Json(member.id);observation.object["parent_id"]=Json(parents[w]);
             observation.object["factors_id"]=Json(serialization.identity(member.scheme,false));observation.object["control"]=runNumber(metadata.data[offset].control);
@@ -281,13 +368,21 @@ template<class S> void executeSearch(PreparedRun &run) {
         for(uint64_t w=0;w<workers;++w)if(states.data[w].mandatoryValid){observe(w,0,true);++mandatoryCaptures;}
         for(uint64_t w=0;w<workers;++w){for(uint64_t i=0;i<states.data[w].optionalCount;++i){observe(w,i+1,false);++optionalCaptures;}captureDrops=configCheckedAdd(captureDrops,states.data[w].optionalDrops);}
         }
+        Json evaluations=Json::list();
+        if(config.additive)for(const auto &item:admissions.array) {
+            if(item.at("rank").num()!=23 || journal.contains(item.at("scheme_id").str()))continue;
+            auto member=verifiedMember(serialization.fromJson(item.at("scheme")),config.limits);
+            member=evaluate(std::move(member));next.admit(member);evaluations.array.push_back(member.evaluation);
+        }
         snapshot();
-        auto tx=transaction("batch",next);tx.object["admissions"]=std::move(admissions);tx.object["observations"]=std::move(observations);tx.object["workers"]=run.receipt.at("workers");
+        auto tx=transaction("batch",next,evaluations);tx.object["admissions"]=std::move(admissions);tx.object["observations"]=std::move(observations);tx.object["workers"]=run.receipt.at("workers");
         commit(tx,reservation);pools=std::move(next);
         for(uint64_t w=0;w<workers;++w){if(!controlledCommit(states.data[w],true,true))throw std::runtime_error("committed observation acknowledgement rejected");
             if(states.data[w].terminal==ControlledOutcome::TargetMet)terminal="rank_target_met";
             if(!controlledBoundary(states.data[w]))throw std::runtime_error("committed capture boundary rejected");}
         if(config.discoveryTarget&&historical>=*config.discoveryTarget)terminal="discovery_target_met";
+        if(config.circuitTarget && bestEvaluation.kind!=Json::Null && uint64_t(bestEvaluation.at("additions").num())<=*config.circuitTarget)terminal="circuit_target_met";
+        if(terminal.empty()&&config.additive&&batch>=config.execution.maxBatches)terminal="batch_limit";
         if(terminal.empty()&&!settings.alternatives){
             const auto stage=pools.nextStage(uint32_t(policy.anchor));
             if(stage<policy.anchor){
@@ -305,7 +400,7 @@ template<class S> void executeSearch(PreparedRun &run) {
         bool restartHandled=false;Json installations=Json::list();
         if(terminal.empty())for(uint64_t w=0;w<workers;++w){
             auto &state=states.data[w];if(controlledTerminal(state)||!state.pendingRestart)continue;
-            const auto *member=pools.select(uint32_t(policy.anchor),hostRng);
+            std::string group;const auto *member=pools.select(uint32_t(policy.anchor),hostRng,&group);
             if(!member){terminal="no_eligible_parent";break;}
             verifiedMember(member->scheme,config.limits);loadRunScheme(member->scheme,*parent);
             const auto before=state.controls;
@@ -313,8 +408,8 @@ template<class S> void executeSearch(PreparedRun &run) {
             const bool installed=state.controls>before;
             if(installed)parents[w]=member->id;
             snapshot();
-            Json event=Json::dict();event.object["worker"]=runNumber(w);event.object["selected_parent_id"]=Json(member->id);
-            event.object["installed"]=Json(installed);event.object["outcome"]=Json(walkOutcome(state.terminal));installations.array.push_back(std::move(event));
+            Json event=installation(*member,w,group,installed);
+            event.object["outcome"]=Json(walkOutcome(state.terminal));installations.array.push_back(std::move(event));
             restartHandled=true;
             if(state.terminal==ControlledOutcome::ExistingTargetPending){terminal="existing_target_met";break;}
         }
@@ -333,5 +428,6 @@ template<class S> void executeSearch(PreparedRun &run) {
     run.receipt.object["status"]=Json("complete");run.receipt.object["terminal_reason"]=Json(terminal);run.receipt.object["workers"]=workerRecords();
     run.receipt.object["completed_batches"]=runNumber(batch);run.receipt.object["final_stage"]=runNumber(policy.anchor);
     run.receipt.object["batches_through_final_commit_microseconds"]=runNumber(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count()));
+    publishBest();
 }
 } // namespace fgm
