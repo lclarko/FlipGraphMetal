@@ -372,11 +372,39 @@ committed circuits are partial correctness evidence, with no endpoint or
 comparison credit. The source/build snapshot, journal, guard log and partial
 verification are retained under `build/fgm3/gpu-smoke/`.
 
+Follow-up packaged checks completed initialization and resume for both selectors
+using public CN122, one worker, one step and one batch per invocation. The
+128-reducer/16-round evaluation quantum and resource guards were unchanged.
+All four invocations ran from an unrelated working directory with an empty
+native PATH. Six evaluations across the two fresh histories passed native and
+independent verification; best cost was 55 (13/14/28). The checks took 5.340
+seconds in total, with peak sampled wired memory of 2,873,769,984 bytes. This
+establishes the small packaged execution path, not the full comparison workload.
+Evidence is retained under `build/fgm3/gpu-qualification-01/`.
+
+The frozen 16-parent qualification then completed its first uniform chunk:
+four batches, 20 verified evaluations (16 starting parents and four discoveries),
+best cost 55, and 14.099 seconds including exports and independent checks.
+Peak sampled wired memory was 3,168,567,296 bytes. The resume chunk hit the
+unchanged 3-GiB guard after 6.243 seconds, rising from 1,932,984,320 to
+3,330,719,744 bytes of system wired memory. Process cleanup completed. Further
+GPU admission stopped, including the one-worker fallback. No measured arm
+started. The attempt, retained under `build/fgm3/comparison-01/`, remains
+incomplete; its verified initialization does not establish complete qualification
+or a selection benefit. This stop was caused by memory, not the time allowance.
+
+Read-only replay of the stopped history independently verified 28 acknowledged
+evaluations in total, including eight from the unfinished resume. Best cost
+remained 55; none reached 54. One previously discovered parent was installed
+by uniform selection at resume initialization. This is evidence of parent
+reuse, not cost-diverse feedback or a selection benefit. These partial results
+receive no measured endpoint credit, and the original history was unchanged.
+
 The final host suite passed 257 tests with no failures or skips; the independent
 verifier's four focused tests also passed. Native programs and the package built,
 and relocated host commands plus additive preflight passed with Python absent
 from PATH. Host tests cover score binding, population selection, resume,
-transaction failures and malformed histories. Full GPU qualification, resumed GPU search,
-packaged additive execution and matched-time selection benefit remain
-**unverified**. No conclusion about uniform versus cost-diverse selection follows
-from this smoke or from the retrospective reconstruction pass.
+transaction failures and malformed histories. Full GPU qualification at the
+frozen comparison settings and matched-time selection benefit remain
+**unverified**. The small packaged checks and the retrospective reconstruction
+pass do not establish a uniform versus cost-diverse selection result.

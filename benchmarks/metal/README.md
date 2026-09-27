@@ -374,6 +374,8 @@ Failed chunk attempts retain their elapsed time and available guard evidence.
 Arm summaries preserve earlier independently verified endpoint results when a
 later chunk fails.
 
-The first native smoke hit the wired-memory guard, so the comparison has not
-been launched. Retained-candidate results and the qualification gap are reported
+Small packaged initialization and resume checks passed for both selectors.
+The full-population qualification completed initialization, then its resume hit
+the wired-memory guard; no measured comparison arm started.
+Retained-candidate results and the qualification gap are reported
 in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).
