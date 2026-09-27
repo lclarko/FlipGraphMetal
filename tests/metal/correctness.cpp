@@ -1,6 +1,8 @@
 #include "../../src/metal/host.h"
 #include <cstdlib>
 #include "candidate_capacity.h"
+#define FGM_CONSTRUCTOR_GPU_TEST
+#include "../workflow/reduction_result.cpp"
 
 void require(bool condition, const std::string &message) {
     if (!condition) throw std::runtime_error(message);
@@ -28,6 +30,16 @@ void textScheme(std::ostream &out, const SchemeInteger &scheme) {
 
 int main(int argc, char **argv) {
     try {
+        if(argc==5 && std::string(argv[1])=="--constructor-input" && std::string(argv[3])=="--output-dir") {
+            const std::filesystem::path output(argv[4]);
+            if(!std::filesystem::create_directory(output)) throw std::runtime_error("output directory already exists");
+            std::ifstream input(argv[2]); std::string bytes((std::istreambuf_iterator<char>(input)),{});
+            if(!input || bytes.size()>1048576) throw std::runtime_error("constructor test input bound");
+            auto requests=fgm::Parser(bytes).parse(), results=fgm::Json::list();
+            for(const auto &request:requests.array) results.array.push_back(constructorTest(request,true));
+            std::ofstream result(output/"constructor.json"); result<<fgm::dump(results)<<'\n';
+            if(!result) throw std::runtime_error("constructor test output write failed"); return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "Usage: " << argv[0] << " --output-dir NEW_DIRECTORY\n";
             return 0;

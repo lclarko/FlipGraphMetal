@@ -14,6 +14,7 @@
 #include "scheme_z2.h"
 #include "pairs_counter.h"
 #include "additions_reducer.h"
+#include "circuit_constructor.h"
 #include "runtime.h"
 #ifdef METAL_F2
 #define Scheme SchemeZ2

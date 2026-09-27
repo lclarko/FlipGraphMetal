@@ -1,0 +1,24 @@
+{
+  "schema": "fgm2-construction-protocol-v1",
+  "public_panel": "../fgm1/panel.json",
+  "public_inputs": ["original", "laderman", "smirnov", "sun", "cn122"],
+  "private_input": "private",
+  "seeds": [7, 19, 41],
+  "strategies": ["baseline", "transpose", "cancellation", "combined"],
+  "order": "panel, seed, strategies rotated left by (panel_index + seed_index) modulo 4",
+  "total_seconds": 900,
+  "finalization_reserve_seconds": 50,
+  "admission_remaining_seconds": 60,
+  "native_seconds": 8,
+  "trial_seconds": 10,
+  "verification_admission_seconds": 2,
+  "reduction": {
+    "reducers": 128,
+    "rounds": 16,
+    "no_improvements": 16,
+    "target_additions": 0,
+    "max_flips": 0,
+    "schemes": 1
+  },
+  "comparison": "fixed work plus construction extensions; no matched-time claim"
+}

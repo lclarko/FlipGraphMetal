@@ -28,7 +28,7 @@ class BuildConfigurationTests(unittest.TestCase):
         for name in ("src/metal/main.cpp", "src/metal/runtime.mm", "src/metal/probe.mm",
                      "src/common/arg_parser.cpp", "src/common/arg_parser.h",
                      "tests/metal/correctness.cpp", "tests/metal/f2_correctness.cpp",
-                     "tests/metal/candidate_capacity.h"):
+                     "tests/metal/candidate_capacity.h", "tests/workflow/reduction_result.cpp"):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.touch()

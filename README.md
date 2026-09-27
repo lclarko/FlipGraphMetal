@@ -1,6 +1,6 @@
 # FlipGraphMetal
 
-An Apple silicon Metal port of [Perminov's FlipGraphGPU](https://github.com/dronperminov/FlipGraphGPU), with performance tuning focused on signed 3×3 matrix-multiplication searches.
+FlipGraphMetal is a Metal-native search and reduction tool derived from [FlipGraphGPU](https://github.com/dronperminov/FlipGraphGPU), with its own measured algorithmic improvements. It focuses on signed 3×3 matrix-multiplication searches on Apple silicon.
 
 FlipGraphMetal retains the upstream search and transformation functionality while providing a Metal backend, independent correctness checks and a packed GPU execution path. It is maintained independently; CUDA is retained as unsupported reference source.
 

@@ -80,7 +80,7 @@ public:
 #ifdef METAL_TESTING
         [source appendString:@"#define METAL_TESTING\n"];
 #endif
-        for (NSString *name in @[@"core.h", @"addition.h", @"flip_set.h", @"scheme_integer.h", @"scheme_z2.h", @"pairs_counter.h", @"additions_reducer.h",
+        for (NSString *name in @[@"core.h", @"addition.h", @"flip_set.h", @"scheme_integer.h", @"scheme_z2.h", @"pairs_counter.h", @"additions_reducer.h", @"circuit_constructor.h",
 #ifndef METAL_F2
             @"compact.h",
 #endif

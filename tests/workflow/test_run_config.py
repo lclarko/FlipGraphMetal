@@ -208,6 +208,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertGreater(record['reserved_host_bytes'], 64*1024*1024)
         self.assertFalse(record['execution_started'])
 
+    def test_constructor_strategies_are_opt_in_fixed_rank23_only(self):
+        config = dict(self.config, operation='reduce', reduction=dict(domain='ZT', seed=7,
+            rounds=2, reducers=2, schemes=1, max_flips=0, no_improvements=2, target_additions=0))
+        del config['policy']
+        config['execution'] = dict(config['execution'], workers=1, memory_bytes=256*1024*1024)
+        for strategy in ('transpose','cancellation','combined'):
+            config['reduction']['strategy'] = strategy
+            result = self.invoke(config)
+            self.assertEqual(result.returncode,1,result.stderr)
+            self.assertIn('3x3 rank-23',result.stderr)
+        fixture = ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json'
+        (self.root/'scheme.json').write_bytes(fixture.read_bytes())
+        for strategy in ('baseline','transpose','cancellation','combined'):
+            config['reduction']['strategy'] = strategy
+            result = self.invoke(config)
+            self.assertEqual(result.returncode,0,result.stderr)
+            (self.root/'receipt.json').unlink()
+        for change in (dict(strategy='other'),dict(strategy='combined',max_flips=1),
+                       dict(strategy='transpose',schemes=2)):
+            trial = dict(config,reduction=dict(config['reduction'],**change))
+            self.assertEqual(self.invoke(trial).returncode,1)
+            self.assertFalse((self.root/'receipt.json').exists())
+
     def test_selection_is_not_resume(self):
         import hashlib
         checksum = hashlib.sha256((self.root/'scheme.json').read_bytes()).hexdigest()

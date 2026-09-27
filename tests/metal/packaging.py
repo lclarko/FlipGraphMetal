@@ -256,6 +256,29 @@ def native_workflow_checks(binaries, output, cwd):
             require(record['counters']['flips_applied']>0,'flip-enabled reducer did not apply a mutation')
         else:
             require(record['counters']['flips_applied']==0,'fixed reducer reported mutations')
+    fixture=output/'constructor-input.json'
+    shutil.copyfile(ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json',fixture)
+    baseline=None
+    for strategy in ('baseline','transpose','cancellation','combined'):
+        config=dict(schema='fgm-run-v1',operation='reduce',
+            reduction=dict(domain='ZT',seed=7,rounds=2,reducers=32,schemes=1,max_flips=0,
+                           no_improvements=2,target_additions=0,strategy=strategy),
+            input=dict(kind='files',files=[dict(path=str(fixture),format='json',domain='ZT')]),
+            execution=dict(workers=1,batch_steps=1,block_size=32,backend='general',memory_bytes=536870912))
+        record=execute('constructor-'+strategy,'additions_reducer',config)
+        result=record['results'][0]
+        circuit=json.loads(Path(record['circuit_artifact']['path']).read_text())
+        reference=json.loads(fixture.read_text())
+        checked=verify(circuit,reference)
+        require(checked['additions']==result['verified_circuit_additions'],'packaged constructor count mismatch')
+        if strategy=='baseline':baseline=result['baseline_additions_by_stage']
+        require(result['baseline_additions_by_stage']==baseline,'extension changed baseline quantum')
+        if strategy in ('cancellation','combined'):
+            require(result['verified_circuit_additions_by_stage']['u']==13 and
+                    result['verified_circuit_additions_by_stage']['v']==14,'covered public components not reconstructed')
+        if strategy=='cancellation':
+            require(result['stage_sources']['w']=='baseline' and
+                    result['verified_circuit_additions_by_stage']['w']==baseline['w'],'cancellation changed direct W route')
     summary=dict(complete=True,python_available=False,runs=records)
     write_json(output/'results.json',summary)
     return summary

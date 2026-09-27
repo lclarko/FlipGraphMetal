@@ -1438,6 +1438,11 @@ void AdmissionContext::readSelection(const std::map<std::string,std::string> &ar
     impl->select(args,emit);
 }
 SchemeRecord AdmissionContext::fromJson(const Json &j,const std::string &domain) { return impl->fromJson(j,domain); }
+Matrix AdmissionContext::reconstructStage(const Json &outputs,const Json &fresh,uint64_t inputs,uint64_t &operations) {
+    if(!inputs) throw std::runtime_error("circuit stage requires inputs");
+    impl->recordWork=0; operations=0;
+    return impl->reconstruct(outputs,fresh,inputs,false,operations);
+}
 std::string AdmissionContext::identity(const SchemeRecord &s,bool canonical) { return impl->identity(s,canonical); }
 SchemeRecord AdmissionContext::normalized(const SchemeRecord &s) { impl->shape(s); return impl->executionNormalized(s); }
 bool AdmissionContext::verify(const SchemeRecord &s) { return impl->verify(s); }

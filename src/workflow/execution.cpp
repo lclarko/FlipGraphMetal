@@ -67,7 +67,7 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
         if (value.has("policy") || (!expectedDomain.empty() && expectedDomain != "ZT"))
             throw std::runtime_error("signed reduction requires ZT and reduction settings");
         const auto &settings = value.at("reduction");
-        fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions"});
+        fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions", "strategy"});
         if (settings.at("domain").str() != "ZT") throw std::runtime_error("only signed addition reduction is supported");
         auto seed = natural(settings.at("seed"), false);
         if (seed > UINT32_MAX) throw std::runtime_error("seed exceeds uint32");
@@ -75,7 +75,12 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
             natural(settings.at("reducers")), natural(settings.at("schemes")),
             natural(settings.at("max_flips"), false), natural(settings.at("no_improvements")),
             natural(settings.at("target_additions"), false)};
-        const auto &r = *result.reduction;
+        auto &r = *result.reduction;
+        if(settings.has("strategy")) r.strategy=settings.at("strategy").str();
+        if(r.strategy!="baseline" && r.strategy!="transpose" && r.strategy!="cancellation" && r.strategy!="combined")
+            throw std::runtime_error("unknown reduction strategy");
+        if(r.strategy!="baseline" && (r.maxFlips || r.schemes!=1))
+            throw std::runtime_error("construction strategies require max_flips=0 and schemes=1");
         if (r.schemes > r.reducers || r.reducers > 1048576 || r.maxFlips >= INT32_MAX ||
             r.rounds > INT32_MAX || r.noImprovements > INT32_MAX || r.targetAdditions > INT32_MAX)
             throw std::runtime_error("reduction setting exceeds execution capacity");
@@ -221,6 +226,9 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         } else if (!eligibility.at("signed_reducer_eligible").boolean) {
             throw std::runtime_error("mathematically valid input is not signed-reducer eligible");
         }
+        if(config.reduction && config.reduction->strategy!="baseline" &&
+           (item.effective.n!=std::array<uint32_t,3>{3,3,3} || item.effective.rank!=23 || item.effective.f2))
+            throw std::runtime_error("construction strategies require fixed signed 3x3 rank-23 input");
         // Charge both retained report copies and both factor matrices before
         // retention. Allocator bookkeeping and process RSS remain separate.
         const auto charge = configCheckedAdd(admittedMemoryBytes(item), jsonMemoryBytes(item.report));

@@ -2224,6 +2224,573 @@ def execute_effectiveness(panel_path, binary_dir, output, calibration_path=None)
     return data
 
 
+FGM2_PROTOCOL_PATH = ROOT/'benchmarks/workflow/fixtures/fgm2/protocol.json'
+
+
+def fgm2_schedule(protocol):
+    """The protocol fixes every invocation, including its strategy order."""
+    rows = []
+    names = [*protocol['public_inputs'], protocol['private_input']]
+    strategies = protocol['strategies']
+    for panel_index, name in enumerate(names):
+        for seed_index, seed in enumerate(protocol['seeds']):
+            rotation = (panel_index + seed_index) % len(strategies)
+            for strategy in strategies[rotation:] + strategies[:rotation]:
+                rows.append(dict(id=f'{name}-{seed}-{strategy}', input=name,
+                                 seed=seed, strategy=strategy))
+    if len(rows) != 72 or len({row['id'] for row in rows}) != 72:
+        raise ValueError('FGM-2 schedule must contain 72 unique invocations')
+    return rows
+
+
+def fgm2_source(path):
+    """Derive the reference from retained raw factors, before a measured trial."""
+    path = Path(path).resolve(strict=True)
+    if path.stat().st_size > 4*1048576:
+        raise ValueError('FGM-2 source exceeds 4 MiB')
+    source = json.loads(path.read_text())
+    if any(key in source for key in ('u_fresh','v_fresh','w_fresh')):
+        raise ValueError('FGM-2 requires factor-only inputs')
+    if 'n' in source:
+        raw = source
+    else:
+        if (source.get('schema') != 'fgm-scheme-v1' or source.get('domain') != 'ZT'
+                or source.get('orientation') != 'cyclic-w'):
+            raise ValueError('FGM-2 private scheme metadata mismatch')
+        raw = dict(n=source['dimensions'],m=source['rank'],z2=False,
+                   **{key:source[key] for key in 'uvw'})
+    if raw['n'] != [3,3,3] or raw['m'] != 23 or raw['z2'] is not False:
+        raise ValueError('FGM-2 requires exact signed 3x3 rank-23 factors')
+    normalized = normalized_input(raw)
+    raw_reference = dict(dimensions=raw['n'], rank=raw['m'], domain='ZT',
+                         orientation='cyclic-w', **{key:raw[key] for key in 'uvw'})
+    reference = dict(dimensions=normalized['n'], rank=normalized['m'], domain='ZT',
+                     orientation='cyclic-w', **{key:normalized[key] for key in 'uvw'})
+    return dict(source=path, sha256=digest(path), raw_reference=raw_reference,
+                raw_factors_id=host_oracle().identity(raw_reference,False),
+                reference=reference, factors_id=host_oracle().identity(reference, False))
+
+
+def fgm2_inputs(private_path):
+    panel_path = ROOT/'benchmarks/workflow/fixtures/fgm1/panel.json'
+    panel = json.loads(panel_path.read_text())
+    if panel.get('schema') != 'fgm-effectiveness-panel-v1':
+        raise ValueError('wrong public FGM-1 panel')
+    protocol = json.loads(FGM2_PROTOCOL_PATH.read_text())
+    if protocol['public_inputs'] != [entry['id'] for entry in panel['entries']]:
+        raise ValueError('FGM-2 public roster differs from retained panel')
+    result = {}
+    for entry in panel['entries']:
+        source = panel_artifact(panel_path.parent, entry['path'], entry['sha256'])
+        result[entry['id']] = fgm2_source(source)
+    result['private'] = fgm2_source(private_path)
+    return protocol, result
+
+
+def fgm2_reference_coverage(sources, private_reference=None):
+    """Audit supplied cost witnesses separately from measured construction."""
+    panel_path = ROOT/'benchmarks/workflow/fixtures/fgm1/panel.json'
+    panel = json.loads(panel_path.read_text())
+    rows = []
+    for entry in panel['entries']:
+        for reference in entry['references']:
+            circuit_path = panel_artifact(panel_path.parent,reference['path'],reference['sha256'])
+            source_path = panel_artifact(panel_path.parent,reference['source'],reference['source_sha256'])
+            circuit = json.loads(circuit_path.read_text())
+            if reference_circuit(source_path,reference['id']) != circuit:
+                raise ValueError('FGM-2 supplied reference differs from retained source conversion')
+            rows.append((entry['id'],reference['id'],circuit_path,circuit,
+                         reference['claimed_additions'],reference['claimed_additions_by_stage']))
+    if private_reference is not None:
+        path = Path(private_reference).resolve(strict=True)
+        if path.stat().st_size > 4*1048576:
+            raise ValueError('FGM-2 private reference exceeds 4 MiB')
+        circuit = json.loads(path.read_text())
+        rows.append(('private','private-supplied',path,circuit,None,None))
+    checked = []
+    for name,label,path,circuit,claim,stages in rows:
+        reference = sources[name]['raw_reference']
+        raw = dict(n=reference['dimensions'],m=reference['rank'],z2=False,
+                   **{key:reference[key] for key in 'uvw'})
+        result = verify(circuit,raw)
+        counts = result['additions_by_stage']
+        if claim is not None and (result['additions'] != claim or counts != stages):
+            raise ValueError('FGM-2 supplied reference cost claim mismatch')
+        factors = dict(dimensions=circuit['n'],rank=circuit['m'],domain='ZT',orientation='cyclic-w',
+                       **dict(zip('uvw',circuit_factors(circuit))))
+        if host_oracle().identity(factors,False) != sources[name]['raw_factors_id']:
+            raise ValueError('FGM-2 supplied reference factor identity mismatch')
+        checked.append(dict(input=name,id=label,source_path=str(path),sha256=digest(path),
+            factors_id=sources[name]['raw_factors_id'],
+            normalized_input_factors_id=sources[name]['factors_id'],additions=result['additions'],
+            additions_by_stage=counts,witness_class='exact-factor supplied circuit cost',
+            construction_family_witness='unassessed'))
+    return checked
+
+
+def fgm2_preliminary_circuit(path, receipt, source, record_limit=1048576):
+    """Bounded structural binding before admitting the independent CLI verifier."""
+    artifact = receipt['circuit_artifact']
+    if (Path(artifact['path']) != path or artifact['format'] != 'jsonl'
+            or artifact['records'] != 1 or digest(path) != artifact['sha256']):
+        raise ValueError('FGM-2 circuit artifact path, count or hash mismatch')
+    if path.stat().st_size > record_limit:
+        raise ValueError('FGM-2 circuit exceeds record limit')
+    lines = path.read_text().splitlines()
+    if len(lines) != 1:
+        raise ValueError('FGM-2 requires exactly one circuit')
+    circuit = json.loads(lines[0])
+    reference = source['reference']
+    if (circuit['n'] != reference['dimensions'] or circuit['m'] != reference['rank']
+            or circuit['z2'] is not False):
+        raise ValueError('FGM-2 circuit dimensions, rank or domain mismatch')
+    if circuit.get('factors_id',source['factors_id']) != source['factors_id']:
+        raise ValueError('FGM-2 circuit declared factor identity mismatch')
+    result = receipt['results']
+    if len(result) != 1:
+        raise ValueError('FGM-2 requires exactly one result')
+    result = result[0]
+    if (result['circuit_record_index'] != 0 or result['result_rank'] != 23
+            or result['result_factors_id'] != source['factors_id']
+            or result['effective_input_factors_id'] != source['factors_id']
+            or result['submitted_factors_id'] != source['raw_factors_id']
+            or result['source_sha256'] != source['sha256']
+            or result['input_presentation_index'] != 0):
+        raise ValueError('FGM-2 result circuit/source binding mismatch')
+    binding = {key:result[key] for key in ('input_presentation_index','submitted_factors_id',
+                'effective_input_factors_id','source_sha256')}
+    if circuit.get('source_binding') != binding:
+        raise ValueError('FGM-2 circuit source binding mismatch')
+    return dict(factors_id=source['factors_id'],circuit_sha256=digest(path),
+                claimed_additions=circuit['complexity']['reduced'])
+
+
+def fgm2_bind_verifier(log_path, circuit_path, reference_path, preliminary, receipt, source):
+    """Bind the independent Python CLI PASS to retained bytes and native counts."""
+    if log_path.stat().st_size > 1048576 or digest(circuit_path) != preliminary['circuit_sha256']:
+        raise ValueError('FGM-2 verifier log bound or circuit hash mismatch')
+    reference = source['reference']
+    expected = dict(n=reference['dimensions'],m=reference['rank'],z2=False,
+                    **{key:reference[key] for key in 'uvw'})
+    if json.loads(reference_path.read_text()) != expected:
+        raise ValueError('FGM-2 independently derived reference changed')
+    lines = log_path.read_text().splitlines()
+    prefix = str(circuit_path)+' PASS '
+    if len(lines) != 1 or not lines[0].startswith(prefix):
+        raise ValueError('FGM-2 independent verifier lacks one PASS record')
+    verified = ast.literal_eval(lines[0][len(prefix):])
+    if (not isinstance(verified,dict) or verified.get('domain')!='ZT'
+            or verified.get('rank') != 23
+            or verified.get('equations') != 729
+            or type(verified.get('additions')) is not int
+            or set(verified.get('additions_by_stage',{})) != set('uvw')
+            or any(type(value) is not int or value < 0
+                   for value in verified['additions_by_stage'].values())
+            or sum(verified['additions_by_stage'].values()) != verified['additions']):
+        raise ValueError('FGM-2 independent verifier metadata mismatch')
+    result = receipt['results'][0]
+    if (verified['additions'] != preliminary['claimed_additions']
+            or result['verified_circuit_additions'] != verified['additions']
+            or result['verified_circuit_additions_by_stage'] != verified['additions_by_stage']):
+        raise ValueError('FGM-2 independent verifier/receipt cost mismatch')
+    return dict(factors_id=source['factors_id'],additions=verified['additions'],
+                additions_by_stage=verified['additions_by_stage'],
+                circuit_sha256=preliminary['circuit_sha256'])
+
+
+def fgm2_summary(data):
+    cells = data['trials']
+    groups = defaultdict(dict)
+    for row in cells:
+        if row['status'] == 'verified':
+            groups[(row['input'],row['seed'])][row['strategy']] = row
+    comparisons = []
+    for (name,seed), strategies in sorted(groups.items()):
+        baseline = strategies.get('baseline')
+        for strategy in ('transpose','cancellation','combined'):
+            extension = strategies.get(strategy)
+            if baseline and extension:
+                comparisons.append(dict(input=name,seed=seed,strategy=strategy,
+                    baseline_additions=baseline['evaluation']['additions'],
+                    additions=extension['evaluation']['additions'],
+                    cost_change=extension['evaluation']['additions']-baseline['evaluation']['additions'],
+                    extension_work=extension.get('construction'),
+                    phase_microseconds=extension.get('phase_microseconds')))
+    references = {'sun':[56], 'cn122':[55,58], 'private':[55]}
+    attainment = {name:{str(cost):[row['id'] for row in cells if row['input']==name
+                    and row['status']=='verified' and row['evaluation']['additions']<=cost]
+                    for cost in costs} for name,costs in references.items()}
+    supplied = data.get('supplied_reference_coverage',[])
+    reference_map = {name:dict(witnesses=[row['id'] for row in supplied if row['input']==name],
+                     classification=('exact-factor supplied circuit cost witnesses' if any(
+                         row['input']==name for row in supplied) else 'no supplied circuit witness'))
+                     for name in [*data['protocol']['public_inputs'],data['protocol']['private_input']]}
+    missing = [row['id'] for row in cells if row['status'] != 'verified']
+    constructor_outcomes = defaultdict(lambda:dict(requested=0,target_only=0,one_auxiliary=0,
+                                               exhausted=0,other=0))
+    for row in cells:
+        for stage, report in row.get('construction',{}).items():
+            status = report.get('status')
+            if status == 'not-requested':
+                continue
+            counts = constructor_outcomes[stage]
+            counts['requested'] += 1
+            field = {'target-only':'target_only','one-auxiliary':'one_auxiliary',
+                     'family-exhausted':'exhausted'}.get(status,'other')
+            counts[field] += 1
+    return dict(schema='fgm2-construction-summary-v1',complete=data['complete'],
+                status=data['status'],timely_verified=len(cells)-len(missing),
+                total_trials=len(cells),comparisons=comparisons,reference_attainment=attainment,
+                supplied_reference_coverage=supplied,reference_map=reference_map,
+                missing_timely_results=missing,constructor_outcomes=dict(constructor_outcomes),
+                comparison_scope='fixed reduction work plus strategy extensions, not matched time')
+
+
+def fgm2_report(data, summary):
+    """Compact per-invocation account; missing results remain visible."""
+    lines = ['# FGM-2 construction measurement', '',
+             f"Status: {summary['status']}; timely verified: {summary['timely_verified']}/{summary['total_trials']}.",
+             'Fixed reduction work is followed by strategy extensions. Elapsed times are not matched.', '',
+             '| Input | Seed | Strategy | Status | Baseline | Final | Change | Trial s | Extension s | GPU s | Peak wired bytes |',
+             '| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+    for row in data['trials']:
+        evaluation = row.get('evaluation',{})
+        final = evaluation.get('additions')
+        baseline = row.get('baseline_additions')
+        gpu = row.get('gpu',{}).get('gpu_all_seconds')
+        wired = row.get('native_guard',{}).get('peak_system_wired_bytes')
+        phases = row.get('phase_microseconds',{})
+        extension = sum(phases.get(key,0) for key in
+            ('transpose_pair','construction_u','construction_v','construction_wt','transposition','verification'))/1000000 if phases else None
+        fmt = lambda value: '-' if value is None else str(value)
+        lines.append('| '+ ' | '.join(map(fmt,(row['input'],row['seed'],row['strategy'],row['status'],
+            baseline,final,final-baseline if final is not None and baseline is not None else None,
+            round(row['elapsed_seconds'],3) if 'elapsed_seconds' in row else None,
+            round(extension,3) if extension is not None else None,
+            round(gpu,3) if gpu is not None else None,wired)))+' |')
+    lines += ['',f"Missing timely results: {', '.join(summary['missing_timely_results']) or 'none'}.",
+              'Constructor outcomes count observed searches only; supplied reference circuits are separate cost witnesses.', '']
+    return '\n'.join(lines)
+
+
+def fgm2_build_files(binary_dir):
+    binary = binary_dir/'additions_reducer'
+    build = binary_dir/'additions_reducer.build.json'
+    library = binary_dir/'shaders/signed.metallib'
+    library_build = binary_dir/'shaders/signed.metallib.build.json'
+    receipt = json.loads(build.read_text())
+    stat = binary.stat()
+    if receipt['output'] != {'size':stat.st_size,'mtime_ns':stat.st_mtime_ns}:
+        raise ValueError('FGM-2 build receipt does not match executable')
+    for dependency,checksum in receipt['inputs']['dependencies'].items():
+        path = Path(dependency)
+        if digest(path if path.is_absolute() else ROOT/path) != checksum:
+            raise ValueError('FGM-2 build dependency changed: '+dependency)
+    if json.loads(library_build.read_text())['sha256'] != digest(library):
+        raise ValueError('FGM-2 signed library receipt mismatch')
+    return (binary,build,library,library_build)
+
+
+def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
+                 clock=None, sleeper=None, guard=None):
+    """One bounded FGM-2 campaign. A deadline miss never means no circuit exists."""
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    guard = guard or guarded_run
+    protocol, sources = fgm2_inputs(private_path)
+    reference_coverage = fgm2_reference_coverage(sources,private_reference)
+    binary_dir = Path(binary_dir).resolve(strict=True)
+    bound_files = fgm2_build_files(binary_dir)
+    original_hashes = {str(path.relative_to(binary_dir)):digest(path) for path in bound_files}
+    output = Path(output).absolute()
+    output.mkdir(parents=True, exist_ok=False)
+    (output/'.gitignore').write_text('*\n')
+    started = clock()
+    deadline = started + protocol['total_seconds']
+    schedule = fgm2_schedule(protocol)
+    data = dict(schema='fgm2-construction-measurement-v1',status='incomplete',complete=False,
+                protocol=protocol,started_monotonic=started,trials=[dict(row,status='unrun') for row in schedule],
+                inputs={},build_inventory={},harness={},supplied_reference_coverage=reference_coverage)
+    def save():
+        write_json(output/'measurement.json',data)
+    save()
+    forced = False
+    supervisor_failure = False
+    correctness_failure = False
+    try:
+        data['hardware'] = host_machine_identity()
+        data['source_inventory'] = source_identity(ROOT)
+        for path in bound_files:
+            relative = path.relative_to(binary_dir)
+            destination = output/'binaries'/relative
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(path,destination)
+            if digest(destination) != original_hashes[str(relative)]:
+                raise ValueError('FGM-2 frozen build file differs from source')
+        data['build_inventory'] = original_hashes
+        binary = output/'binaries/additions_reducer'
+        library = output/'binaries/shaders/signed.metallib'
+        harness_paths = (Path(__file__),ROOT/'benchmarks/metal/guard.py',
+            ROOT/'benchmarks/metal/application.py',ROOT/'tests/metal/verify.py',
+            ROOT/'tests/workflow/identity_oracle.py',FGM2_PROTOCOL_PATH)
+        for path in harness_paths:
+            relative = path.relative_to(ROOT)
+            destination = output/'harness'/relative
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(path,destination)
+            if digest(destination) != digest(path):
+                raise ValueError('FGM-2 frozen harness file differs from source')
+            data['harness'][str(relative)] = digest(destination)
+        public_panel = ROOT/'benchmarks/workflow/fixtures/fgm1'
+        shutil.copytree(public_panel,output/'public-panel')
+        panel = json.loads((output/'public-panel/panel.json').read_text())
+        for name,checksum in panel['artifacts'].items():
+            if digest(output/'public-panel'/name) != checksum:
+                raise ValueError('FGM-2 retained public panel artifact mismatch')
+        data['public_panel_sha256'] = digest(output/'public-panel/panel.json')
+        for row in reference_coverage:
+            if row['input'] != 'private':
+                row['retained_path'] = str((output/'public-panel'/Path(row['source_path']).relative_to(public_panel)).relative_to(output))
+        for name, source in sources.items():
+            destination = output/'inputs'/f'{name}.json'
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(source['source'],destination)
+            if digest(destination) != source['sha256']:
+                raise ValueError('FGM-2 input changed during retention')
+            data['inputs'][name] = dict(path=str(destination.relative_to(output)),
+                sha256=source['sha256'],factors_id=source['factors_id'],
+                raw_factors_id=source.get('raw_factors_id'),
+                dimensions=source['reference']['dimensions'],rank=source['reference']['rank'],domain='ZT')
+            source['retained'] = destination
+        if private_reference is not None:
+            destination = output/'references/private-supplied.json'
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(Path(private_reference).resolve(strict=True),destination)
+            if digest(destination) != next(row['sha256'] for row in reference_coverage
+                                           if row['id']=='private-supplied'):
+                raise ValueError('FGM-2 private reference changed during retention')
+            data['private_reference_retained'] = str(destination.relative_to(output))
+            next(row for row in reference_coverage if row['id']=='private-supplied')['retained_path'] = data['private_reference_retained']
+        save()
+        for index, row in enumerate(data['trials']):
+            if forced or deadline-clock() < protocol['admission_remaining_seconds']:
+                data['stop_reason'] = 'forced GPU termination' if forced else 'global admission cutoff'
+                break
+            trial_start = clock()
+            native_deadline = min(trial_start+protocol['native_seconds'],deadline-protocol['finalization_reserve_seconds'])
+            trial_deadline = min(trial_start+protocol['trial_seconds'],deadline-protocol['finalization_reserve_seconds'])
+            trial = output/'trials'/f'{index:02d}-{row["id"]}'
+            trial.mkdir(parents=True)
+            row.update(status='failed',trial_start_seconds=trial_start-started,
+                       native_deadline_seconds=native_deadline-started,
+                       trial_deadline_seconds=trial_deadline-started)
+            save()
+            source = sources[row['input']]
+            try:
+                if (any(digest(output/'binaries'/name) != checksum
+                        for name,checksum in data['build_inventory'].items())
+                        or any(digest(output/'harness'/name) != checksum
+                               for name,checksum in data['harness'].items())):
+                    raise ValueError('FGM-2 frozen binary or harness identity changed')
+                if digest(source['retained']) != source['sha256']:
+                    raise ValueError('FGM-2 retained input hash changed')
+                config = dict(schema='fgm-run-v1',operation='reduce',output=str(trial/'receipt.json'),
+                    input=dict(kind='files',files=[dict(path=str(source['retained']),format='json',domain='ZT')]),
+                    execution=dict(workers=1,batch_steps=64,block_size=32,backend='general',
+                                   memory_bytes=536870912),
+                    reduction=dict(domain='ZT',seed=row['seed'],strategy=row['strategy'],
+                                   **protocol['reduction']))
+                config_path = trial/'config.json'
+                write_json(config_path,config)
+                reference = source['reference']
+                reference_path = trial/'independent-reference.json'
+                write_json(reference_path,dict(n=reference['dimensions'],m=reference['rank'],z2=False,
+                    **{key:reference[key] for key in 'uvw'}))
+                row['config_sha256'] = digest(config_path)
+                row['independent_reference_sha256'] = digest(reference_path)
+                row['input_sha256'] = source['sha256']
+                # The initial sample and every wait consume the trial's eight seconds.
+                while True:
+                    remaining = native_deadline-clock()
+                    if remaining <= 0:
+                        raise TimeoutError('native deadline before launch')
+                    if wired_memory(timeout=min(2,remaining)) <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']:
+                        break
+                    sleeper(min(.025,max(0,native_deadline-clock())))
+                if clock() >= native_deadline:
+                    raise TimeoutError('native deadline before launch')
+                argv = ['/usr/bin/time','-l','-p',str(binary),'--run-config',str(config_path)]
+                row['native_command'] = argv
+                save()
+                try:
+                    guarded = guard(argv,trial/'native-guard',absolute_deadline=native_deadline)
+                except Exception as error:
+                    supervisor_failure = True
+                    row['status'] = 'terminated'
+                    row['native_supervision_error'] = str(error)
+                    raise RuntimeError('native guard failed with unknown process cleanup') from error
+                forced = bool(guarded.get('forced_termination'))
+                supervisor_failure = bool(guarded.get('cleanup_failure'))
+                if forced or supervisor_failure:
+                    row['status'] = 'terminated'
+                row['native_guard'] = dict(result_sha256=digest(trial/'native-guard/result.json'),
+                    log_sha256=digest(trial/'native-guard/run.log') if (trial/'native-guard/run.log').is_file() else None,
+                    complete=guarded['complete'],exit_code=guarded.get('exit_code'),
+                    forced_termination=guarded.get('forced_termination',False),
+                    cleanup_failure=guarded.get('cleanup_failure',False),
+                    observed_process_seconds=guarded.get('observed_process_seconds'),
+                    wall_seconds=guarded.get('wall_seconds'),
+                    peak_system_wired_bytes=max((sample['wired_bytes'] for sample in guarded.get('memory',[])),default=None))
+                if forced:
+                    row['status'] = 'terminated'
+                    raise RuntimeError('native GPU process required termination')
+                if supervisor_failure:
+                    row['status'] = 'terminated'
+                    raise RuntimeError('native GPU cleanup failed')
+                if not guarded['complete'] and guarded.get('exit_code') not in (None,0):
+                    raise ValueError('FGM-2 native process failed: '+str(guarded.get('error')))
+                if not guarded['complete'] or clock() >= native_deadline:
+                    raise TimeoutError('native process did not finish before native deadline')
+                receipt_path = trial/'receipt.json'
+                receipt = json.loads(receipt_path.read_text())
+                row['receipt_sha256'] = digest(receipt_path)
+                if (receipt['status'] != 'complete' or not receipt['execution_started']
+                        or receipt['configuration_sha256'] != digest(config_path)
+                        or receipt['executable_sha256'] != digest(binary)
+                        or receipt.get('library_mode') != 'metallib'
+                        or receipt.get('library_sha256') != digest(library)):
+                    raise ValueError('FGM-2 native receipt/configuration/executable mismatch')
+                if (len(receipt['presentations']) != 1
+                        or receipt['presentations'][0]['source_sha256'] != source['sha256']
+                        or receipt['presentations'][0]['effective_factors_id'] != source['factors_id']):
+                    raise ValueError('FGM-2 native source presentation mismatch')
+                result = receipt['results'][0]
+                if result.get('strategy') != row['strategy']:
+                    raise ValueError('FGM-2 strategy receipt mismatch')
+                row['baseline_additions'] = result['baseline_additions']
+                row['baseline_additions_by_stage'] = result['baseline_additions_by_stage']
+                row['stage_sources'] = result['stage_sources']
+                row['construction'] = result['construction']
+                row['phase_microseconds'] = result['phase_microseconds']
+                log = (trial/'native-guard/run.log').read_text()
+                row['gpu'] = native_dispatch_evidence(log,receipt)
+                kernels = {item[0] for item in row['gpu'].get('dispatches',[])}
+                if (row['strategy'] in ('transpose','combined') and 'transposePairKernel' not in kernels
+                        or row['strategy'] in ('cancellation','combined') and 'constructorClosureKernel' not in kernels):
+                    raise ValueError('FGM-2 strategy lacks required GPU constructor dispatch')
+                artifact = Path(str(receipt_path)+'.circuits.jsonl')
+                preliminary = fgm2_preliminary_circuit(artifact,receipt,source)
+                row['artifact'] = dict(path=str(artifact.relative_to(output)),sha256=preliminary['circuit_sha256'])
+                row['status'] = 'artifact-awaiting-verification'
+                save()
+                if trial_deadline-clock() < protocol['verification_admission_seconds']:
+                    row['verification_admission'] = 'insufficient time'
+                    continue
+                argv = [sys.executable,str(output/'harness/tests/metal/verify.py'),str(artifact),
+                        '--reference',str(reference_path)]
+                row['verification_command'] = argv
+                row['verification_started_seconds'] = clock()-trial_start
+                save()
+                try:
+                    checked = guard(argv,trial/'verifier-guard',absolute_deadline=trial_deadline)
+                except Exception as error:
+                    supervisor_failure = True
+                    row['verifier_supervision_error'] = str(error)
+                    raise RuntimeError('verifier guard failed with unknown process cleanup') from error
+                supervisor_failure = bool(checked.get('cleanup_failure'))
+                row['verifier_guard'] = dict(result_sha256=digest(trial/'verifier-guard/result.json'),
+                    log_sha256=digest(trial/'verifier-guard/run.log') if (trial/'verifier-guard/run.log').is_file() else None,
+                    complete=checked['complete'],exit_code=checked.get('exit_code'),
+                    forced_termination=checked.get('forced_termination',False),
+                    cleanup_failure=checked.get('cleanup_failure',False),
+                    observed_process_seconds=checked.get('observed_process_seconds'),
+                    wall_seconds=checked.get('wall_seconds'))
+                if checked.get('cleanup_failure'):
+                    supervisor_failure = True
+                    raise RuntimeError('FGM-2 verifier cleanup failed')
+                verifier_log = trial/'verifier-guard/run.log'
+                timed_out = 'time limit' in str(checked.get('error',''))
+                if checked.get('forced_termination') or (timed_out and checked.get('exit_code') != 0):
+                    row['verification_admission'] = 'verifier deadline or forced termination'
+                    continue
+                if checked.get('exit_code') not in (None,0):
+                    raise ValueError('FGM-2 independent verifier rejected circuit')
+                if not checked['complete'] and not (timed_out and checked.get('exit_code')==0 and verifier_log.is_file()):
+                    row['verification_admission'] = 'verifier incomplete'
+                    continue
+                if digest(receipt_path) != row['receipt_sha256'] or digest(reference_path) != row['independent_reference_sha256']:
+                    raise ValueError('FGM-2 receipt or independent reference changed during verification')
+                evaluation = fgm2_bind_verifier(verifier_log,artifact,reference_path,preliminary,receipt,source)
+                row['verifier_log_sha256'] = digest(verifier_log)
+                row['verification_completed_seconds'] = clock()-trial_start
+                row['evaluation'] = {key:evaluation[key] for key in
+                    ('factors_id','additions','additions_by_stage','circuit_sha256')}
+                row['status'] = 'verified' if checked['complete'] and clock() < trial_deadline else 'late-verified'
+            except Exception as error:
+                row['error'] = str(error)
+                correctness_failure = isinstance(error,(ValueError,SyntaxError,KeyError,TypeError))
+            finally:
+                row['elapsed_seconds'] = clock()-trial_start
+                write_json(trial/'trial.json',row)
+                row['trial_sha256'] = digest(trial/'trial.json')
+                save()
+            if forced:
+                data['stop_reason'] = 'forced GPU termination'
+                break
+            if supervisor_failure:
+                data['stop_reason'] = 'unknown process cleanup after guard failure'
+                break
+            if correctness_failure:
+                data['stop_reason'] = 'correctness or identity failure'
+                break
+        data['complete'] = len(data['trials']) == 72 and all(row['status']=='verified' for row in data['trials'])
+        data['status'] = 'complete' if data['complete'] else 'incomplete'
+    except Exception as error:
+        data['error'] = str(error)
+    finally:
+        try:
+            if any(digest(output/'binaries'/name) != checksum
+                   for name,checksum in data['build_inventory'].items()):
+                data['complete'] = False
+                data['status'] = 'incomplete'
+                data['error'] = 'frozen build inventory changed during campaign'
+            if any(digest(output/'harness'/name) != checksum
+                   for name,checksum in data['harness'].items()):
+                data['complete'] = False
+                data['status'] = 'incomplete'
+                data['error'] = 'frozen harness inventory changed during campaign'
+        except (OSError,ValueError) as error:
+            data['complete'] = False
+            data['status'] = 'incomplete'
+            data['error'] = 'retained inventory unavailable: '+str(error)
+        data['elapsed_seconds'] = clock()-started
+        if data['elapsed_seconds'] > protocol['total_seconds']:
+            data['complete'] = False
+            data['status'] = 'budget-exceeded'
+        save()
+        summary = fgm2_summary(data)
+        write_json(output/'summary.json',summary)
+        (output/'report.md').write_text(fgm2_report(data,summary))
+        data['final_elapsed_seconds'] = clock()-started
+        if data['final_elapsed_seconds'] > protocol['total_seconds']:
+            data['complete'] = False
+            data['status'] = 'budget-exceeded'
+            summary = fgm2_summary(data)
+            write_json(output/'summary.json',summary)
+            (output/'report.md').write_text(fgm2_report(data,summary))
+        save()
+        (output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
+        if clock()-started > protocol['total_seconds']:
+            data['complete'] = False
+            data['status'] = 'budget-exceeded'
+            data['final_elapsed_seconds'] = clock()-started
+            write_json(output/'summary.json',fgm2_summary(data))
+            (output/'report.md').write_text(fgm2_report(data,fgm2_summary(data)))
+            save()
+            (output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     operation = parser.add_mutually_exclusive_group(required=True)
@@ -2234,6 +2801,9 @@ def main():
     operation.add_argument('--prepare-effectiveness-panel', type=Path, metavar='CORPUS', help='Freeze the FGM-1 panel from a retained corpus without GPU work')
     operation.add_argument('--effectiveness-panel', type=Path, metavar='PANEL_JSON', help='Run one FGM-1 baseline with a 15-minute measurement cap')
     operation.add_argument('--summarize-effectiveness', type=Path, metavar='MEASUREMENT_JSON', help='Independently check and summarize retained FGM-1 circuits')
+    operation.add_argument('--fgm2', action='store_true', help='Run the fixed 72-invocation FGM-2 construction protocol')
+    parser.add_argument('--fgm2-private-input', type=Path, help='Required external factor-only private input for FGM-2')
+    parser.add_argument('--fgm2-private-reference', type=Path, help='Optional private supplied circuit for separate FGM-2 reference audit')
     parser.add_argument('--binary-dir', type=Path, help='Native binaries for FGM-1 (default build/metal)')
     parser.add_argument('--calibration', type=Path, help='Reuse matching FGM-1 calibration.json')
     parser.add_argument('--native-binary', type=Path)
@@ -2247,6 +2817,18 @@ def main():
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
+    if args.fgm2:
+        if (args.output is None or args.fgm2_private_input is None
+                or any(v is not None for v in (args.rows,args.protocol,args.baseline,args.production_run,
+                                               args.repetitions,args.native_binary,args.calibration))):
+            parser.error('FGM-2 requires --output and --fgm2-private-input, with optional --binary-dir')
+        result = execute_fgm2(args.fgm2_private_input,args.binary_dir or ROOT/'build/metal',args.output,
+                              private_reference=args.fgm2_private_reference)
+        if not result['complete']:
+            raise SystemExit(1)
+        return
+    if args.fgm2_private_input is not None or args.fgm2_private_reference is not None:
+        parser.error('--fgm2-private-input and --fgm2-private-reference require --fgm2')
     if args.prepare_effectiveness_panel or args.effectiveness_panel or args.summarize_effectiveness:
         if args.output is None or any(v is not None for v in (args.rows,args.protocol,args.baseline,args.production_run,args.repetitions,args.native_binary)):
             parser.error('FGM-1 requires --output and does not accept legacy measurement options')

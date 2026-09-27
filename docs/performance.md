@@ -174,6 +174,30 @@ hard guards and recalibrated. These versions are not repeatability samples.
 Longer-run effectiveness and variation between complete repeat runs remain
 unmeasured.
 
+## FGM-2 calibration coverage
+
+FGM-2 compares a fixed direct-reduction quantum with that same work plus GPU
+construction extensions. The retained reference audit replayed supplied gates;
+it did not run a constructor to fill evidence gaps. Public references were
+checked against their submitted ordered factors and again after the existing
+admission sign normalization. W orientation conversion is separate from any
+algebraic basis change.
+
+| Reference | U coverage | V coverage | Wᵀ coverage before construction |
+|---|---|---|---|
+| Local private 55 | One auxiliary, 14 gates | One auxiliary, 13 gates | Retained 14-gate witness; emitted W verified at 28 |
+| CN122-55 | One auxiliary, 13 gates | One auxiliary, 14 gates | Not established by its direct-W witness |
+| Sun-56 | One auxiliary, 13 gates | Supplied 13-gate witness uses two auxiliaries; alternative unresolved | Not established |
+| CN122-58 | Same factors as CN122-55, whose witness covers U13 | Same factors as CN122-55, whose witness covers V14 | Not established |
+| Original, Laderman, Smirnov | No optimized reference established | No optimized reference established | No optimized reference established |
+
+The supplied CN122-58 U14/V15 witnesses each use two auxiliaries. A supplied
+witness outside the family does not exclude another one-auxiliary realization.
+Reference costs are achieved costs, not assumed stagewise minima. Complete
+restricted-family failure on a covered component requires investigation;
+unknown reference-family membership remains an unresolved capability question.
+Private witnesses and their derived factors stay local and uncommitted.
+
 ## Reproduction and new measurements
 
 Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for the CPU/GPU studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.

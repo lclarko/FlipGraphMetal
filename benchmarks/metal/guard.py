@@ -9,32 +9,43 @@ import time
 from application import LIMIT, artifacts, digest, terminate, wired_memory, write_json
 
 
-def run(argv, output):
+def run(argv, output, *, absolute_deadline=None):
     output.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
-    record = dict(argv=argv, complete=False, time_limit=45, wired_limit=LIMIT, memory=[])
+    if absolute_deadline is not None and not isinstance(absolute_deadline, (int, float)):
+        raise ValueError('absolute deadline must be a monotonic clock value')
+    deadline = min(start + 45, absolute_deadline) if absolute_deadline is not None else start + 45
+    record = dict(argv=argv, complete=False, time_limit=45, absolute_deadline=absolute_deadline,
+                  wired_limit=LIMIT, memory=[], forced_termination=False, cleanup_failure=False)
     write_json(output / 'result.json', record)
     process = None
     try:
-        initial = wired_memory()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('time limit before memory sample')
+        initial = wired_memory(timeout=min(2, remaining))
         record['memory'].append(dict(seconds=0, wired_bytes=initial))
         if initial > LIMIT:
             raise RuntimeError('wired memory exceeded 3 GiB before launch')
+        if time.monotonic() >= deadline:
+            raise RuntimeError('time limit before launch')
         with (output / 'run.log').open('x') as log:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('time limit before launch')
             process_start = time.monotonic()
             process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, env={key: os.environ[key] for key in
                 ['PATH', 'HOME', 'TMPDIR', 'DEVELOPER_DIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME']
                 if key in os.environ})
             while process.poll() is None:
-                remaining = 45 - (time.monotonic() - start)
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError('time limit')
                 value = wired_memory(timeout=min(2, remaining))
                 record['memory'].append(dict(seconds=time.monotonic() - start, wired_bytes=value))
                 if value > LIMIT:
                     raise RuntimeError('wired memory exceeded 3 GiB')
-                remaining = 45 - (time.monotonic() - start)
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError('time limit')
                 try:
@@ -42,6 +53,8 @@ def run(argv, output):
                 except subprocess.TimeoutExpired:
                     pass
             record['observed_process_seconds'] = time.monotonic() - process_start
+            if time.monotonic() >= deadline:
+                raise RuntimeError('time limit at completion')
             if process.returncode:
                 raise RuntimeError(f'exit {process.returncode}')
         record['complete'] = True
@@ -50,12 +63,17 @@ def run(argv, output):
     finally:
         if process is not None:
             try:
+                record['forced_termination'] = process.poll() is None
                 terminate(process)
             except Exception as error:
                 record['complete'] = False
+                record['cleanup_failure'] = True
                 record['cleanup_error'] = str(error)
             record['exit_code'] = process.returncode
         record['wall_seconds'] = time.monotonic() - start
+        if time.monotonic() >= deadline:
+            record['complete'] = False
+            record.setdefault('error', 'time limit during cleanup')
         record['artifacts'] = artifacts(output)
         write_json(output / 'result.json', record)
         (output / 'result.sha256').write_text(digest(output / 'result.json') + '\n')

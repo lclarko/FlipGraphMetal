@@ -319,3 +319,62 @@ Optional diagnostics retain lazy-selection, sign-aware-reduction, storage and SI
 Keep behavioral changes separate from source organization and documentation changes. Preserve fixture attribution and required third-party notices. Add tests for changed behavior and update the document that explains it. Performance claims must state hardware, workload, measurement type and limitations.
 
 Project licensing is unresolved as explained in the [README](../README.md#attribution-and-rights). Do not assign a license to inherited material without authority.
+
+## Fixed-factor GPU circuit construction
+
+`reduction.strategy` is optional in `additions_reducer --run-config`; omission
+retains `baseline`. `transpose`, `cancellation`, and `combined` require signed
+3×3 rank-23 factors, `max_flips=0`, and `schemes=1`. Admission keeps the existing
+positive-first U/V normalization and compensated W signs, with no basis change.
+
+| Strategy | U/V | W |
+|---|---|---|
+| baseline | Existing pair reducer | Existing direct pair reducer |
+| transpose | Baseline | Best baseline or transposed pair reduction |
+| cancellation | Best baseline or restricted construction | Baseline |
+| combined | Best baseline or restricted construction | Best baseline, transposed pair reduction, or transposed restricted construction |
+
+The new constructor runs monotone closure on the GPU for U, V, and Wᵀ, each
+with nine inputs and 23 requested forms. Only basis directions start available.
+It tries target-only closure, then candidate auxiliaries formed by signed sums
+or differences of two distinct basis/target directions. An auxiliary's actual
+prerequisites must be available. Global signs are normalized without dividing
+coefficients; nonternary intermediates are permitted. Same-direction doubling
+and multiple auxiliaries are outside this family. Zero outputs and signed or
+repeated aliases require no additional direction. Duplicate auxiliary slots
+retain their individual creation routes.
+
+Bounds are 32 basis/target directions, 33 with the auxiliary, a 64-bit
+availability mask, 24 gates, and 992 candidate slots. Population-sized batches
+use bounded shared buffers. Baseline, transposed pair reduction, and each
+constructor phase release their buffers sequentially. Compile-time size checks
+ensure their storage remains below the reserved baseline population; driver
+residency and device scratch remain outside that buffer estimate.
+
+Host C++ prepares factor relations, checks GPU witnesses, transposes the emitted
+linear DAG, and verifies exact stage factors and the complete tensor. It performs
+no production closure search. Transposition reverses signed contributions and
+counts the actual emitted circuit, including aliases, inactive inputs, and zero
+outputs. Stage replacement requires strictly fewer verified operations; the
+incumbent wins ties. Restricted-family exhaustion retains the incumbent and
+establishes no general lower bound. Invalid witnesses fail the invocation.
+
+Receipts add `strategy`, `baseline_additions`, `baseline_additions_by_stage`,
+`stage_sources`, `construction`, and `phase_microseconds`. Constructor outcomes
+are `target-only`, `one-auxiliary`, `family-exhausted`, or `not-requested`.
+`candidate_slots` includes filtered and duplicate slots; `candidates_evaluated`
+counts launched auxiliary slots, including the final successful batch. A success
+may stop before complete enumeration. The legacy `terminal_reason` and explicit
+`baseline_terminal_reason` describe termination of baseline work. Extension
+phase times include their GPU calls and host processing; total dispatch and
+verification times overlap those phase totals and must not be added again.
+Circuits are published only after all requested phases finish and verify.
+
+The pair reducer and fixed-mode prefix reuse remain inherited baseline behavior.
+The inspected CPU flip implementation (`b942f005c61882f678fafb65ba4f9f348f9ef8df`)
+optimizes flips and naive complexity. The separate CPU addition reducer
+(`e59693512f095a4704521f1185c592445af9e058`) uses pair substitution; its additional
+heuristics are deferred. Cancellation construction and circuit transposition
+extend FGM beyond those inspected implementations. This is a lineage statement,
+not a claim of research novelty. Generation, capture, pools, and mutation
+scheduling are unchanged.
