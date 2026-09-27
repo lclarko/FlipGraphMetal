@@ -21,7 +21,7 @@ class MetalLibraryTests(unittest.TestCase):
         self.source = self.root / 'source'
         self.source.mkdir()
         self.names = ['core.h', 'addition.h', 'flip_set.h', 'scheme_integer.h',
-                      'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h',
+                      'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h', 'circuit_constructor.h',
                       'compact.h', 'controlled.h', 'controlled_capture.h', 'controlled_packed.h', 'kernels.metal', 'controlled_kernels.metal', 'reduction_kernels.metal', 'test_kernels.metal']
         for name in self.names:
             (self.source / name).write_text('#pragma once\n' + name)

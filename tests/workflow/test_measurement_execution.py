@@ -2,11 +2,14 @@
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from test_measurement_adapters import b, circuit, log, scalar
+import guard as metal_guard
 
 
 class MeasurementExecutionTests(unittest.TestCase):
@@ -238,6 +241,7 @@ class NativeHostMeasurementTests(unittest.TestCase):
                     path=root/'out'/f"{row['repeat']:02d}-{row['workload']}"/'trial.json'
                     self.assertEqual(row['evidence_sha256'],b.digest(path))
                 if failure:self.assertTrue(retained['error'])
+
                 if failure=='final-source':
                     self.assertTrue(all(row['complete'] for row in retained['attempts']))
 
@@ -314,6 +318,240 @@ class NativeHostMeasurementTests(unittest.TestCase):
         for key,value in (('scheme_id','wrong'),('factors_id','wrong'),('u',[[0]])):
             with self.subTest(key=key),self.assertRaises(ValueError):
                 b.verify_host_record(dict(row,**{key:value}),scheme)
+
+
+class FGM2DeadlineTests(unittest.TestCase):
+    def test_supplied_public_witnesses_bind_raw_factors_without_synthesis(self):
+        private=b.ROOT/'benchmarks/workflow/fixtures/fgm1/factors/original.json'
+        _,sources=b.fgm2_inputs(private)
+        coverage=b.fgm2_reference_coverage(sources)
+        self.assertEqual({row['id'] for row in coverage},{'sun-56','cn122-55','cn122-58'})
+        self.assertNotEqual(sources['sun']['raw_factors_id'],sources['sun']['factors_id'])
+        sun=next(row for row in coverage if row['id']=='sun-56')
+        self.assertEqual(sun['factors_id'],sources['sun']['raw_factors_id'])
+        self.assertEqual(sun['construction_family_witness'],'unassessed')
+
+    def test_preliminary_binding_checks_ordered_factors_counts_and_hash(self):
+        private=b.ROOT/'benchmarks/workflow/fixtures/fgm1/factors/original.json'
+        _,sources=b.fgm2_inputs(private)
+        source=sources['cn122']
+        supplied=b.ROOT/'benchmarks/workflow/fixtures/fgm1/circuits/cn122-55.json'
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'circuit.jsonl'
+            binding=dict(input_presentation_index=0,submitted_factors_id=source['raw_factors_id'],
+                effective_input_factors_id=source['factors_id'],source_sha256=source['sha256'])
+            circuit_data=json.loads(supplied.read_text());circuit_data['source_binding']=binding
+            path.write_text(json.dumps(circuit_data,separators=(',',':'))+'\n')
+            result=dict(circuit_record_index=0,result_rank=23,
+                result_factors_id=source['factors_id'],effective_input_factors_id=source['factors_id'],
+                verified_circuit_additions=55,verified_circuit_additions_by_stage=dict(u=13,v=14,w=28))
+            result.update(binding)
+            receipt=dict(circuit_artifact=dict(path=str(path),format='jsonl',records=1,sha256=b.digest(path)),results=[result])
+            preliminary=b.fgm2_preliminary_circuit(path,receipt,source)
+            self.assertEqual(preliminary['claimed_additions'],55)
+            normalized=source['reference']
+            reference=Path(temporary)/'reference.json'
+            reference.write_text(json.dumps(dict(n=normalized['dimensions'],m=normalized['rank'],z2=False,
+                **{key:normalized[key] for key in 'uvw'})))
+            verified=subprocess.run([sys.executable,str(b.ROOT/'tests/metal/verify.py'),str(path),
+                '--reference',str(reference)],capture_output=True,text=True,check=True)
+            verifier_log=Path(temporary)/'verifier.log';verifier_log.write_text(verified.stdout)
+            self.assertEqual(b.fgm2_bind_verifier(verifier_log,path,reference,preliminary,receipt,source)['additions'],55)
+            result['verified_circuit_additions_by_stage']['w']=29
+            with self.assertRaises(ValueError):b.fgm2_bind_verifier(verifier_log,path,reference,preliminary,receipt,source)
+            result['verified_circuit_additions_by_stage']['w']=28
+            receipt['circuit_artifact']['sha256']='0'*64
+            with self.assertRaises(ValueError):b.fgm2_preliminary_circuit(path,receipt,source)
+            receipt['circuit_artifact']['sha256']=b.digest(path)
+            receipt['circuit_artifact']['format']='circuit-json'
+            with self.assertRaises(ValueError):b.fgm2_preliminary_circuit(path,receipt,source)
+            receipt['circuit_artifact']['format']='jsonl'
+            circuit_data['factors_id']='wrong'
+            path.write_text(json.dumps(circuit_data,separators=(',',':'))+'\n')
+            receipt['circuit_artifact']['sha256']=b.digest(path)
+            with self.assertRaises(ValueError):b.fgm2_preliminary_circuit(path,receipt,source)
+
+    def test_frozen_schedule_has_paired_seeds_and_rotated_order(self):
+        protocol=json.loads(b.FGM2_PROTOCOL_PATH.read_text())
+        rows=b.fgm2_schedule(protocol)
+        self.assertEqual(len(rows),72)
+        for name in [*protocol['public_inputs'],'private']:
+            for seed in protocol['seeds']:
+                self.assertEqual({r['strategy'] for r in rows if r['input']==name and r['seed']==seed},
+                                 set(protocol['strategies']))
+        self.assertEqual([r['strategy'] for r in rows[:4]],protocol['strategies'])
+        self.assertEqual([r['strategy'] for r in rows[4:8]],protocol['strategies'][1:]+protocol['strategies'][:1])
+
+    def synthetic_run(self, native_seconds=1, verifier_seconds=1, preliminary_seconds=0,
+                      forced=False, jump_after_first=0, binding_error=False,
+                      native_guard_raises=False, verifier_guard_raises=False,
+                      verifier_cleanup_failure=False, verifier_timeout=False, missing_guard_evidence=False, verifier_late_exit=False):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        root=Path(temporary.name)
+        binary=root/'bin';binary.mkdir()
+        for name in ('additions_reducer','scheme_tool'):(binary/name).write_text('synthetic')
+        shader=binary/'shaders';shader.mkdir()
+        (shader/'signed.metallib').write_text('synthetic library')
+        (shader/'signed.metallib.build.json').write_text(json.dumps({'sha256':b.digest(shader/'signed.metallib')}))
+        stat=(binary/'additions_reducer').stat()
+        (binary/'additions_reducer.build.json').write_text(json.dumps(dict(
+            output=dict(size=stat.st_size,mtime_ns=stat.st_mtime_ns),
+            inputs=dict(dependencies={}))))
+        source=root/'factor.json';source.write_text('{}')
+        protocol=json.loads(b.FGM2_PROTOCOL_PATH.read_text())
+        factors=dict(dimensions=[3,3,3],rank=23,domain='ZT',orientation='cyclic-w',u=[],v=[],w=[])
+        inputs={'original':dict(source=source,sha256=b.digest(source),reference=factors,factors_id='id')}
+        schedule=[dict(id='original-7-baseline',input='original',seed=7,strategy='baseline'),
+                  dict(id='original-7-transpose',input='original',seed=7,strategy='transpose')]
+        tick=[0.]
+        guards=[]
+        def clock():return tick[0]
+        def guarded(argv,directory,*,absolute_deadline):
+            self.assertLess(tick[0],absolute_deadline)
+            directory.mkdir()
+            if not missing_guard_evidence or (argv[0]=='/usr/bin/time' and not forced):
+                (directory/'result.json').write_text('{}')
+            (directory/'run.log').write_text('synthetic')
+            guards.append((Path(argv[3] if argv[0]=='/usr/bin/time' else argv[0]).name,absolute_deadline))
+            if argv[0]=='/usr/bin/time':
+                if native_guard_raises:raise OSError('native guard artifact write failed')
+                tick[0]+=native_seconds
+                config=json.loads(Path(argv[-1]).read_text())
+                receipt_path=Path(config['output'])
+                result=dict(strategy=config['reduction']['strategy'],baseline_additions=60,
+                            baseline_additions_by_stage=dict(u=20,v=20,w=20),
+                            stage_sources=dict(u='baseline',v='baseline',w='baseline'),
+                            construction={},phase_microseconds={},
+                            verified_circuit_additions=60,
+                            verified_circuit_additions_by_stage=dict(u=20,v=20,w=20))
+                receipt=dict(status='complete',execution_started=True,
+                             configuration_sha256=b.digest(Path(argv[-1])),
+                             executable_sha256=b.digest(root/'out/binaries/additions_reducer'),
+                             library_mode='metallib',
+                             library_sha256=b.digest(root/'out/binaries/shaders/signed.metallib'),
+                             presentations=[dict(source_sha256=b.digest(root/'out/inputs/original.json'),
+                                                 effective_factors_id='id')],
+                             results=[result])
+                receipt_path.write_text(json.dumps(receipt))
+                Path(str(receipt_path)+'.circuits.jsonl').write_text('{}\n')
+                if jump_after_first:tick[0]+=jump_after_first
+                return dict(complete=not forced,forced_termination=forced,cleanup_failure=False)
+            if verifier_guard_raises:raise OSError('verifier guard artifact write failed')
+            tick[0]+=verifier_seconds
+            if verifier_cleanup_failure:
+                return dict(complete=False,forced_termination=False,cleanup_failure=True)
+            if verifier_late_exit:
+                return dict(complete=False,forced_termination=False,cleanup_failure=False,
+                            exit_code=0,error='time limit at completion')
+            if verifier_timeout:
+                return dict(complete=False,forced_termination=True,cleanup_failure=False,
+                            exit_code=-15,error='time limit')
+            return dict(complete=True,forced_termination=False,cleanup_failure=False)
+        def preliminary(*_):
+            tick[0]+=preliminary_seconds
+            return dict(factors_id='id',claimed_additions=60,circuit_sha256='hash')
+        def bind(*_):
+            if binding_error:raise ValueError('independent factor mismatch')
+            return dict(factors_id='id',additions=60,
+                        additions_by_stage=dict(u=20,v=20,w=20),circuit_sha256='hash')
+        with mock.patch.object(b,'fgm2_inputs',return_value=(protocol,inputs)), \
+             mock.patch.object(b,'fgm2_reference_coverage',return_value=[]), \
+             mock.patch.object(b,'fgm2_schedule',return_value=schedule), \
+             mock.patch.object(b,'host_machine_identity',return_value={'hardware':{}}), \
+             mock.patch.object(b,'source_identity',return_value={}), \
+             mock.patch.object(b,'wired_memory',return_value=0), \
+             mock.patch.object(b,'native_dispatch_evidence',return_value={'status':'GPU_EXECUTED',
+                'dispatches':[('transposePairKernel',32,1),('constructorClosureKernel',32,1)]}), \
+             mock.patch.object(b,'fgm2_preliminary_circuit',side_effect=preliminary), \
+             mock.patch.object(b,'fgm2_bind_verifier',side_effect=bind):
+            data=b.execute_fgm2(source,binary,root/'out',clock=clock,guard=guarded)
+        return data,guards,root
+
+    def test_native_and_verifier_receive_absolute_trial_deadlines(self):
+        data,guards,root=self.synthetic_run()
+        self.assertEqual([row['status'] for row in data['trials']],['verified','verified'])
+        self.assertEqual([deadline for _,deadline in guards],[8,10,10,12])
+        self.assertFalse(data['complete']) # A two-row injected schedule cannot complete 72 trials.
+        self.assertTrue((root/'out/binaries/additions_reducer').is_file())
+        self.assertTrue((root/'out/harness/tests/metal/verify.py').is_file())
+        self.assertIn('original | 7 | baseline', (root/'out/report.md').read_text())
+        self.assertEqual(data['trials'][0]['native_command'][3],str(root/'out/binaries/additions_reducer'))
+        self.assertEqual(data['trials'][0]['verification_command'][1],
+                         str(root/'out/harness/tests/metal/verify.py'))
+
+    def test_verifier_admission_and_late_verification(self):
+        data,guards,_=self.synthetic_run(native_seconds=7,preliminary_seconds=1.1)
+        self.assertEqual(data['trials'][0]['status'],'artifact-awaiting-verification')
+        self.assertEqual(len(guards),2)
+        data,_,_=self.synthetic_run(native_seconds=7,verifier_seconds=3)
+        self.assertEqual(data['trials'][0]['status'],'late-verified')
+        self.assertFalse(data['complete'])
+
+    def test_forced_gpu_termination_stops_future_trials(self):
+        data,guards,_=self.synthetic_run(forced=True)
+        self.assertEqual(data['trials'][0]['status'],'terminated')
+        self.assertEqual(data['trials'][1]['status'],'unrun')
+        self.assertEqual(len(guards),1)
+
+    def test_independent_binding_failure_stops_future_gpu_trials(self):
+        data,guards,_=self.synthetic_run(binding_error=True)
+        self.assertEqual(data['trials'][0]['status'],'artifact-awaiting-verification')
+        self.assertEqual(data['trials'][1]['status'],'unrun')
+        self.assertEqual(data['stop_reason'],'correctness or identity failure')
+        self.assertEqual(len(guards),2)
+
+    def test_guard_exceptions_and_verifier_cleanup_stop_future_gpu_trials(self):
+        for option, expected_status in (('native_guard_raises','terminated'),
+                                        ('verifier_guard_raises','artifact-awaiting-verification'),
+                                        ('verifier_cleanup_failure','artifact-awaiting-verification')):
+            with self.subTest(option=option):
+                data,guards,_=self.synthetic_run(**{option:True})
+                self.assertEqual(data['trials'][0]['status'],expected_status)
+                self.assertEqual(data['trials'][1]['status'],'unrun')
+                self.assertEqual(data['stop_reason'],'unknown process cleanup after guard failure')
+                self.assertEqual(len(guards),1 if option=='native_guard_raises' else 2)
+
+    def test_cleanup_flags_survive_missing_guard_evidence(self):
+        for options in (dict(forced=True),dict(verifier_cleanup_failure=True)):
+            data,guards,_=self.synthetic_run(missing_guard_evidence=True,**options)
+            self.assertEqual(data['trials'][1]['status'],'unrun')
+            self.assertEqual(len(guards),1 if options.get('forced') else 2)
+            self.assertIn(data['stop_reason'],('forced GPU termination','unknown process cleanup after guard failure'))
+
+    def test_verifier_timeout_is_incomplete_not_correctness_rejection(self):
+        data,guards,_=self.synthetic_run(verifier_timeout=True)
+        self.assertEqual([row['status'] for row in data['trials']],
+                         ['artifact-awaiting-verification']*2)
+        self.assertEqual(len(guards),4)
+        self.assertNotIn('stop_reason',data)
+        self.assertTrue(all('error' not in row for row in data['trials']))
+
+    def test_successful_late_verifier_exit_keeps_late_evidence(self):
+        data,guards,_=self.synthetic_run(verifier_late_exit=True)
+        self.assertEqual([row['status'] for row in data['trials']],['late-verified']*2)
+        self.assertFalse(data['complete'])
+        self.assertEqual(len(guards),4)
+
+    def test_global_admission_cutoff_retains_unrun_coverage(self):
+        data,guards,_=self.synthetic_run(jump_after_first=845)
+        self.assertEqual(data['trials'][1]['status'],'unrun')
+        self.assertEqual(data['stop_reason'],'global admission cutoff')
+        self.assertEqual(len(guards),1)
+
+    def test_guard_rechecks_after_bounded_initial_memory_sample(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tick=[100.]
+            def sample(timeout):
+                self.assertEqual(timeout,1)
+                tick[0]=101.
+                return 0
+            with mock.patch.object(metal_guard.time,'monotonic',side_effect=lambda:tick[0]), \
+                 mock.patch.object(metal_guard,'wired_memory',side_effect=sample), \
+                 mock.patch.object(metal_guard.subprocess,'Popen') as popen:
+                result=metal_guard.run(['synthetic'],Path(temporary)/'guard',absolute_deadline=101.)
+            popen.assert_not_called()
+            self.assertFalse(result['complete'])
+            self.assertIn('time limit before launch',result['error'])
 
 
 if __name__ == '__main__':

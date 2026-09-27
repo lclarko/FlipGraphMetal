@@ -56,6 +56,7 @@ public:
     // fromJson/readRecords/readSelection reset work per parsed record; verify and
     // analyze charge the current record budget cumulatively.
     SchemeRecord fromJson(const Json&,const std::string& domain="");
+    Matrix reconstructStage(const Json &outputs,const Json &fresh,uint64_t inputs,uint64_t &operations);
     std::string identity(const SchemeRecord&,bool canonical);
     SchemeRecord normalized(const SchemeRecord&);
     bool verify(const SchemeRecord&);

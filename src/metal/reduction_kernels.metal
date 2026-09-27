@@ -1,4 +1,29 @@
 #ifndef METAL_F2
+kernel void constructorClosureKernel(device const fgm_constructor::Problem *problem [[buffer(0)]],
+    device fgm_constructor::Witness *results [[buffer(1)]],constant int &first [[buffer(2)]],
+    constant int &count [[buffer(3)]],device int *errors [[buffer(30)]],uint index [[thread_position_in_grid]]) {
+    if(index>=uint(count)) return;
+    fgm_constructor::Witness w;
+    fgm_constructor::close(*problem,first+int(index),w);
+    storeObject(results+index,w); errors[index]=w.status<0?2:0;
+}
+kernel void transposePairKernel(device fgm_constructor::PairReducer *reducers [[buffer(0)]],
+    device const int *factors [[buffer(1)]],device RandomState *states [[buffer(2)]],
+    constant int &count [[buffer(3)]],constant uint &seed [[buffer(4)]],constant bool &initialize [[buffer(5)]],
+    device int *errors [[buffer(30)]],uint index [[thread_position_in_grid]]) {
+    if(index>=uint(count)) return;
+    device auto &r=reducers[index]; device auto &best=reducers[count];
+    RandomState state;
+    if(initialize) { state.value=seed^(0x9e3779b9u*(index+1)); if(!state.value) state.value=1; }
+    else loadObject(state,states+index);
+    r.clear();
+    for(int i=0;i<23;++i) { int row[9]; for(int c=0;c<9;++c) row[c]=factors[i*9+c]; r.addExpression(row,9); }
+    int modes[]={3,3,3,3,3,3,3,3,1,1,1,1,2,2,5};
+    r.setMode(index==0?0:modes[randomWord(&state)%15]);
+    if(!initialize && randomUniform(&state)<0.3f && best.getFreshVars()>0)
+        r.partialInitialize(best,1+randomWord(&state)%best.getFreshVars());
+    r.reduce(state); storeObject(states+index,state); errors[index]=r.isValid()?0:2;
+}
 // Direct-workflow-only counters; legacy dispatches allocate and update none.
 kernel void directMutationKernel(device SchemeInteger *schemes [[buffer(0)]],device RandomState *states [[buffer(1)]],
     device uint64_t *counters [[buffer(2)]],constant int &count [[buffer(3)]],constant int &maximum [[buffer(4)]],

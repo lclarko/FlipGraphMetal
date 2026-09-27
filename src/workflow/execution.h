@@ -29,6 +29,7 @@ struct ExecutionSettings {
 struct ReductionSettings {
     uint32_t seed;
     uint64_t rounds, reducers, schemes, maxFlips, noImprovements, targetAdditions;
+    std::string strategy="baseline";
 };
 
 struct HistorySettings {

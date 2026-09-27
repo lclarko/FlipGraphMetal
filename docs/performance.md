@@ -174,6 +174,95 @@ hard guards and recalibrated. These versions are not repeatability samples.
 Longer-run effectiveness and variation between complete repeat runs remain
 unmeasured.
 
+## FGM-2 calibration coverage
+
+FGM-2 compares a fixed direct-reduction quantum with that same work plus GPU
+construction extensions. The retained reference audit replayed supplied gates;
+it did not run a constructor to fill evidence gaps. Public references were
+checked against their submitted ordered factors and again after the existing
+admission sign normalization. W orientation conversion is separate from any
+algebraic basis change.
+
+| Reference | U coverage | V coverage | Wᵀ coverage before construction |
+|---|---|---|---|
+| Local private 55 | One auxiliary, 14 gates | One auxiliary, 13 gates | Retained 14-gate witness; emitted W verified at 28 |
+| CN122-55 | One auxiliary, 13 gates | One auxiliary, 14 gates | Not established by its direct-W witness |
+| Sun-56 | One auxiliary, 13 gates | Supplied 13-gate witness uses two auxiliaries; alternative unresolved | Not established |
+| CN122-58 | Same factors as CN122-55, whose witness covers U13 | Same factors as CN122-55, whose witness covers V14 | Not established |
+| Original, Laderman, Smirnov | No optimized reference established | No optimized reference established | No optimized reference established |
+
+The supplied CN122-58 U14/V15 witnesses each use two auxiliaries. A supplied
+witness outside the family does not exclude another one-auxiliary realization.
+Reference costs are achieved costs, not assumed stagewise minima. Complete
+restricted-family failure on a covered component requires investigation;
+unknown reference-family membership remains an unresolved capability question.
+Private witnesses and their derived factors stay local and uncommitted.
+
+## FGM-2 first bounded comparison
+
+The single attempt at implementation revision `2d3d002` is **incomplete**:
+21 timely independently verified results, one terminated invocation, and 50
+unrun trials. The recorded envelope ended after 27.920 seconds. Evidence is
+retained locally under `build/fgm2/comparison-01/`; no automatic retry ran.
+The host was an 8-GB Apple M1 MacBook Air on macOS 27.0.
+
+| Input | Completed paired seeds | Baseline | Transpose | Cancellation | Combined |
+|---|---|---:|---:|---:|---:|
+| Original | 7, 19, 41 | 69 | 69 | 67 | 66 |
+| Laderman | 7, 19 | 62 | 62 | 62 | 62 |
+
+Original's baseline U/V/W costs were 20/16/33; combined achieved 19/15/32.
+Laderman stayed at 16/16/30. Laderman seed 41 also has a verified combined
+result at 62, but its standalone baseline pair is missing. Smirnov, Sun,
+CN122, and the private input have no measured cells in this attempt.
+All 21 credited circuits passed a further exact replay against independently
+normalized frozen factors; shared baseline stage counts match within every
+observed input/seed group.
+
+Across these incomplete observations, median incremental extension time was
+50.9 ms for transpose, 12.5 ms for cancellation, and 79.8 ms for combined.
+Median complete trial times were 656, 698, 649, and 730 ms for baseline,
+transpose, cancellation, and combined respectively. These are descriptive
+observations of fixed work plus extensions, not a matched-time comparison or
+a complete-panel performance conclusion. Peak sampled system wired memory was
+2,698,952,704 bytes, below the unchanged 3-GiB cutoff.
+
+The stopped Laderman seed-41 baseline trial consumed 8.019 seconds, but its
+native supervisor lasted only 0.098 seconds. Its child log establishes no GPU
+dispatch. About 7.9 seconds elapsed before supervision, which includes hashing,
+configuration/evidence writes, and headroom waiting. The exact wait contribution
+was not separately recorded. The inherited launch policy reserved 1,275,068,416
+bytes below the hard cutoff, yielding a 1,946,157,056-byte launch threshold.
+This is evidence of a prelaunch-budget limitation, not an eight-second GPU
+reduction or a hard-memory-limit failure. Forced termination stopped later GPU
+admission, and the failed invocation published no circuit.
+
+Separate fixed-factor correctness qualification reconstructed 55 from both
+public CN122 and the private calibration input:
+
+| Qualification input | Reducers / rounds / seed | Baseline U/V/W | Combined U/V/W |
+|---|---|---|---|
+| Public CN122 | 32 / 2 / 7 | 14/15/29 = 58 | 13/14/28 = **55** |
+| Local private 55 | 128 / 16 / 7 | 15/14/29 = 58 | 14/13/28 = **55** |
+
+Both passed native and independent Python verification against the unchanged
+input factors. CN122 ran through the relocated package with Python absent from
+the production process's PATH. Its combined result establishes an observed
+one-auxiliary Wᵀ construction and verified 28-addition W, extending the
+pre-construction coverage audit above. These are factors-only reconstruction
+results, separate from verification of supplied circuits. Their different
+qualification settings are not pooled, and neither fills an unrun comparison
+cell or establishes repeatability.
+
+The retained qualification checks include 18 GPU/oracle cases with 1,460
+candidate witnesses, the 33-direction/24-gate boundary, Python-free packaged
+operation, and native signed/F2 regressions. The host workflow suite passed
+220 tests.
+
+These results establish useful cancellation construction on Original and covered
+55 reconstruction during qualification. Full-panel comparisons, 54 additions,
+matched-time effectiveness, and longer runs remain unmeasured.
+
 ## Reproduction and new measurements
 
 Raw measurements, frozen binaries, source snapshots, corpus inputs and verification records for the CPU/GPU studies and earlier comparisons are retained privately. This repository provides reusable developer tools, the rank-23 test fixture and both generated 4×4 fixtures, not the complete measurement bundles. Reproducing the recorded comparisons requires the frozen inputs and binaries, the pinned external CPU source and build environment, including OpenMP support. A fresh checkout alone is insufficient.

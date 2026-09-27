@@ -234,3 +234,54 @@ The separate map has version 1, a `paths` object mapping each original absolute 
 Create this mapping from the preserved evidence and retain its digest through a separately trusted channel. The mapping must capture the complete original campaign population before relocation, including incomplete attempts; do not construct a new trusted inventory from an untrusted submitted bundle. Mapping hashes detect changes relative to that record; they do not authenticate authorship or prove that measurements occurred. Changing mappings or resealing records cannot establish independent verification. Archive verification does not sanitize private evidence: original paths, identifiers in older machine records, fixtures and logs need a separate sharing review. Never overwrite the private originals with sanitized copies.
 
 New runs retain only model, chip, CPU/GPU core, memory and Metal-support fields from the hardware profiler. Raw profiler output and error text are discarded. Compiler and thermal diagnostics remain separate records and should also be reviewed before sharing.
+
+## FGM-2 construction comparison
+
+Build and qualify the native programs first (`make test-workflow`,
+`make test-metal`, and the existing relocation/packaging checks). The comparison
+uses the five checked-in FGM-1 starts plus one local private factor-only input.
+Reference circuits are audited separately and never passed to synthesis.
+
+```sh
+python3 benchmarks/workflow/baseline.py --fgm2 \
+  --fgm2-private-input /absolute/path/to/factors.json \
+  --fgm2-private-reference /absolute/path/to/reference-circuit.json \
+  --binary-dir build/metal --output build/fgm2/comparison-01
+```
+
+The optional reference must be FGM circuit JSON bound to the submitted factors.
+Private inputs, references, and outputs remain uncommitted. Public tests have no
+private dependency. Keep the retained reference-family audit with the attempt;
+a supplied direct-W circuit alone does not establish Wᵀ family coverage.
+
+The frozen [protocol](../workflow/fixtures/fgm2/protocol.json) has 72 trials:
+six inputs, seeds 7/19/41, and four strategies. Every invocation gets the same
+128-reducer, 16-round direct baseline quantum. Transposition adds another
+128-reducer, 16-round pair quantum with a separate deterministic seed;
+restricted construction enumerates its finite family without RNG. Strategy
+order rotates deterministically. The comparison measures fixed work plus
+extensions, not matched-time algorithm effectiveness.
+
+Each trial includes configuration, input checks, resource waiting, supervision,
+publication, and independent verification. The entire native invocation has an
+absolute eight-second deadline. The existing Python verifier runs only when at
+least two seconds remain before the ten-second result deadline, with a reference
+derived independently from retained input factors. Successful cleanup and final
+byte/count/binding checks must finish by that deadline. Early completion earns
+no extra work. An overrun yields no timely verified result, not a claim that no
+circuit exists; the internal baseline is not published early or borrowed from
+another trial.
+
+The overall envelope is 900 seconds with a 50-second cleanup reserve. Trial
+admission requires 60 seconds remaining. The nominal 720 seconds of result
+windows leave 130 seconds for other overhead and termination overruns. The
+45-second emergency supervisor ceiling remains the default for other callers.
+A forced GPU-child termination or failed cleanup stops further GPU trials;
+killing a process does not prove cancellation of submitted Metal work. Unrun,
+failed, awaiting-verification, and late results remain visible. All 72 timely
+verified results and finalization within the envelope are required for a
+complete comparison. The harness does not retry or launch a second campaign.
+
+Native construction, materialization, and verification require no Python.
+Python is used for this experiment's coordination and independent checking;
+Objective-C++ continues to own runtime dispatch and GPU timing.
