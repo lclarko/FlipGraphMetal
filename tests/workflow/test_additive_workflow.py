@@ -225,6 +225,82 @@ class AdditiveWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'unknown cleanup'):
             b.fgm3_guarded(['true'],Path('/unused'),lambda *args,**kwargs:
                 (_ for _ in ()).throw(RuntimeError('guard crashed')),expected='native')
+        with tempfile.TemporaryDirectory() as temp:
+            record={}
+            with self.assertRaisesRegex(ValueError,'sidecars'):
+                b.fgm3_guarded(['true'],Path(temp),lambda *args,**kwargs:
+                    dict(complete=True,wall_seconds=1,memory=[]),record=record,field='native_guard')
+            self.assertEqual(record['native_guard']['status'],'missing-sidecar')
+            with self.assertRaisesRegex(RuntimeError,'unknown cleanup'):
+                b.fgm3_guarded(['true'],Path(temp),lambda *args,**kwargs:
+                    (_ for _ in ()).throw(RuntimeError('no sidecars')),
+                    record=record,field='evaluation_export_guard')
+            self.assertEqual(record['evaluation_export_guard']['status'],'unknown-cleanup')
+            self.assertIsNone(record['evaluation_export_guard']['result_sha256'])
+
+    def test_failed_later_chunk_retains_earlier_endpoint_and_elapsed_attempt(self):
+        for failed_stage in ('native','export'):
+            with self.subTest(failed_stage=failed_stage),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);population=root/'population';population.mkdir()
+                b.write_json(population/'population.json',dict(entries=[dict(canonical_id=str(i)) for i in range(16)]))
+                binaries=root/'binaries';binaries.mkdir();(binaries/'flip_graph').write_text('binary')
+                clock=Clock()
+                launches=[]
+                def chunk(output,population,binaries,protocol,selector,seed,workers,arm,index,state,
+                          global_deadline,arm_deadline,allowance,**kwargs):
+                    launches.append((arm,index))
+                    if arm.startswith('qualification/'):
+                        clock.sleep(1)
+                        if index==0:state['evaluations']=[{} for _ in range(16)]
+                        return dict(status='verified',headroom_wait_seconds=0,best_additions=55,
+                                    new_installations=[],new_observations=[])
+                    if index==0:
+                        clock.sleep(10)
+                        state['evaluations']=[dict(scheme_id=str(i),additions=55 if i==0 else 58,
+                            additions_by_stage=dict(u=10,v=10,w=35 if i==0 else 38),
+                            phase_microseconds={},verified_seconds=clock.now()) for i in range(16)]
+                        return dict(status='verified',headroom_wait_seconds=0,best_additions=55,
+                                    new_installations=[],new_observations=[],verified_seconds=clock.now(),
+                                    host_phases_microseconds={},counters={},seed_duplicates=0,pool_evictions=0,
+                                    native_guard=dict(wall_seconds=10),
+                                    evaluation_export_guard=dict(wall_seconds=0),
+                                    observation_export_guard=dict(wall_seconds=0),gpu=dict(gpu_all_seconds=0))
+                    record=kwargs['record']
+                    record['status']='native-started' if failed_stage=='native' else 'evaluation-export-started'
+                    field='native_guard' if failed_stage=='native' else 'evaluation_export_guard'
+                    if failed_stage=='export':record['native_guard']=dict(wall_seconds=0)
+                    def guarded_failure(argv,destination):
+                        clock.sleep(45)
+                        return dict(complete=False,forced_termination=failed_stage=='native',
+                                    cleanup_failure=False,wall_seconds=45,memory=[],error='injected failure')
+                    b.fgm3_guarded(['injected'],Path(output)/arm/'chunks'/f'{index:03d}'/field,
+                        guarded_failure,expected=failed_stage,record=record,field=field)
+                    self.fail('failed guard returned')
+                with (mock.patch.object(b,'fgm3_population',return_value={}),
+                      mock.patch.object(b,'fgm3_build_files',return_value={'flip_graph':b.digest(binaries/'flip_graph')}),
+                      mock.patch.object(b,'fgm3_run_chunk',side_effect=chunk),
+                      mock.patch.object(b,'host_machine_identity',return_value={'test':True})):
+                    result=b.execute_fgm3(population,binaries,root/'out',clock=clock.now,
+                        sleeper=clock.sleep,guard=lambda *args:None,memory_sample=lambda timeout:0)
+                self.assertEqual(result['status'],'stopped')
+                self.assertFalse(result['complete'])
+                self.assertEqual(len(result['arms']),1)
+                arm=result['arms'][0]
+                self.assertEqual(arm['status'],'incomplete')
+                self.assertEqual(arm['elapsed_seconds'],55)
+                self.assertEqual(arm['endpoints']['30']['best_additions'],55)
+                self.assertEqual([row['status'] for row in arm['chunks']],['verified','failed'])
+                self.assertEqual(arm['chunks'][1]['elapsed_seconds'],45)
+                self.assertEqual(arm['chunks'][1]['failed_stage'],
+                                 'native-started' if failed_stage=='native' else 'evaluation-export-started')
+                field='native_guard' if failed_stage=='native' else 'evaluation_export_guard'
+                self.assertEqual(arm['chunks'][1][field]['wall_seconds'],45)
+                self.assertEqual(arm['native_wall_seconds'],55 if failed_stage=='native' else 10)
+                self.assertEqual(arm['export_wall_seconds'],45 if failed_stage=='export' else 0)
+                self.assertEqual(len(launches),6)
+                self.assertEqual(len(result['qualification']['attempts'][0]['chunks']),4)
+                persisted=json.loads((root/'out/measurement.json').read_text())
+                self.assertEqual(persisted['arms'][0]['chunks'][1]['status'],'failed')
 
     def test_finalization_detects_time_spent_on_last_persistence(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -344,6 +420,9 @@ class AdditiveWorkflowTest(unittest.TestCase):
                     sleeper=lambda _:None,guard=lambda *args:None,memory_sample=lambda timeout:0)
             self.assertEqual(result['qualification']['status'],'failed')
             self.assertEqual(result['qualification']['attempts'][0]['status'],'failed')
+            failed=result['qualification']['attempts'][0]['chunks'][0]
+            self.assertEqual((failed['status'],failed['failed_stage']),('failed','scheduled'))
+            self.assertEqual(failed['elapsed_seconds'],0)
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);population=root/'population';population.mkdir()
             b.write_json(population/'population.json',dict(entries=[dict(canonical_id=str(i)) for i in range(16)]))

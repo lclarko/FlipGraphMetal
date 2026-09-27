@@ -370,6 +370,9 @@ durably published results receive endpoint credit. Late or missing verification
 is reported separately. Finalization retains 50 seconds globally. Forced
 termination or uncertain cleanup stops subsequent GPU admission; an unfinished
 matrix or insufficient parent feedback remains incomplete or inconclusive.
+Failed chunk attempts retain their elapsed time and available guard evidence.
+Arm summaries preserve earlier independently verified endpoint results when a
+later chunk fails.
 
 The first native smoke hit the wired-memory guard, so the comparison has not
 been launched. Retained-candidate results and the qualification gap are reported

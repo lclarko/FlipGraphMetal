@@ -3042,19 +3042,34 @@ def fgm3_export_rows(path, record_limit=8388608):
             [row for row in rows if row['schema']=='fgm-parent-installation-v1'])
 
 
-def fgm3_guarded(argv, destination, guard, *, expected='command'):
+def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, field=None):
     try:
         result=guard(['/usr/bin/time','-l','-p',*argv],destination)
     except Exception as error:
+        if record is not None:
+            record[field]=dict(status='unknown-cleanup',
+                result_sha256=digest(destination/'result.json') if (destination/'result.json').exists() else None,
+                log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None)
         raise RuntimeError(expected+' supervision has unknown cleanup') from error
+    observed=dict(status='complete' if result.get('complete') and not result.get('forced_termination')
+                  and not result.get('cleanup_failure') else 'failed',
+        forced_termination=bool(result.get('forced_termination')),
+        cleanup_failure=bool(result.get('cleanup_failure')),
+        wall_seconds=result.get('wall_seconds'),error=result.get('error'),
+        result_sha256=digest(destination/'result.json') if (destination/'result.json').exists() else None,
+        log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None,
+        peak_system_wired_bytes=max((item['wired_bytes'] for item in result.get('memory',[])),default=0))
+    if record is not None:record[field]=observed
     if result.get('forced_termination') or result.get('cleanup_failure'):
         raise RuntimeError(expected+' was forcibly terminated or cleanup is uncertain')
     if not result.get('complete'):
         raise RuntimeError(expected+' did not complete: '+str(result.get('error')))
-    return dict(complete=True,result_sha256=digest(destination/'result.json'),
-                log_sha256=digest(destination/'run.log'),
-                wall_seconds=result['wall_seconds'],
-                peak_system_wired_bytes=max((item['wired_bytes'] for item in result.get('memory',[])),default=0))
+    if observed['result_sha256'] is None or observed['log_sha256'] is None:
+        if record is not None:record[field]['status']='missing-sidecar'
+        raise ValueError(expected+' completed without required supervision sidecars')
+    return dict(complete=True,result_sha256=observed['result_sha256'],
+                log_sha256=observed['log_sha256'],wall_seconds=result['wall_seconds'],
+                peak_system_wired_bytes=observed['peak_system_wired_bytes'])
 
 
 def fgm3_export_budget(now, global_deadline, remaining_children, protocol):
@@ -3086,7 +3101,7 @@ def fgm3_wait_headroom(clock, sleeper, global_deadline, arm_deadline, allowance,
 
 def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, workers,
                    arm, chunk, state, global_deadline, arm_deadline, allowance,
-                   *, clock, sleeper, guard, memory_sample):
+                   *, clock, sleeper, guard, memory_sample, record=None):
     """Complete native work, both read-only exports and exact independent checks."""
     started=clock()
     chunk_dir=Path(output)/arm/'chunks'/f'{chunk:03d}'
@@ -3096,8 +3111,10 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     config=fgm3_config(protocol,selector,seed,chunk,workers,population,history,receipt_path)
     config_path=chunk_dir/'config.json'
     write_json(config_path,config)
-    record=dict(index=chunk,status='prepared',config_sha256=digest(config_path),
-                started_seconds=started,headroom_wait_seconds=0.)
+    if record is None:record={}
+    record.update(index=chunk,status='prepared',config_sha256=digest(config_path),
+                  headroom_wait_seconds=0.)
+    record.setdefault('started_seconds',started)
     reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
     if reason:
         record.update(status='unrun',stop_reason=reason)
@@ -3116,7 +3133,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         return record
     record['status']='native-started'
     native=fgm3_guarded([str(binaries/'flip_graph'),'--run-config',str(config_path)],
-                        chunk_dir/'native-guard',guard,expected='additive native chunk')
+                        chunk_dir/'native-guard',guard,expected='additive native chunk',
+                        record=record,field='native_guard')
     record['native_guard']=native
     receipt=json.loads(receipt_path.read_text())
     record['receipt_sha256']=digest(receipt_path)
@@ -3147,15 +3165,19 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
             '--record-bytes',str(protocol['history']['transaction_bytes']),
             '--scan-bytes',str(protocol['history']['storage_bytes'])]
     export_path=chunk_dir/'evaluations.jsonl'
+    record['status']='evaluation-export-started'
     record['evaluation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--evaluations',
-        '--output',str(export_path)],chunk_dir/'evaluation-export-guard',guard,expected='additive evaluation export')
+        '--output',str(export_path)],chunk_dir/'evaluation-export-guard',guard,
+        expected='additive evaluation export',record=record,field='evaluation_export_guard')
     record['evaluation_export_sha256']=digest(export_path)
     if not fgm3_export_budget(clock(),global_deadline,1,protocol):
         record.update(status='export-pending',stop_reason='global observation export reserve')
         return record
     observation_path=chunk_dir/'observations.jsonl'
+    record['status']='observation-export-started'
     record['observation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--observations',
-        '--output',str(observation_path)],chunk_dir/'observation-export-guard',guard,expected='additive observation export')
+        '--output',str(observation_path)],chunk_dir/'observation-export-guard',guard,
+        expected='additive observation export',record=record,field='observation_export_guard')
     record['observation_export_sha256']=digest(observation_path)
     current_evaluations,current_installs=fgm3_export_rows(export_path)
     previous_evaluations=[] if not state.get('evaluation_export') else fgm3_export_rows(
@@ -3211,8 +3233,11 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     record['verification_sha256']=digest(chunk_dir/'verification.json')
     credited_at=clock()
     for item in new:item['verified_seconds']=credited_at
+    for item in installs:item['verified_seconds']=credited_at
+    accepted_observations=[{k:v for k,v in item.items() if k!='scheme'} for item in added_observations]
+    for item in accepted_observations:item['observed_at_seconds']=credited_at
     record.update(status='verified',new_evaluations=new,new_installations=installs,
-                  new_observations=[{k:v for k,v in item.items() if k!='scheme'} for item in added_observations],
+                  new_observations=accepted_observations,
                   best_additions=best['additions'],best_scheme_id=best['scheme_id'],
                   best_circuit_sha256=artifact['sha256'],
                   evaluation_export=str(export_path.relative_to(output)),
@@ -3225,6 +3250,30 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     state['observations'].extend(record['new_observations'])
     state['pool_evictions']=record['pool_evictions']
     return record
+
+
+def fgm3_recorded_chunk(chunks, save, clock, selector, index, run):
+    """Persist an attempt before launch and retain its last stage on failure."""
+    record=dict(selector=selector,index=index,status='scheduled',started_seconds=clock(),
+                headroom_wait_seconds=0.)
+    chunks.append(record)
+    original_error=None
+    try:
+        save()
+        result=run(record)
+        if result is not record:record.update(result)
+        return record
+    except Exception as error:
+        original_error=error
+        record.update(failed_stage=record['status'],status='failed',
+                      stop_reason=repr(error))
+        raise
+    finally:
+        record['elapsed_seconds']=clock()-record['started_seconds']
+        try:save()
+        except Exception as error:
+            record['persistence_error']=repr(error)
+            if original_error is None:raise
 
 
 def fgm3_build_files(binary_dir):
@@ -3407,9 +3456,11 @@ def fgm3_summarize_arm(arm, state, arm_start, protocol):
         seed_duplicates=sum(row['seed_duplicates'] for row in chunks),
         pool_evictions=chunks[-1]['pool_evictions'] if chunks else 0,
         headroom_wait_seconds=sum(row['headroom_wait_seconds'] for row in arm['chunks']),
-        native_wall_seconds=sum(row['native_guard']['wall_seconds'] for row in chunks),
-        export_wall_seconds=sum(row['evaluation_export_guard']['wall_seconds']+
-                                row['observation_export_guard']['wall_seconds'] for row in chunks),
+        native_wall_seconds=sum((row.get('native_guard') or {}).get('wall_seconds') or 0
+                                for row in arm['chunks']),
+        export_wall_seconds=sum(sum((row.get(field) or {}).get('wall_seconds') or 0
+                                for field in ('evaluation_export_guard','observation_export_guard'))
+                                for row in arm['chunks']),
         gpu_seconds=sum(row['gpu']['gpu_all_seconds'] for row in chunks),
         host_phases_microseconds=dict(phase),evaluation_phases_microseconds=dict(eval_phase),
         late_evaluations=len(late),late_best_additions=min((row['additions'] for row in late),default=None),
@@ -3566,12 +3617,11 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
                     entry['canonical_id'] for entry in json.loads((population/'population.json').read_text())['entries']))
                 arm='qualification/workers-'+str(workers)+'/'+selector
                 for chunk in (0,1):
-                    record=fgm3_run_chunk(output,population,binaries,protocol,selector,7,workers,
-                        arm,chunk,state,qualification_deadline,qualification_deadline,
-                        protocol['native_admission_seconds'],
-                        clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample)
-                    attempt['chunks'].append(dict(selector=selector,**record))
-                    save()
+                    record=fgm3_recorded_chunk(attempt['chunks'],save,clock,selector,chunk,
+                        lambda row:fgm3_run_chunk(output,population,binaries,protocol,selector,7,workers,
+                            arm,chunk,state,qualification_deadline,qualification_deadline,
+                            protocol['native_admission_seconds'],
+                            clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample,record=row))
                     if record['status']!='verified':
                         suitable=False
                         hard_failure=True
@@ -3631,46 +3681,62 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
                                        json.loads((population/'population.json').read_text())['entries']))
             arm=dict(seed=seed,selector=selector,status='running',started_seconds=arm_start-measurement_started,
                      chunks=[],endpoints={},initial_ids=sorted(state['initial_ids']),initial_verified=False)
-            data['arms'].append(arm);save()
-            for chunk in range(1000000):
-                reason=fgm3_admission(clock(),arm_deadline,deadline,allowance,protocol)
-                if reason:
-                    arm['stop_reason']=reason
-                    break
-                record=fgm3_run_chunk(output,population,binaries,protocol,selector,seed,
-                    qualification['workers'],arm_name,chunk,state,deadline,arm_deadline,allowance,
-                    clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample)
-                arm['chunks'].append(record);save()
-                if record['status']!='verified':
-                    arm['stop_reason']=record.get('stop_reason',record['status'])
-                    if record['status']!='unrun':stop_gpu=True
-                    break
-                if chunk==0:
-                    arm['initial_verified']=len(state['evaluations'])>=16
-                    if not arm['initial_verified']:
-                        arm['stop_reason']='initial population lacks sixteen verified evaluations'
+            data['arms'].append(arm)
+            arm_error=None
+            try:
+                save()
+                for chunk in range(1000000):
+                    reason=fgm3_admission(clock(),arm_deadline,deadline,allowance,protocol)
+                    if reason:
+                        arm['stop_reason']=reason
+                        break
+                    record=fgm3_recorded_chunk(arm['chunks'],save,clock,selector,chunk,
+                        lambda row:fgm3_run_chunk(output,population,binaries,protocol,selector,seed,
+                            qualification['workers'],arm_name,chunk,state,deadline,arm_deadline,allowance,
+                            clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample,record=row))
+                    if record['status']!='verified':
+                        arm['stop_reason']=record.get('stop_reason',record['status'])
+                        if record['status']!='unrun':stop_gpu=True
+                        break
+                    if chunk==0:
+                        arm['initial_verified']=len(state['evaluations'])>=16
+                        if not arm['initial_verified']:
+                            arm['stop_reason']='initial population lacks sixteen verified evaluations'
+                            stop_gpu=True
+                            break
+                    arm['evaluations']=state['evaluations']
+                    arm['installations']=state['installations']
+                    arm['observations']=state['observations']
+                    if record['best_additions']<=protocol['circuit_target']:
+                        arm['stop_reason']='independently verified circuit target'
                         stop_gpu=True
                         break
-                for item in record['new_installations']:
-                    item['verified_seconds']=record['verified_seconds']
-                for item in record['new_observations']:
-                    item['observed_at_seconds']=record['verified_seconds']
-                arm['evaluations']=state['evaluations']
-                arm['installations']=state['installations']
-                arm['observations']=state['observations']
-                if record['best_additions']<=protocol['circuit_target']:
-                    arm['stop_reason']='independently verified circuit target'
-                    stop_gpu=True
-                    break
-            arm['elapsed_seconds']=clock()-arm_start
-            if not stop_gpu and arm['elapsed_seconds']<protocol['arm_seconds']:
-                while clock()<arm_deadline:
-                    sleeper(min(30,arm_deadline-clock()))
+                if not stop_gpu and clock()<arm_deadline:
+                    while clock()<arm_deadline:
+                        sleeper(min(30,arm_deadline-clock()))
+            except Exception as error:
+                arm_error=error
+                arm['stop_reason']=repr(error)
+                stop_gpu=True
+                raise
+            finally:
                 arm['elapsed_seconds']=clock()-arm_start
-            fgm3_summarize_arm(arm,state,arm_start,protocol)
-            arm['status']='complete' if (arm['elapsed_seconds']>=protocol['arm_seconds'] and
-                arm['initial_verified'] and not stop_gpu) else 'incomplete'
-            save()
+                arm['status']='incomplete'
+                finish_error=None
+                try:
+                    fgm3_summarize_arm(arm,state,arm_start,protocol)
+                    if arm['elapsed_seconds']>=protocol['arm_seconds'] and arm['initial_verified'] and not stop_gpu:
+                        arm['status']='complete'
+                except Exception as error:
+                    arm['summary_error']=repr(error)
+                    finish_error=error
+                try:save()
+                except Exception as error:
+                    arm['persistence_error']=repr(error)
+                    if finish_error is None:finish_error=error
+                if finish_error is not None:
+                    arm['status']='incomplete'
+                    if arm_error is None:raise finish_error
             if stop_gpu:break
         data['complete']=len(data['arms'])==6 and all(arm['status']=='complete' for arm in data['arms'])
         data['status']='complete' if data['complete'] else 'incomplete'
@@ -3682,6 +3748,7 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
         data['error']=repr(error)
         if data['qualification']['status']=='running':
             data['qualification']['status']='failed'
+            data['qualification']['elapsed_seconds']=clock()-qualification_started
             for attempt in data['qualification']['attempts']:
                 if attempt['status']=='running':
                     attempt.update(status='failed',stop_reason=repr(error))
