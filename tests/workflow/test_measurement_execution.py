@@ -385,7 +385,10 @@ class FGM2DeadlineTests(unittest.TestCase):
     def synthetic_run(self, native_seconds=1, verifier_seconds=1, preliminary_seconds=0,
                       forced=False, jump_after_first=0, binding_error=False,
                       native_guard_raises=False, verifier_guard_raises=False,
-                      verifier_cleanup_failure=False, verifier_timeout=False, missing_guard_evidence=False, verifier_late_exit=False):
+                      verifier_cleanup_failure=False, verifier_timeout=False, missing_guard_evidence=False,
+                      verifier_late_exit=False, headroom_seconds=0, headroom_sample_seconds=0,
+                      preparation_seconds=0, final_binding_seconds=0,
+                      schedule_count=2, finalization_seconds=0, preparation_error=False):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         root=Path(temporary.name)
         binary=root/'bin';binary.mkdir()
@@ -401,11 +404,32 @@ class FGM2DeadlineTests(unittest.TestCase):
         protocol=json.loads(b.FGM2_PROTOCOL_PATH.read_text())
         factors=dict(dimensions=[3,3,3],rank=23,domain='ZT',orientation='cyclic-w',u=[],v=[],w=[])
         inputs={'original':dict(source=source,sha256=b.digest(source),reference=factors,factors_id='id')}
-        schedule=[dict(id='original-7-baseline',input='original',seed=7,strategy='baseline'),
-                  dict(id='original-7-transpose',input='original',seed=7,strategy='transpose')]
+        schedule=[dict(id=f'original-7-{index:02d}',input='original',seed=7,
+                       strategy='baseline' if index%2==0 else 'transpose')
+                  for index in range(schedule_count)]
         tick=[0.]
         guards=[]
+        original_write_json=b.write_json
+        original_report=b.fgm2_report
+        sampled=[False]
+        wait_remaining=[headroom_seconds]
         def clock():return tick[0]
+        def sample(timeout):
+            if not sampled[0]:
+                sampled[0]=True
+                tick[0]+=headroom_sample_seconds
+            return 3221225472 if wait_remaining[0] else 0
+        def sleep(seconds):
+            tick[0]+=wait_remaining[0]
+            wait_remaining[0]=0
+        def write_json(path,value):
+            if Path(path).name=='config.json':
+                tick[0]+=preparation_seconds
+                if preparation_error:raise OSError('config persistence failed')
+            return original_write_json(path,value)
+        def report(data,summary):
+            tick[0]+=finalization_seconds
+            return original_report(data,summary)
         def guarded(argv,directory,*,absolute_deadline):
             self.assertLess(tick[0],absolute_deadline)
             directory.mkdir()
@@ -414,8 +438,8 @@ class FGM2DeadlineTests(unittest.TestCase):
             (directory/'run.log').write_text('synthetic')
             guards.append((Path(argv[3] if argv[0]=='/usr/bin/time' else argv[0]).name,absolute_deadline))
             if argv[0]=='/usr/bin/time':
-                if native_guard_raises:raise OSError('native guard artifact write failed')
                 tick[0]+=native_seconds
+                if native_guard_raises:raise OSError('native guard artifact write failed')
                 config=json.loads(Path(argv[-1]).read_text())
                 receipt_path=Path(config['output'])
                 result=dict(strategy=config['reduction']['strategy'],baseline_additions=60,
@@ -436,8 +460,8 @@ class FGM2DeadlineTests(unittest.TestCase):
                 Path(str(receipt_path)+'.circuits.jsonl').write_text('{}\n')
                 if jump_after_first:tick[0]+=jump_after_first
                 return dict(complete=not forced,forced_termination=forced,cleanup_failure=False)
-            if verifier_guard_raises:raise OSError('verifier guard artifact write failed')
             tick[0]+=verifier_seconds
+            if verifier_guard_raises:raise OSError('verifier guard artifact write failed')
             if verifier_cleanup_failure:
                 return dict(complete=False,forced_termination=False,cleanup_failure=True)
             if verifier_late_exit:
@@ -451,6 +475,7 @@ class FGM2DeadlineTests(unittest.TestCase):
             tick[0]+=preliminary_seconds
             return dict(factors_id='id',claimed_additions=60,circuit_sha256='hash')
         def bind(*_):
+            tick[0]+=final_binding_seconds
             if binding_error:raise ValueError('independent factor mismatch')
             return dict(factors_id='id',additions=60,
                         additions_by_stage=dict(u=20,v=20,w=20),circuit_sha256='hash')
@@ -459,18 +484,20 @@ class FGM2DeadlineTests(unittest.TestCase):
              mock.patch.object(b,'fgm2_schedule',return_value=schedule), \
              mock.patch.object(b,'host_machine_identity',return_value={'hardware':{}}), \
              mock.patch.object(b,'source_identity',return_value={}), \
-             mock.patch.object(b,'wired_memory',return_value=0), \
+             mock.patch.object(b,'wired_memory',side_effect=sample), \
+             mock.patch.object(b,'write_json',side_effect=write_json), \
+             mock.patch.object(b,'fgm2_report',side_effect=report), \
              mock.patch.object(b,'native_dispatch_evidence',return_value={'status':'GPU_EXECUTED',
                 'dispatches':[('transposePairKernel',32,1),('constructorClosureKernel',32,1)]}), \
              mock.patch.object(b,'fgm2_preliminary_circuit',side_effect=preliminary), \
              mock.patch.object(b,'fgm2_bind_verifier',side_effect=bind):
-            data=b.execute_fgm2(source,binary,root/'out',clock=clock,guard=guarded)
+            data=b.execute_fgm2(source,binary,root/'out',clock=clock,sleeper=sleep,guard=guarded)
         return data,guards,root
 
-    def test_native_and_verifier_receive_absolute_trial_deadlines(self):
+    def test_native_and_verifier_receive_guard_start_deadlines(self):
         data,guards,root=self.synthetic_run()
         self.assertEqual([row['status'] for row in data['trials']],['verified','verified'])
-        self.assertEqual([deadline for _,deadline in guards],[8,10,10,12])
+        self.assertEqual([deadline for _,deadline in guards],[45,46,47,48])
         self.assertFalse(data['complete']) # A two-row injected schedule cannot complete 72 trials.
         self.assertTrue((root/'out/binaries/additions_reducer').is_file())
         self.assertTrue((root/'out/harness/tests/metal/verify.py').is_file())
@@ -479,13 +506,81 @@ class FGM2DeadlineTests(unittest.TestCase):
         self.assertEqual(data['trials'][0]['verification_command'][1],
                          str(root/'out/harness/tests/metal/verify.py'))
 
-    def test_verifier_admission_and_late_verification(self):
-        data,guards,_=self.synthetic_run(native_seconds=7,preliminary_seconds=1.1)
-        self.assertEqual(data['trials'][0]['status'],'artifact-awaiting-verification')
-        self.assertEqual(len(guards),2)
-        data,_,_=self.synthetic_run(native_seconds=7,verifier_seconds=3)
-        self.assertEqual(data['trials'][0]['status'],'late-verified')
+    def test_work_beyond_old_trial_cutoff_can_verify(self):
+        data,guards,_=self.synthetic_run(native_seconds=7,preliminary_seconds=4,
+                                          verifier_seconds=11)
+        self.assertEqual(data['trials'][0]['status'],'verified')
+        self.assertEqual(guards[0][1],45)
+        self.assertEqual(guards[1][1],56)
         self.assertFalse(data['complete'])
+
+    def test_headroom_wait_does_not_shorten_native_guard(self):
+        data,guards,_=self.synthetic_run(headroom_seconds=9)
+        self.assertEqual(data['trials'][0]['status'],'verified')
+        self.assertEqual(guards[0][1],54)
+        self.assertEqual(guards[1][1],55)
+
+    def test_no_native_launch_after_preparation_or_headroom_exhausts_admission(self):
+        for option in (dict(preparation_seconds=751),dict(headroom_sample_seconds=751),
+                       dict(headroom_seconds=751)):
+            with self.subTest(option=option):
+                data,guards,_=self.synthetic_run(**option)
+                self.assertEqual(guards,[])
+                self.assertEqual(data['trials'][0]['status'],'unrun')
+                self.assertIn('budget',data['trials'][0]['unrun_reason'])
+
+    def test_verifier_requires_full_global_admission(self):
+        data,guards,_=self.synthetic_run(preliminary_seconds=801)
+        self.assertEqual(len(guards),1)
+        self.assertEqual(data['trials'][0]['status'],'artifact-awaiting-verification')
+        self.assertEqual(data['trials'][1]['status'],'unrun')
+        data,guards,_=self.synthetic_run(preliminary_seconds=799)
+        self.assertEqual(len(guards),2)
+        self.assertEqual(guards[1][1],845)
+
+    def test_child_guard_completion_precedes_binding_cost(self):
+        data,guards,_=self.synthetic_run(native_seconds=45.1,preliminary_seconds=.2,
+                                          verifier_seconds=45.1,final_binding_seconds=.2)
+        self.assertEqual(data['trials'][0]['status'],'verified')
+        self.assertAlmostEqual(guards[0][1],45)
+        self.assertAlmostEqual(guards[1][1],90.3)
+        self.assertGreater(data['trials'][0]['native_receipt_binding_seconds'],0)
+        self.assertGreater(data['trials'][0]['final_binding_seconds'],0)
+
+    def test_row_snapshot_matches_measurement_after_persistence(self):
+        data,_,root=self.synthetic_run()
+        for index,row in enumerate(data['trials']):
+            trial=root/'out/trials'/f'{index:02d}-{row["id"]}'/'trial.json'
+            snapshot=json.loads(trial.read_text())
+            self.assertEqual(snapshot,json.loads(json.dumps(
+                {key:value for key,value in row.items() if key!='trial_sha256'})))
+            self.assertEqual(row['trial_sha256'],b.digest(trial))
+
+    def test_failed_phase_cost_and_preparation_status_are_retained(self):
+        data,_,_=self.synthetic_run(preparation_error=True,preparation_seconds=2)
+        self.assertEqual(data['trials'][0]['status'],'failed')
+        self.assertEqual(data['trials'][0]['preparation_seconds'],2)
+        data,_,_=self.synthetic_run(native_guard_raises=True,native_seconds=3)
+        self.assertEqual(data['trials'][0]['status'],'terminated')
+        self.assertEqual(data['trials'][0]['native_supervised_seconds'],3)
+        data,_,_=self.synthetic_run(verifier_guard_raises=True,verifier_seconds=4)
+        self.assertEqual(data['trials'][0]['status'],'artifact-awaiting-verification')
+        self.assertEqual(data['trials'][0]['verifier_supervised_seconds'],4)
+
+    def test_binding_past_global_deadline_has_no_completion_credit(self):
+        data,guards,_=self.synthetic_run(final_binding_seconds=899)
+        self.assertEqual(len(guards),2)
+        self.assertEqual(data['trials'][0]['status'],'late-verified')
+        self.assertEqual(data['status'],'budget-exceeded')
+
+    def test_complete_coverage_and_finalization_overrun(self):
+        data,_,_=self.synthetic_run(schedule_count=72)
+        self.assertTrue(data['complete'])
+        self.assertEqual(data['status'],'complete')
+        self.assertEqual(b.fgm2_summary(data)['verified'],72)
+        data,_,_=self.synthetic_run(schedule_count=72,finalization_seconds=901)
+        self.assertFalse(data['complete'])
+        self.assertEqual(data['status'],'budget-exceeded')
 
     def test_forced_gpu_termination_stops_future_trials(self):
         data,guards,_=self.synthetic_run(forced=True)

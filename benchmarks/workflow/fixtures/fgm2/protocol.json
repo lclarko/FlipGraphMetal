@@ -1,5 +1,6 @@
 {
   "schema": "fgm2-construction-protocol-v1",
+  "revision": 2,
   "public_panel": "../fgm1/panel.json",
   "public_inputs": ["original", "laderman", "smirnov", "sun", "cn122"],
   "private_input": "private",
@@ -8,10 +9,9 @@
   "order": "panel, seed, strategies rotated left by (panel_index + seed_index) modulo 4",
   "total_seconds": 900,
   "finalization_reserve_seconds": 50,
-  "admission_remaining_seconds": 60,
-  "native_seconds": 8,
-  "trial_seconds": 10,
-  "verification_admission_seconds": 2,
+  "native_seconds": 45,
+  "verification_seconds": 45,
+  "phase_bookkeeping_seconds": 5,
   "reduction": {
     "reducers": 128,
     "rounds": 16,

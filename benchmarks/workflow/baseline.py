@@ -2438,18 +2438,20 @@ def fgm2_summary(data):
             field = {'target-only':'target_only','one-auxiliary':'one_auxiliary',
                      'family-exhausted':'exhausted'}.get(status,'other')
             counts[field] += 1
-    return dict(schema='fgm2-construction-summary-v1',complete=data['complete'],
-                status=data['status'],timely_verified=len(cells)-len(missing),
+    return dict(schema='fgm2-construction-summary-v1',protocol_revision=data['protocol'].get('revision',1),
+                complete=data['complete'],
+                status=data['status'],verified=len(cells)-len(missing),
                 total_trials=len(cells),comparisons=comparisons,reference_attainment=attainment,
                 supplied_reference_coverage=supplied,reference_map=reference_map,
-                missing_timely_results=missing,constructor_outcomes=dict(constructor_outcomes),
+                missing_verified=missing,constructor_outcomes=dict(constructor_outcomes),
                 comparison_scope='fixed reduction work plus strategy extensions, not matched time')
 
 
 def fgm2_report(data, summary):
     """Compact per-invocation account; missing results remain visible."""
     lines = ['# FGM-2 construction measurement', '',
-             f"Status: {summary['status']}; timely verified: {summary['timely_verified']}/{summary['total_trials']}.",
+             f"Protocol revision: {summary['protocol_revision']}.",
+             f"Status: {summary['status']}; verified: {summary['verified']}/{summary['total_trials']}.",
              'Fixed reduction work is followed by strategy extensions. Elapsed times are not matched.', '',
              '| Input | Seed | Strategy | Status | Baseline | Final | Change | Trial s | Extension s | GPU s | Peak wired bytes |',
              '| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
@@ -2468,7 +2470,18 @@ def fgm2_report(data, summary):
             round(row['elapsed_seconds'],3) if 'elapsed_seconds' in row else None,
             round(extension,3) if extension is not None else None,
             round(gpu,3) if gpu is not None else None,wired)))+' |')
-    lines += ['',f"Missing timely results: {', '.join(summary['missing_timely_results']) or 'none'}.",
+    lines += ['',f"Missing verified results: {', '.join(summary['missing_verified']) or 'none'}.",
+              f"Setup: {data.get('setup_seconds',0):.3f} s; finalization: {data.get('finalization_seconds',0):.3f} s.",
+              'Per-row elapsed observations (seconds):', '',
+              '| Trial | Preparation | Headroom wait | Native guard | Native receipt/binding | Verifier guard | Final binding | Intermediate persistence |',
+              '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+    phase_fields = ('preparation_seconds','headroom_wait_seconds','native_supervised_seconds',
+                    'native_receipt_binding_seconds','verifier_supervised_seconds',
+                    'final_binding_seconds','evidence_persistence_seconds')
+    for row in data['trials']:
+        values = [f"{row[key]:.3f}" if key in row else '-' for key in phase_fields]
+        lines.append('| '+ ' | '.join([row['id'],*values])+' |')
+    lines += ['', 'Intermediate persistence overlaps the active phase; phase observations are not additive. Final trial snapshot writes are included in overall elapsed time.',
               'Constructor outcomes count observed searches only; supplied reference circuits are separate cost witnesses.', '']
     return '\n'.join(lines)
 
@@ -2497,6 +2510,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
     clock = clock or time.monotonic
     sleeper = sleeper or time.sleep
     guard = guard or guarded_run
+    started = clock()
     protocol, sources = fgm2_inputs(private_path)
     reference_coverage = fgm2_reference_coverage(sources,private_reference)
     binary_dir = Path(binary_dir).resolve(strict=True)
@@ -2505,8 +2519,13 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
     output = Path(output).absolute()
     output.mkdir(parents=True, exist_ok=False)
     (output/'.gitignore').write_text('*\n')
-    started = clock()
     deadline = started + protocol['total_seconds']
+    native_admission = (protocol['native_seconds']+protocol['verification_seconds']
+                        +2*protocol['phase_bookkeeping_seconds']
+                        +protocol['finalization_reserve_seconds'])
+    verifier_admission = (protocol['verification_seconds']
+                          +protocol['phase_bookkeeping_seconds']
+                          +protocol['finalization_reserve_seconds'])
     schedule = fgm2_schedule(protocol)
     data = dict(schema='fgm2-construction-measurement-v1',status='incomplete',complete=False,
                 protocol=protocol,started_monotonic=started,trials=[dict(row,status='unrun') for row in schedule],
@@ -2572,19 +2591,30 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
             data['private_reference_retained'] = str(destination.relative_to(output))
             next(row for row in reference_coverage if row['id']=='private-supplied')['retained_path'] = data['private_reference_retained']
         save()
+        data['setup_seconds'] = clock()-started
         for index, row in enumerate(data['trials']):
-            if forced or deadline-clock() < protocol['admission_remaining_seconds']:
+            if forced or deadline-clock() < native_admission:
                 data['stop_reason'] = 'forced GPU termination' if forced else 'global admission cutoff'
+                if not forced:
+                    row['unrun_reason'] = 'insufficient global budget for native admission'
                 break
             trial_start = clock()
-            native_deadline = min(trial_start+protocol['native_seconds'],deadline-protocol['finalization_reserve_seconds'])
-            trial_deadline = min(trial_start+protocol['trial_seconds'],deadline-protocol['finalization_reserve_seconds'])
             trial = output/'trials'/f'{index:02d}-{row["id"]}'
             trial.mkdir(parents=True)
-            row.update(status='failed',trial_start_seconds=trial_start-started,
-                       native_deadline_seconds=native_deadline-started,
-                       trial_deadline_seconds=trial_deadline-started)
-            save()
+            row.update(trial_start_seconds=trial_start-started,
+                       evidence_persistence_seconds=0.)
+            phase_name = 'preparation_seconds'
+            phase_started = clock()
+            def next_phase(name):
+                nonlocal phase_name, phase_started
+                now = clock()
+                row[phase_name] = row.get(phase_name,0.)+now-phase_started
+                phase_name, phase_started = name, now
+            def persist():
+                persistence_started = clock()
+                save()
+                row['evidence_persistence_seconds'] += clock()-persistence_started
+            persist()
             source = sources[row['input']]
             try:
                 if (any(digest(output/'binaries'/name) != checksum
@@ -2609,19 +2639,39 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                 row['config_sha256'] = digest(config_path)
                 row['independent_reference_sha256'] = digest(reference_path)
                 row['input_sha256'] = source['sha256']
-                # The initial sample and every wait consume the trial's eight seconds.
+                next_phase('headroom_wait_seconds')
                 while True:
-                    remaining = native_deadline-clock()
-                    if remaining <= 0:
-                        raise TimeoutError('native deadline before launch')
-                    if wired_memory(timeout=min(2,remaining)) <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']:
+                    sample_allowance = deadline-clock()-native_admission
+                    if sample_allowance <= 0:
+                        row['unrun_reason'] = 'insufficient global budget after preparation or headroom wait'
+                        data['stop_reason'] = 'global admission cutoff'
                         break
-                    sleeper(min(.025,max(0,native_deadline-clock())))
-                if clock() >= native_deadline:
-                    raise TimeoutError('native deadline before launch')
+                    available = wired_memory(timeout=min(2,sample_allowance)) <= LIMIT-FGM1_PROTOCOL['launch_wired_reserve_bytes']
+                    if deadline-clock() < native_admission:
+                        row['unrun_reason'] = 'insufficient global budget after headroom sample'
+                        data['stop_reason'] = 'global admission cutoff'
+                        break
+                    if available:
+                        break
+                    sleeper(min(.025,max(0,deadline-clock()-native_admission)))
+                if row.get('unrun_reason'):
+                    break
+                next_phase('preparation_seconds')
+                if deadline-clock() < native_admission:
+                    row['unrun_reason'] = 'insufficient global budget before native guard'
+                    data['stop_reason'] = 'global admission cutoff'
+                    break
                 argv = ['/usr/bin/time','-l','-p',str(binary),'--run-config',str(config_path)]
                 row['native_command'] = argv
-                save()
+                persist()
+                if deadline-clock() < native_admission:
+                    row['unrun_reason'] = 'insufficient global budget after native command persistence'
+                    data['stop_reason'] = 'global admission cutoff'
+                    break
+                native_deadline = clock()+protocol['native_seconds']
+                row['native_deadline_seconds'] = native_deadline-started
+                row['status'] = 'failed'
+                next_phase('native_supervised_seconds')
                 try:
                     guarded = guard(argv,trial/'native-guard',absolute_deadline=native_deadline)
                 except Exception as error:
@@ -2629,6 +2679,8 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                     row['status'] = 'terminated'
                     row['native_supervision_error'] = str(error)
                     raise RuntimeError('native guard failed with unknown process cleanup') from error
+                finally:
+                    next_phase('native_receipt_binding_seconds')
                 forced = bool(guarded.get('forced_termination'))
                 supervisor_failure = bool(guarded.get('cleanup_failure'))
                 if forced or supervisor_failure:
@@ -2649,7 +2701,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                     raise RuntimeError('native GPU cleanup failed')
                 if not guarded['complete'] and guarded.get('exit_code') not in (None,0):
                     raise ValueError('FGM-2 native process failed: '+str(guarded.get('error')))
-                if not guarded['complete'] or clock() >= native_deadline:
+                if not guarded['complete']:
                     raise TimeoutError('native process did not finish before native deadline')
                 receipt_path = trial/'receipt.json'
                 receipt = json.loads(receipt_path.read_text())
@@ -2682,21 +2734,29 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                 preliminary = fgm2_preliminary_circuit(artifact,receipt,source)
                 row['artifact'] = dict(path=str(artifact.relative_to(output)),sha256=preliminary['circuit_sha256'])
                 row['status'] = 'artifact-awaiting-verification'
-                save()
-                if trial_deadline-clock() < protocol['verification_admission_seconds']:
+                persist()
+                if deadline-clock() < verifier_admission:
                     row['verification_admission'] = 'insufficient time'
                     continue
                 argv = [sys.executable,str(output/'harness/tests/metal/verify.py'),str(artifact),
                         '--reference',str(reference_path)]
                 row['verification_command'] = argv
+                persist()
+                if deadline-clock() < verifier_admission:
+                    row['verification_admission'] = 'insufficient time after verifier command persistence'
+                    continue
+                verifier_deadline = clock()+protocol['verification_seconds']
+                row['verifier_deadline_seconds'] = verifier_deadline-started
                 row['verification_started_seconds'] = clock()-trial_start
-                save()
+                next_phase('verifier_supervised_seconds')
                 try:
-                    checked = guard(argv,trial/'verifier-guard',absolute_deadline=trial_deadline)
+                    checked = guard(argv,trial/'verifier-guard',absolute_deadline=verifier_deadline)
                 except Exception as error:
                     supervisor_failure = True
                     row['verifier_supervision_error'] = str(error)
                     raise RuntimeError('verifier guard failed with unknown process cleanup') from error
+                finally:
+                    next_phase('final_binding_seconds')
                 supervisor_failure = bool(checked.get('cleanup_failure'))
                 row['verifier_guard'] = dict(result_sha256=digest(trial/'verifier-guard/result.json'),
                     log_sha256=digest(trial/'verifier-guard/run.log') if (trial/'verifier-guard/run.log').is_file() else None,
@@ -2725,15 +2785,20 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
                 row['verification_completed_seconds'] = clock()-trial_start
                 row['evaluation'] = {key:evaluation[key] for key in
                     ('factors_id','additions','additions_by_stage','circuit_sha256')}
-                row['status'] = 'verified' if checked['complete'] and clock() < trial_deadline else 'late-verified'
+                row['status'] = 'verified' if checked['complete'] and clock() <= deadline else 'late-verified'
             except Exception as error:
+                if row['status'] == 'unrun' and not row.get('unrun_reason'):
+                    row['status'] = 'failed'
                 row['error'] = str(error)
                 correctness_failure = isinstance(error,(ValueError,SyntaxError,KeyError,TypeError))
             finally:
+                next_phase('closed')
                 row['elapsed_seconds'] = clock()-trial_start
                 write_json(trial/'trial.json',row)
                 row['trial_sha256'] = digest(trial/'trial.json')
                 save()
+            if row.get('unrun_reason'):
+                break
             if forced:
                 data['stop_reason'] = 'forced GPU termination'
                 break
@@ -2748,6 +2813,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
     except Exception as error:
         data['error'] = str(error)
     finally:
+        finalization_started = clock()
         try:
             if any(digest(output/'binaries'/name) != checksum
                    for name,checksum in data['build_inventory'].items()):
@@ -2764,6 +2830,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
             data['status'] = 'incomplete'
             data['error'] = 'retained inventory unavailable: '+str(error)
         data['elapsed_seconds'] = clock()-started
+        data['finalization_seconds'] = clock()-finalization_started
         if data['elapsed_seconds'] > protocol['total_seconds']:
             data['complete'] = False
             data['status'] = 'budget-exceeded'
@@ -2772,6 +2839,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
         write_json(output/'summary.json',summary)
         (output/'report.md').write_text(fgm2_report(data,summary))
         data['final_elapsed_seconds'] = clock()-started
+        data['finalization_seconds'] = clock()-finalization_started
         if data['final_elapsed_seconds'] > protocol['total_seconds']:
             data['complete'] = False
             data['status'] = 'budget-exceeded'
@@ -2784,6 +2852,7 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
             data['complete'] = False
             data['status'] = 'budget-exceeded'
             data['final_elapsed_seconds'] = clock()-started
+            data['finalization_seconds'] = clock()-finalization_started
             write_json(output/'summary.json',fgm2_summary(data))
             (output/'report.md').write_text(fgm2_report(data,fgm2_summary(data)))
             save()
