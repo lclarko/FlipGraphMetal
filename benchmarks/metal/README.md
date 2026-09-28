@@ -395,13 +395,20 @@ After a full-population resume hit the 3-GiB guard, a separately authorized
 qualification passed with a 4-GiB per-call limit and the original prelaunch
 ceiling. `guard.run(..., wired_limit_bytes=...)` supports that explicit override;
 the default and checked-in comparison protocol remain at 3 GiB. The frozen
-qualification is retained under `build/fgm3/qualification-4g-01/`. No measured
-comparison completed: the first attempt stopped during uniform resume at the
+qualification is retained under `build/fgm3/qualification-4g-01/`. The first
+measured attempt stopped during uniform resume at the
 native scan budget. Its earlier verified results and failed attempt are retained
 under `build/fgm3/comparison-02/`. A fresh attempt with a 1-GiB read budget,
 retained under `build/fgm3/comparison-03/`, completed five arms with 180 verified
 evaluations and best cost 55. One arm could not launch within the headroom
 admission window, leaving the matrix incomplete. The qualification wait also
-increased the frozen chunk allowance to 59 seconds. Selection benefit remains
-inconclusive. Retained-candidate and qualification results are reported
+increased the frozen chunk allowance to 59 seconds, leaving that comparison
+inconclusive.
+
+With headroom waiting excluded from calibration, `build/fgm3/comparison-04/`
+completed all six arms in 540.125 seconds, after 75.108 seconds of preparation
+and qualification. Its frozen allowance was 23 seconds; all 307 measured
+evaluations were independently verified by their endpoints. Best cost remained
+55. This completed measurement is separate from the earlier incomplete attempts.
+Retained-candidate and qualification results are reported
 in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).

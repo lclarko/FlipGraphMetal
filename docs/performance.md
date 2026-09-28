@@ -490,7 +490,55 @@ about 31 seconds of each arm in which to admit work. Seed 7 uniform's second
 attempt exhausted that admission window while waiting; seed 19 cost-diverse
 never launched. Other arms completed two or three chunks. Unequal headroom
 waits and the conservative allowance limit what the observed differences can
-say about parent selection. The experiment was not repeated.
+say about parent selection. That frozen protocol was not repeated.
+
+The subsequent admission-calibration fix excludes only explicit headroom
+waiting from pilot work duration. It retains the 25% margin plus two seconds,
+and still charges all waiting to the measured windows. The changed protocol
+was qualified and measured once under the same 4-GiB memory and 1-GiB read
+limits. In `build/fgm3/comparison-04/`, maximum pilot work was 16.221 seconds
+(28.165 seconds elapsed minus 11.944 seconds waiting), giving a 23-second
+allowance. Preparation and qualification took 75.108 seconds, followed by
+540.125 seconds of measurement. All six arms completed.
+
+| Seed | Selector | Timely evaluations | New alternatives | Best new cost (U/V/W) | New-parent installations |
+|---:|---|---:|---:|---|---:|
+| 7 | Uniform | 47 | 31 | 60 (14/17/29) | 5 |
+| 7 | Cost-diverse | 38 | 22 | 60 (15/14/31) | 2 |
+| 19 | Cost-diverse | 53 | 37 | 58 (13/16/29) | 3 |
+| 19 | Uniform | 55 | 39 | 57 (14/15/28) | 6 |
+| 41 | Uniform | 61 | 45 | 57 (13/13/31) | 7 |
+| 41 | Cost-diverse | 53 | 37 | 57 (14/15/28) | 4 |
+
+All 307 measured evaluations were independently verified within their endpoints,
+with no late evaluations. They include 96 starting-parent evaluations and 211
+new evaluations representing 204 distinct canonical identities. Best cost
+remained 55 from the initial population at every 30/60/90-second endpoint;
+none reached 54. The 27 installations of newly evaluated parents, including
+nine under cost-diverse selection, all occurred on resume.
+
+Uniform retained more new candidates in each seed pair. Its best new cost tied
+cost-diverse at seeds 7 and 41 and was one addition lower at seed 19. Across
+seeds, uniform retained 115 new canonical identities and cost-diverse 92, with
+three in common. Cost-diverse therefore contributed 89 candidates absent from
+these uniform arms, but this does not establish greater diversity than further
+uniform exploration. The completed short comparison shows feedback in use,
+with no observed best-cost advantage for cost-diverse selection. Three paired
+seeds and variable host headroom do not establish broader policy superiority.
+
+All 90 supervised children passed. Peak sampled wired memory was 3,475,554,304
+bytes (3.237 GiB); maximum native input reads were 433,238,724 bytes, above the
+former 256-MiB default and within the explicit 1-GiB budget. Exact read-only
+checks covered 58 qualification and 307 measured evaluations, source/build and
+artifact bindings, cumulative exports, endpoints and parent installations.
+The admission fix passed 18 focused clock and workflow tests. Earlier evidence
+remains unchanged, and the new comparison has its own sealed bundle.
+
+Measured arms spent 274.568 seconds in native children, including 160.955
+seconds of GPU dispatch, plus 135.566 seconds in exports and 47.256 seconds
+waiting for headroom. GPU time is included in native time. Replay and export
+costs remain part of the measurement; this completed short run does not
+establish longer-run replay scalability.
 
 The last full host suite passed 260 tests with no failures or skips; the independent
 verifier's four focused tests also passed. The scan-budget and endpoint changes
@@ -498,7 +546,7 @@ passed 16 additive-workflow tests and 41 execution/supervision tests.
 Native programs and the package built,
 and relocated host commands plus additive preflight passed with Python absent
 from PATH. Host tests cover score binding, population selection, resume,
-transaction failures and malformed histories. Full GPU qualification passed
-under the recorded 4-GiB policy; matched-time selection benefit remains
-**inconclusive**. These qualification checks and the retrospective reconstruction
-pass do not establish a uniform versus cost-diverse selection result.
+transaction failures and malformed histories. Full GPU qualification and one
+complete matched-time comparison passed under the recorded 4-GiB policy.
+The comparison's costs and saved diversity are descriptive outcomes under this
+short protocol, not evidence of a general selection advantage.
