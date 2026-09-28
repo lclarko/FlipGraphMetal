@@ -1,6 +1,9 @@
 // Host-only verification of the production best-circuit binding boundary.
 #include "../../src/metal/host.h"
 #include "../../src/workflow/reduction_execution.h"
+#ifndef FGM_CONSTRUCTOR_GPU_TEST
+#include "two_aux_constructor.h"
+#endif
 // Shared by the existing host and GPU test drivers; never used in production.
 fgm::Json constructorTest(const fgm::Json &request,bool gpu=false) {
     fgm::Matrix targets;
@@ -59,6 +62,9 @@ int main() {
         std::string bytes; char byte;
         while(std::cin.get(byte)) { if(bytes.size()==1048576) throw fgm::Resource("test input bound"); bytes+=byte; }
         auto request=fgm::Parser(bytes).parse();
+        if(request.has("two_aux")) {
+            std::cout<<fgm::dump(twoAuxConstructorTest(request))<<'\n'; return 0;
+        }
         if(request.has("targets")) {
             std::cout<<fgm::dump(constructorTest(request))<<'\n'; return 0;
         }

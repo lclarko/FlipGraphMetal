@@ -379,6 +379,12 @@ extend FGM beyond those inspected implementations. This is a lineage statement,
 not a claim of research novelty. Generation, capture, pools, and mutation
 scheduling are unchanged.
 
+The [bounded two-auxiliary specification](specifications/TWO-AUX-CONSTRUCTOR-v1.md)
+defines the next construction family. Its first milestone adds host preparation,
+route enumeration, witness validation, and independent host tests only. It is
+not connected to production evaluation. Run `make test-workflow` for these
+checks; GPU integration and factors-only Sun-56 qualification remain later gates.
+
 ## Native additive search
 
 `flip_graph --run-config` accepts the opt-in `workflow: "additive-search"`
