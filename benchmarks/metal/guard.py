@@ -9,14 +9,18 @@ import time
 from application import LIMIT, artifacts, digest, terminate, wired_memory, write_json
 
 
-def run(argv, output, *, absolute_deadline=None):
+def run(argv, output, *, absolute_deadline=None, wired_limit_bytes=LIMIT):
+    if type(wired_limit_bytes) is not int or wired_limit_bytes <= 0:
+        raise ValueError('wired limit must be a positive integer byte count')
     output.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
     if absolute_deadline is not None and not isinstance(absolute_deadline, (int, float)):
         raise ValueError('absolute deadline must be a monotonic clock value')
     deadline = min(start + 45, absolute_deadline) if absolute_deadline is not None else start + 45
     record = dict(argv=argv, complete=False, time_limit=45, absolute_deadline=absolute_deadline,
-                  wired_limit=LIMIT, memory=[], forced_termination=False, cleanup_failure=False)
+                  wired_limit=wired_limit_bytes, memory=[], forced_termination=False, cleanup_failure=False)
+    limit_text = (f'{wired_limit_bytes // 1024**3} GiB' if wired_limit_bytes % 1024**3 == 0
+                  else f'{wired_limit_bytes} bytes')
     write_json(output / 'result.json', record)
     process = None
     try:
@@ -25,8 +29,8 @@ def run(argv, output, *, absolute_deadline=None):
             raise RuntimeError('time limit before memory sample')
         initial = wired_memory(timeout=min(2, remaining))
         record['memory'].append(dict(seconds=0, wired_bytes=initial))
-        if initial > LIMIT:
-            raise RuntimeError('wired memory exceeded 3 GiB before launch')
+        if initial > wired_limit_bytes:
+            raise RuntimeError(f'wired memory exceeded {limit_text} before launch')
         if time.monotonic() >= deadline:
             raise RuntimeError('time limit before launch')
         with (output / 'run.log').open('x') as log:
@@ -43,8 +47,8 @@ def run(argv, output, *, absolute_deadline=None):
                     raise RuntimeError('time limit')
                 value = wired_memory(timeout=min(2, remaining))
                 record['memory'].append(dict(seconds=time.monotonic() - start, wired_bytes=value))
-                if value > LIMIT:
-                    raise RuntimeError('wired memory exceeded 3 GiB')
+                if value > wired_limit_bytes:
+                    raise RuntimeError(f'wired memory exceeded {limit_text}')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError('time limit')

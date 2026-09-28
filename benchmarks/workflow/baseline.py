@@ -2,6 +2,7 @@
 import argparse
 import ast
 import copy
+import collections
 from collections import defaultdict
 import hashlib
 import heapq
@@ -882,7 +883,10 @@ def native_verify_circuits(path, receipt, record_limit=1048576):
 
 
 def native_dispatch_evidence(log, receipt):
-    required=receipt['counters'].get('flip_attempts',0)>0 or bool(receipt.get('results'))
+    config=receipt['configuration']
+    additive=config.get('workflow')=='additive-search'
+    evaluated=additive and receipt.get('evaluated_current_run',0)>0
+    required=receipt['counters'].get('flip_attempts',0)>0 or bool(receipt.get('results')) or evaluated
     if not re.search(r'^Metal dispatch ',log,re.M):
         if required: raise ValueError('completed native work lacks GPU dispatch evidence')
         return {'status':'GPU_NOT_RUN','gpu_all_seconds':0.,'dispatches':[]}
@@ -891,13 +895,15 @@ def native_dispatch_evidence(log, receipt):
     if len(libraries)!=1 or libraries[0][1]!=receipt.get('library_sha256'):
         raise ValueError('GPU library identity differs from native receipt')
     names={entry[0] for entry in evidence['dispatches']}
-    config=receipt['configuration']
     if config['operation']=='search':
         expected='controlledGeneralKernel'
         if receipt['actual_backend']=='packed':
             expected=('controlledPackedReductionKernel' if config['policy']['mode']=='rank-reduction'
                       else 'controlledPackedAlternativesKernel')
-        if expected not in names: raise ValueError('missing expected controlled kernel')
+        if (not additive or receipt['counters'].get('flip_attempts',0)>0) and expected not in names:
+            raise ValueError('missing expected controlled kernel')
+        if evaluated and not {'initializeReducersKernel','runReducersKernel'}<=names:
+            raise ValueError('missing additive evaluation kernels')
     else:
         if 'initializeReducersKernel' not in names: raise ValueError('missing reducer initialization')
         if any(result['rounds_completed'] for result in receipt['results']):
@@ -2873,6 +2879,905 @@ def execute_fgm2(private_path, binary_dir, output, *, private_reference=None,
     return data
 
 
+FGM3_PROTOCOL_PATH = ROOT/'benchmarks/workflow/fixtures/fgm3/protocol.json'
+
+
+def fgm3_generation_seed(trial_seed, chunk):
+    """Keep walk streams separate from evaluation seeds and arm labels."""
+    return effectiveness_seed('fgm3', trial_seed, 'generation', chunk)
+
+
+def fgm3_evaluation_seed(base, factors_id):
+    key = dict(factors_id=factors_id,purpose='additive-evaluation',seed=base)
+    value = int(hashlib.sha256(json.dumps(key,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:8],16)
+    return value or 1
+
+
+def fgm3_chunk_allowance(seconds):
+    if not seconds or any(type(value) not in (int,float) or not math.isfinite(value) or value <= 0 for value in seconds):
+        raise ValueError('qualification needs positive completed chunk durations')
+    return math.ceil(1.25*max(seconds))+2
+
+
+def fgm3_admission(now, arm_deadline, global_deadline, allowance, protocol):
+    if arm_deadline-now <= allowance:
+        return 'arm admission allowance'
+    if global_deadline-now < max(protocol['native_admission_seconds'],
+                                 allowance+protocol['finalization_reserve_seconds']):
+        return 'global admission reserve'
+    return None
+
+
+def fgm3_scan_bytes(protocol):
+    limits=protocol.get('limits',{})
+    if type(limits) is not dict:
+        raise ValueError('FGM-3 limits must be an object')
+    if 'scan_bytes' not in limits:return None
+    value=limits['scan_bytes']
+    if type(value) is not int or value<=0:
+        raise ValueError('FGM-3 scan_bytes must be a positive integer')
+    return value
+
+
+def fgm3_config(protocol, selector, trial_seed, chunk, workers, population, history, receipt):
+    if selector not in protocol['selectors'] or trial_seed not in protocol['seeds']:
+        raise ValueError('selector or trial seed outside frozen protocol')
+    if not 1 <= workers <= 2 or chunk < 0:
+        raise ValueError('invalid bounded chunk')
+    policy=copy.deepcopy(protocol['policy'])
+    policy['seed']=fgm3_generation_seed(trial_seed,chunk)
+    evaluation=copy.deepcopy(protocol['evaluation'])
+    evaluation['seed']=trial_seed
+    pool=copy.deepcopy(protocol['pool'])
+    pool['selector']=selector
+    execution=copy.deepcopy(protocol['execution'])
+    execution['workers']=workers
+    if chunk == 0:
+        paths=[str(Path(population)/entry['path']) for entry in
+               json.loads((Path(population)/'population.json').read_text())['entries']]
+        input_spec=dict(kind='files',files=[dict(path=path,format='json',domain='ZT') for path in paths])
+    else:
+        input_spec=dict(kind='resume',journal=str(history))
+    config=dict(schema='fgm-run-v1',operation='search',workflow='additive-search',
+                output=str(receipt),input=input_spec,execution=execution,policy=policy,
+                pool=pool,evaluation=evaluation,circuit_target=protocol['circuit_target'],
+                history=dict(path=str(history),**{k:v for k,v in protocol['history'].items() if k!='path'}))
+    scan=fgm3_scan_bytes(protocol)
+    if scan is not None:config['limits']=dict(scan_bytes=scan)
+    return config
+
+
+def fgm3_checked_evaluation(row, expected_settings, producer):
+    """Bind a native evaluation to the independently checked admitted factors."""
+    if row.get('schema')!='fgm-journal-evaluation-v1':
+        raise ValueError('unexpected additive evaluation export')
+    source=row['source_scheme']
+    if (source['dimensions'] != [3,3,3] or source['rank']!=23 or source['domain']!='ZT'
+            or source['orientation']!='cyclic-w'):
+        raise ValueError('additive source presentation shape or domain mismatch')
+    raw=dict(n=source['dimensions'],m=source['rank'],z2=False,**{k:source[k] for k in 'uvw'})
+    verify(raw)
+    oracle=host_oracle()
+    source_id=oracle.identity(source,False)
+    canonical_id=oracle.identity(source)
+    effective=normalized_input(raw)
+    effective_scheme=dict(dimensions=[3,3,3],rank=23,domain='ZT',orientation='cyclic-w',
+                          **{k:effective[k] for k in 'uvw'})
+    factors_id=oracle.identity(effective_scheme,False)
+    evaluation=row['evaluation']
+    if (evaluation['schema']!='fgm-additive-evaluation-v1' or evaluation['scheme_id']!=canonical_id
+            or evaluation['source_factors_id']!=source_id or evaluation['factors_id']!=factors_id
+            or evaluation['settings']!=expected_settings or evaluation['producer']!=producer
+            or evaluation['seed']!=fgm3_evaluation_seed(expected_settings['seed'],factors_id)):
+        raise ValueError('additive evaluation source, settings, seed or producer mismatch')
+    circuit=evaluation['circuit']
+    result=verify(circuit,effective)
+    if (result['domain']!='ZT' or result['rank']!=23 or result['equations']!=729
+            or result['additions']!=evaluation['additions']
+            or result['additions_by_stage']!=evaluation['additions_by_stage']):
+        raise ValueError('independent additive circuit count mismatch')
+    if circuit.get('factors_id',factors_id)!=factors_id or (
+            circuit.get('scheme_id',canonical_id)!=canonical_id):
+        raise ValueError('additive circuit declared identity mismatch')
+    reconstructed=dict(dimensions=[3,3,3],rank=23,domain='ZT',orientation='cyclic-w',
+                       **dict(zip('uvw',circuit_factors(circuit))))
+    if oracle.identity(reconstructed,False)!=factors_id or oracle.identity(reconstructed)!=canonical_id:
+        raise ValueError('additive circuit reconstructed identity mismatch')
+    return dict(scheme_id=canonical_id,factors_id=factors_id,source_factors_id=source_id,
+                admission_order=evaluation['admission_order'],additions=result['additions'],
+                additions_by_stage=result['additions_by_stage'],
+                circuit_sha256=hashlib.sha256((json.dumps(circuit,separators=(',',':'),sort_keys=True)+'\n').encode()).hexdigest(),
+                phase_microseconds=evaluation['phase_microseconds'],construction=evaluation['construction'],
+                stage_sources=evaluation['stage_sources'],baseline_additions=evaluation['baseline_additions'],
+                baseline_additions_by_stage=evaluation['baseline_additions_by_stage'])
+
+
+def fgm3_bind_export(previous, current, expected_settings, producer, when):
+    """Validate the cumulative acknowledged prefix, then check new circuits once."""
+    if current[:len(previous)] != previous:
+        raise ValueError('additive evaluation export changed acknowledged prefix')
+    checked=[]
+    known={row['evaluation']['scheme_id'] for row in previous}
+    for index,row in enumerate(current[len(previous):],len(previous)):
+        entry=fgm3_checked_evaluation(row,expected_settings,producer)
+        if entry['admission_order']!=index or entry['scheme_id'] in known:
+            raise ValueError('additive evaluation order or canonical novelty mismatch')
+        known.add(entry['scheme_id'])
+        entry['verified_seconds']=when
+        checked.append(entry)
+    return checked
+
+
+def fgm3_bind_installations(previous, current, evaluations, selector):
+    if current[:len(previous)]!=previous:
+        raise ValueError('parent installation export changed acknowledged prefix')
+    known={row['scheme_id']:row for row in evaluations}
+    checked=[]
+    for row in current[len(previous):]:
+        if row.get('schema')!='fgm-parent-installation-v1':
+            raise ValueError('unexpected installation export')
+        parent=known.get(row['selected_parent_id'])
+        if parent is None or row['selected_factors_id']!=parent['factors_id'] or row['selected_additions']!=parent['additions']:
+            raise ValueError('installation lacks verified scored parent')
+        if row['selection_group'] not in ({'uniform'} if selector=='uniform' else {'elite','exploration'}):
+            raise ValueError('installation score group mismatch')
+        if row['kind'] not in ('initial','restart') or type(row['installed']) is not bool:
+            raise ValueError('installation kind or applied flag invalid')
+        checked.append(dict(parent_id=parent['scheme_id'],cost=parent['additions'],
+                            group=row['selection_group'],installed=row['installed'],kind=row['kind'],
+                            worker=row['worker']))
+    return checked
+
+
+def fgm3_bind_initial_population(entries, presentations, evaluations=None):
+    if len(entries)!=16 or len(presentations)!=16 or any(
+            presentation['source_sha256']!=entry['sha256'] or
+            presentation['submitted_factors_id']!=entry['source_factors_id'] or
+            presentation['effective_factors_id']!=entry['effective_factors_id']
+            for presentation,entry in zip(presentations,entries)):
+        raise ValueError('additive submitted population differs from frozen factor presentations')
+    if evaluations is not None and (len(evaluations)<16 or
+            [row['source_factors_id'] for row in evaluations[:16]]!=
+            [entry['effective_factors_id'] for entry in entries]):
+        raise ValueError('additive initial evaluated factors differ from normalized presentations')
+
+
+def fgm3_export_rows(path, record_limit=8388608):
+    rows=[]
+    with Path(path).open() as stream:
+        while line:=stream.readline(record_limit+1):
+            if len(line.encode())>record_limit or not line.endswith('\n'):
+                raise ValueError('additive export record exceeds limit')
+            row=json.loads(line)
+            if row.get('schema') not in ('fgm-journal-evaluation-v1','fgm-parent-installation-v1'):
+                raise ValueError('unexpected additive export record')
+            rows.append(row)
+    return ([row for row in rows if row['schema']=='fgm-journal-evaluation-v1'],
+            [row for row in rows if row['schema']=='fgm-parent-installation-v1'])
+
+
+def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, field=None):
+    try:
+        result=guard(['/usr/bin/time','-l','-p',*argv],destination)
+    except Exception as error:
+        if record is not None:
+            record[field]=dict(status='unknown-cleanup',
+                result_sha256=digest(destination/'result.json') if (destination/'result.json').exists() else None,
+                log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None)
+        raise RuntimeError(expected+' supervision has unknown cleanup') from error
+    observed=dict(status='complete' if result.get('complete') and not result.get('forced_termination')
+                  and not result.get('cleanup_failure') else 'failed',
+        forced_termination=bool(result.get('forced_termination')),
+        cleanup_failure=bool(result.get('cleanup_failure')),
+        wall_seconds=result.get('wall_seconds'),error=result.get('error'),
+        result_sha256=digest(destination/'result.json') if (destination/'result.json').exists() else None,
+        log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None,
+        peak_system_wired_bytes=max((item['wired_bytes'] for item in result.get('memory',[])),default=0))
+    if record is not None:record[field]=observed
+    if result.get('forced_termination') or result.get('cleanup_failure'):
+        raise RuntimeError(expected+' was forcibly terminated or cleanup is uncertain')
+    if not result.get('complete'):
+        raise RuntimeError(expected+' did not complete: '+str(result.get('error')))
+    if observed['result_sha256'] is None or observed['log_sha256'] is None:
+        if record is not None:record[field]['status']='missing-sidecar'
+        raise ValueError(expected+' completed without required supervision sidecars')
+    return dict(complete=True,result_sha256=observed['result_sha256'],
+                log_sha256=observed['log_sha256'],wall_seconds=result['wall_seconds'],
+                peak_system_wired_bytes=observed['peak_system_wired_bytes'])
+
+
+def fgm3_export_budget(now, global_deadline, remaining_children, protocol):
+    required=(remaining_children*protocol['native_guard_seconds']+
+        protocol['phase_bookkeeping_seconds']+protocol['finalization_reserve_seconds'])
+    if remaining_children==2:
+        required=max(required,protocol['verifier_admission_seconds']+
+                     protocol['finalization_reserve_seconds'])
+    return global_deadline-now>=required
+
+
+def fgm3_wait_headroom(clock, sleeper, global_deadline, arm_deadline, allowance, protocol, sample):
+    started=clock()
+    while True:
+        reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
+        if reason:return reason,clock()-started
+        try:
+            available=sample(timeout=min(2,max(.001,global_deadline-clock()-protocol['native_admission_seconds'])))
+        except subprocess.TimeoutExpired:
+            reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
+            if reason:return reason,clock()-started
+            continue
+        reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
+        if reason:return reason,clock()-started
+        if available<=protocol['wired_limit_bytes']-protocol['launch_wired_reserve_bytes']:
+            return None,clock()-started
+        sleeper(min(protocol['headroom_poll_seconds'],max(0,arm_deadline-clock()-allowance)))
+
+
+def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, workers,
+                   arm, chunk, state, global_deadline, arm_deadline, allowance,
+                   *, clock, sleeper, guard, memory_sample, record=None):
+    """Complete native work, both read-only exports and exact independent checks."""
+    started=clock()
+    chunk_dir=Path(output)/arm/'chunks'/f'{chunk:03d}'
+    chunk_dir.mkdir(parents=True,exist_ok=False)
+    history=Path(output)/arm/'history'
+    receipt_path=chunk_dir/'receipt.json'
+    config=fgm3_config(protocol,selector,seed,chunk,workers,population,history,receipt_path)
+    config_path=chunk_dir/'config.json'
+    write_json(config_path,config)
+    if record is None:record={}
+    record.update(index=chunk,status='prepared',config_sha256=digest(config_path),
+                  headroom_wait_seconds=0.)
+    record.setdefault('started_seconds',started)
+    reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
+    if reason:
+        record.update(status='unrun',stop_reason=reason)
+        return record
+    reason,wait=fgm3_wait_headroom(clock,sleeper,global_deadline,arm_deadline,allowance,protocol,memory_sample)
+    record['headroom_wait_seconds']=wait
+    if reason:
+        record.update(status='unrun',stop_reason=reason)
+        return record
+    if digest(config_path)!=record['config_sha256'] or any(digest(binaries/name)!=checksum
+            for name,checksum in state['build_inventory'].items()):
+        raise ValueError('additive config or frozen build changed before native launch')
+    reason=fgm3_admission(clock(),arm_deadline,global_deadline,allowance,protocol)
+    if reason:
+        record.update(status='unrun',stop_reason=reason)
+        return record
+    record['status']='native-started'
+    native=fgm3_guarded([str(binaries/'flip_graph'),'--run-config',str(config_path)],
+                        chunk_dir/'native-guard',guard,expected='additive native chunk',
+                        record=record,field='native_guard')
+    record['native_guard']=native
+    receipt=json.loads(receipt_path.read_text())
+    record['receipt_sha256']=digest(receipt_path)
+    if (receipt['status']!='complete' or not receipt['execution_started']
+            or receipt['configuration_sha256']!=record['config_sha256']
+            or receipt['executable_sha256']!=state['build_inventory']['flip_graph']
+            or receipt.get('library_mode')!='metallib'
+            or receipt.get('library_sha256')!=state['build_inventory']['shaders/signed.metallib']):
+        raise ValueError('additive native receipt/build/configuration mismatch')
+    if chunk==0:
+        population_entries=json.loads((Path(population)/'population.json').read_text())['entries']
+        fgm3_bind_initial_population(population_entries,receipt['presentations'])
+    record['run_id']=receipt['run_id']
+    record['counters']=receipt['counters']
+    record['seed_duplicates']=receipt.get('seed_duplicates',0)
+    record['completed_batches']=receipt['completed_batches']
+    record['pool_evictions']=receipt.get('pool_evictions')
+    if (type(record['pool_evictions']) is not int or record['pool_evictions']<state.get('pool_evictions',0)
+            or type(record['seed_duplicates']) is not int or record['seed_duplicates']<0):
+        raise ValueError('additive pool eviction or duplicate counter invalid')
+    record['host_phases_microseconds']={k:v for k,v in receipt.items() if k.endswith('_microseconds')}
+    record['gpu']=native_dispatch_evidence((chunk_dir/'native-guard/run.log').read_text(),receipt)
+    if not fgm3_export_budget(clock(),global_deadline,2,protocol):
+        record.update(status='verification-pending',stop_reason='global verification reserve')
+        return record
+    tool=binaries/'scheme_tool'
+    common=['--format','journal','--receipt',str(receipt_path),'--input',str(history),
+            '--record-bytes',str(protocol['history']['transaction_bytes']),
+            '--scan-bytes',str(fgm3_scan_bytes(protocol) or protocol['history']['storage_bytes'])]
+    export_path=chunk_dir/'evaluations.jsonl'
+    record['status']='evaluation-export-started'
+    record['evaluation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--evaluations',
+        '--output',str(export_path)],chunk_dir/'evaluation-export-guard',guard,
+        expected='additive evaluation export',record=record,field='evaluation_export_guard')
+    record['evaluation_export_sha256']=digest(export_path)
+    if not fgm3_export_budget(clock(),global_deadline,1,protocol):
+        record.update(status='export-pending',stop_reason='global observation export reserve')
+        return record
+    observation_path=chunk_dir/'observations.jsonl'
+    record['status']='observation-export-started'
+    record['observation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--observations',
+        '--output',str(observation_path)],chunk_dir/'observation-export-guard',guard,
+        expected='additive observation export',record=record,field='observation_export_guard')
+    record['observation_export_sha256']=digest(observation_path)
+    current_evaluations,current_installs=fgm3_export_rows(export_path)
+    previous_evaluations=[] if not state.get('evaluation_export') else fgm3_export_rows(
+        Path(output)/state['evaluation_export'])[0]
+    previous_installs=[] if not state.get('evaluation_export') else fgm3_export_rows(
+        Path(output)/state['evaluation_export'])[1]
+    if receipt['evaluated_historical']!=len(current_evaluations):
+        raise ValueError('additive receipt/export evaluation count mismatch')
+    producer=dict(executable_sha256=state['build_inventory']['flip_graph'],library_mode='metallib',
+                  library_sha256=state['build_inventory']['shaders/signed.metallib'])
+    new=fgm3_bind_export(previous_evaluations,current_evaluations,config['evaluation'],producer,clock())
+    if receipt['evaluated_current_run']!=len(new):
+        raise ValueError('additive current-run evaluation count mismatch')
+    if chunk==0:
+        population_entries=json.loads((Path(population)/'population.json').read_text())['entries']
+        fgm3_bind_initial_population(population_entries,receipt['presentations'],new)
+    for item in current_evaluations[len(previous_evaluations):]:
+        if item['run_id']!=receipt['run_id']:
+            raise ValueError('new additive evaluation is outside native run')
+    known=state['evaluations']+new
+    installs=fgm3_bind_installations(previous_installs,current_installs,known,selector)
+    for item in current_installs[len(previous_installs):]:
+        if item['run_id']!=receipt['run_id']:
+            raise ValueError('new parent installation is outside native run')
+    prior_observations=[] if not state.get('observation_export') else checked_observations(
+        Path(output)/state['observation_export'])
+    observations=checked_observations(observation_path)
+    if observations[:len(prior_observations)]!=prior_observations:
+        raise ValueError('additive observation export changed acknowledged prefix')
+    added_observations=observations[len(prior_observations):]
+    artifact=receipt['circuit_artifact']
+    best=receipt['best_evaluation']
+    circuit_path=Path(artifact['path'])
+    if (circuit_path!=Path(str(receipt_path)+'.circuits.jsonl') or artifact['format']!='jsonl'
+            or artifact['records']!=1 or digest(circuit_path)!=artifact['sha256']):
+        raise ValueError('additive best circuit artifact binding mismatch')
+    lines=circuit_path.read_text().splitlines()
+    if len(lines)!=1 or json.loads(lines[0])!=best['circuit']:
+        raise ValueError('additive published circuit differs from committed best')
+    if not any(item['evaluation']==best for item in current_evaluations):
+        raise ValueError('additive best evaluation absent from acknowledged export')
+    if best['scheme_id'] not in {item['scheme_id'] for item in known}:
+        raise ValueError('additive best circuit lacks independent verification')
+    if digest(receipt_path)!=record['receipt_sha256'] or digest(export_path)!=record['evaluation_export_sha256'] or (
+            digest(observation_path)!=record['observation_export_sha256']):
+        raise ValueError('additive receipt or export changed during verification')
+    write_json(chunk_dir/'verification.json',dict(schema='fgm3-chunk-verification-v1',
+        receipt_sha256=record['receipt_sha256'],evaluation_export_sha256=record['evaluation_export_sha256'],
+        observation_export_sha256=record['observation_export_sha256'],
+        new_evaluations=[{k:v for k,v in item.items() if k!='verified_seconds'} for item in new],
+        best_scheme_id=best['scheme_id'],best_additions=best['additions'],
+        best_circuit_sha256=artifact['sha256']))
+    record['verification_sha256']=digest(chunk_dir/'verification.json')
+    credited_at=clock()
+    for item in new:item['verified_seconds']=credited_at
+    for item in installs:item['verified_seconds']=credited_at
+    accepted_observations=[{k:v for k,v in item.items() if k!='scheme'} for item in added_observations]
+    for item in accepted_observations:item['observed_at_seconds']=credited_at
+    record.update(status='verified',new_evaluations=new,new_installations=installs,
+                  new_observations=accepted_observations,
+                  best_additions=best['additions'],best_scheme_id=best['scheme_id'],
+                  best_circuit_sha256=artifact['sha256'],
+                  evaluation_export=str(export_path.relative_to(output)),
+                  observation_export=str(observation_path.relative_to(output)),
+                  verified_seconds=credited_at,elapsed_seconds=clock()-started)
+    state['evaluations']=known
+    state['evaluation_export']=record['evaluation_export']
+    state['observation_export']=record['observation_export']
+    state['installations'].extend(installs)
+    state['observations'].extend(record['new_observations'])
+    state['pool_evictions']=record['pool_evictions']
+    return record
+
+
+def fgm3_recorded_chunk(chunks, save, clock, selector, index, run):
+    """Persist an attempt before launch and retain its last stage on failure."""
+    record=dict(selector=selector,index=index,status='scheduled',started_seconds=clock(),
+                headroom_wait_seconds=0.)
+    chunks.append(record)
+    original_error=None
+    try:
+        save()
+        result=run(record)
+        if result is not record:record.update(result)
+        return record
+    except Exception as error:
+        original_error=error
+        record.update(failed_stage=record['status'],status='failed',
+                      stop_reason=repr(error))
+        raise
+    finally:
+        record['elapsed_seconds']=clock()-record['started_seconds']
+        try:save()
+        except Exception as error:
+            record['persistence_error']=repr(error)
+            if original_error is None:raise
+
+
+def fgm3_build_files(binary_dir):
+    names=('flip_graph','flip_graph.build.json','scheme_tool','scheme_tool.build.json',
+           'shaders/signed.metallib','shaders/signed.metallib.build.json')
+    for program in ('flip_graph','scheme_tool'):
+        path=binary_dir/program
+        receipt=json.loads((binary_dir/(program+'.build.json')).read_text())
+        stat=path.stat()
+        if receipt['output']!={'size':stat.st_size,'mtime_ns':stat.st_mtime_ns}:
+            raise ValueError('FGM-3 build receipt does not match '+program)
+        for dependency,checksum in receipt['inputs']['dependencies'].items():
+            source=Path(dependency)
+            if digest(source if source.is_absolute() else ROOT/source)!=checksum:
+                raise ValueError('FGM-3 build dependency changed: '+dependency)
+    library=binary_dir/'shaders/signed.metallib'
+    if json.loads((binary_dir/'shaders/signed.metallib.build.json').read_text())['sha256']!=digest(library):
+        raise ValueError('FGM-3 shader build receipt mismatch')
+    return {name:digest(binary_dir/name) for name in names}
+
+
+def fgm3_bind_population_entry(entry, copied, original, reference, *, name=None, collection=None,
+                               selected=None, selection_sha256=None):
+    """Join copied factors to the pinned source and, if selected, its native binding."""
+    if copied.read_bytes()!=original.read_bytes() or entry['sha256']!=entry['source_sha256']:
+        raise ValueError('FGM-3 population copied bytes differ from pinned source')
+    if (digest(copied)!=entry['sha256'] or digest(original)!=entry['source_sha256']):
+        raise ValueError('FGM-3 population source hash mismatch')
+    if name is not None:
+        expected_path='build/fgm2/comparison-02/'+reference['path']
+        if (entry['label']!=name or entry['source_path']!=expected_path or
+                entry['sha256']!=reference['sha256'] or
+                entry['source_factors_id']!=reference['raw_factors_id'] or
+                entry['effective_factors_id']!=reference['factors_id'] or
+                reference['dimensions']!=[3,3,3] or reference['rank']!=23 or
+                reference['domain']!='ZT'):
+            raise ValueError('FGM-3 calibration parent differs from pinned measurement input')
+        return
+    binding=selected['source_binding']
+    if (entry['label']!=collection['id'] or
+            entry['source_path']!=reference['source_path'] or
+            entry['source_sha256']!=reference['source_sha256'] or
+            entry['sha256']!=reference['input_sha256'] or
+            entry['canonical_id']!=reference['canonical_id'] or
+            entry['source_factors_id']!=reference['source_factors_id'] or
+            entry['effective_factors_id']!=reference['effective_factors_id'] or
+            collection['sha256']!=reference['input_sha256'] or
+            any(binding.get(key)!=value for key,value in collection.items()) or
+            binding.get('manifest_sha256')!=selection_sha256 or
+            selected['source_sha256']!=entry['sha256'] or
+            selected['scheme_id']!=entry['canonical_id'] or
+            selected['submitted_factors_id']!=entry['source_factors_id'] or
+            selected['effective_factors_id']!=entry['effective_factors_id'] or
+            selected['source_bindings']!=[binding]):
+        raise ValueError('FGM-3 selected parent differs from retained native binding')
+
+
+def fgm3_population(path):
+    path=Path(path).resolve(strict=True)
+    manifest=json.loads((path/'population.json').read_text())
+    if (manifest['schema']!='fgm3-shared-population-v1' or manifest['count']!=16
+            or manifest['calibration_count']!=6 or manifest['selection_seed']!=7
+            or len(manifest['entries'])!=16):
+        raise ValueError('wrong frozen FGM-3 population')
+    identities=set()
+    if (digest(path/'selection-collection.jsonl')!=manifest['selection_collection_sha256'] or
+            digest(path/'selection.jsonl')!=manifest['selection_output_sha256'] or
+            digest(path/'selection-command.json')!=manifest['selection_command_sha256'] or
+            digest(ROOT/'build/fgm2/comparison-02/measurement.json')!=manifest['fgm2_measurement_sha256'] or
+            digest(ROOT/'build/fgm3/retained-rescore/input-manifest.json')!=manifest['retained_manifest_sha256']):
+        raise ValueError('FGM-3 population selection or source evidence changed')
+    measurement=json.loads((ROOT/'build/fgm2/comparison-02/measurement.json').read_text())
+    retained=json.loads((ROOT/'build/fgm3/retained-rescore/input-manifest.json').read_text())
+    calibration_names=('original','laderman','smirnov','sun','cn122','private')
+    if set(measurement['inputs'])!=set(calibration_names) or len(retained['entries'])!=262:
+        raise ValueError('FGM-3 source roster changed')
+    candidates=[json.loads(line) for line in (path/'selection-collection.jsonl').read_text().splitlines()]
+    if len(candidates)!=262 or len({row['id'] for row in candidates})!=262:
+        raise ValueError('FGM-3 population eligible roster changed')
+    for index,row in enumerate(candidates,1):
+        retained_row=retained['entries'][index-1]
+        if (row['schema']!='fgm-collection-v1' or row['namespace']!=manifest['selection_namespace'] or
+                row['id']!=f'retained-{index:03d}' or row['path']!=f'selection-inputs/{index:03d}.json' or
+                retained_row['index']!=index or row['sha256']!=retained_row['input_sha256'] or
+                row['format']!='json' or row['domain']!='ZT' or row['dimensions']!=[3,3,3] or
+                row['rank']!=23 or digest(path/row['path'])!=row['sha256'] or
+                (path/row['path']).read_bytes()!=(ROOT/'build/fgm3/retained-rescore'/retained_row['input_path']).read_bytes()):
+            raise ValueError('FGM-3 collection entry changed')
+    expected=sorted((row['id'] for row in candidates),
+                    key=lambda name:host_oracle().selection_key(7,manifest['selection_namespace'],name))[:10]
+    selected=[json.loads(line) for line in (path/'selection.jsonl').read_text().splitlines()]
+    if len(selected)!=10 or [row['source_binding']['id'] for row in selected]!=expected:
+        raise ValueError('FGM-3 native collection selection differs from independent hash order')
+    for index,entry in enumerate(manifest['entries']):
+        source=path/entry['path']
+        checked=fgm2_source(source)
+        sid=host_oracle().identity(checked['raw_reference'])
+        if (checked['raw_factors_id']!=entry['source_factors_id'] or
+                checked['factors_id']!=entry['effective_factors_id'] or
+                sid!=entry['canonical_id'] or sid in identities):
+            raise ValueError('FGM-3 population factor identity mismatch')
+        identities.add(sid)
+        if entry['origin']!=('fgm2-calibration' if index<6 else 'fgm1-retained'):
+            raise ValueError('FGM-3 population order changed')
+        original=ROOT/entry['source_path']
+        if index<6:
+            fgm3_bind_population_entry(entry,source,original,
+                measurement['inputs'][calibration_names[index]],name=calibration_names[index])
+        else:
+            selected_row=selected[index-6]
+            collection=candidates[int(expected[index-6].split('-')[1])-1]
+            retained_row=retained['entries'][int(expected[index-6].split('-')[1])-1]
+            fgm3_bind_population_entry(entry,source,original,retained_row,
+                collection=collection,selected=selected_row,
+                selection_sha256=manifest['selection_collection_sha256'])
+            key=host_oracle().selection_key(7,manifest['selection_namespace'],entry['label'])[0].hex()
+            if (entry['selection_key']!=key or selected_row['source_binding']['selection_key']!=key or
+                    selected_row['u']!=checked['raw_reference']['u'] or
+                    selected_row['v']!=checked['raw_reference']['v'] or
+                    selected_row['w']!=checked['raw_reference']['w']):
+                raise ValueError('FGM-3 native selected factors or key changed')
+    return manifest
+
+
+def fgm3_arm_order(protocol):
+    return [(seed,selector) for index,seed in enumerate(protocol['seeds'])
+            for selector in (protocol['selectors'] if index%2==0 else list(reversed(protocol['selectors'])))]
+
+
+def fgm3_endpoint(state, arm_start, endpoint):
+    cutoff=arm_start+endpoint
+    timely=[row for row in state['evaluations'] if row['verified_seconds']<=cutoff]
+    best=min(timely,key=lambda row:row['additions']) if timely else None
+    discoveries={row['scheme_id'] for row in state['observations'] if row['rank']==23 and
+                 row['scheme_id'] not in state['initial_ids'] and row['observed_at_seconds']<=cutoff}
+    installations=[row for row in state['installations'] if row['verified_seconds']<=cutoff]
+    return dict(best_additions=best['additions'] if best else None,
+                best_additions_by_stage=best['additions_by_stage'] if best else None,
+                cost_histogram=dict(sorted(collections.Counter(row['additions'] for row in timely).items())),
+                canonical_discoveries=len(discoveries),evaluated_candidates=len(timely),
+                parent_installations=sum(row['installed'] for row in installations),
+                feedback_installations=sum(row['installed'] and
+                    row['parent_id'] not in state['initial_ids'] for row in installations),
+                restart_feedback_installations=sum(row['installed'] and row['kind']=='restart' and
+                    row['parent_id'] not in state['initial_ids'] for row in installations),
+                score_group_selections=dict(sorted(collections.Counter(row['group'] for row in installations).items())))
+
+
+def fgm3_summarize_arm(arm, state, arm_start, protocol):
+    observations=state['observations']
+    installations=state['installations']
+    evaluations=state['evaluations']
+    chunks=[row for row in arm['chunks'] if row['status']=='verified']
+    phase=collections.Counter()
+    eval_phase=collections.Counter()
+    for row in chunks:
+        phase.update(row['host_phases_microseconds'])
+    for row in evaluations:
+        eval_phase.update(row['phase_microseconds'])
+    timely=[row for row in evaluations if row['verified_seconds']<=arm_start+protocol['arm_seconds']]
+    late=[row for row in evaluations if row['verified_seconds']>arm_start+protocol['arm_seconds']]
+    arm.update(endpoints={str(point):fgm3_endpoint(state,arm_start,point) for point in protocol['endpoints']
+                          if point<=arm['elapsed_seconds']},
+        evaluations=evaluations,installations=installations,observations=observations,
+        canonical_discoveries=len({row['scheme_id'] for row in observations if row['rank']==23 and
+                                   row['scheme_id'] not in state['initial_ids']}),
+        saved_rank23_distinct_including_seeds=len({row['scheme_id'] for row in observations if row['rank']==23}),
+        seed_rediscoveries=sum(row['rank']==23 and row['scheme_id'] in state['initial_ids'] for row in observations),
+        saved_offrank_observations=sum(row['rank']!=23 for row in observations),
+        evaluated_candidates=len(evaluations),
+        parent_installations=sum(row['installed'] for row in installations),
+        feedback_installations=sum(row['installed'] and
+            row['parent_id'] not in state['initial_ids'] for row in installations),
+        restart_feedback_installations=sum(row['installed'] and row['kind']=='restart' and
+            row['parent_id'] not in state['initial_ids'] for row in installations),
+        score_group_selections=dict(sorted(collections.Counter(row['group'] for row in installations).items())),
+        duplicate_saved_outputs=len(observations)-len({row['scheme_id'] for row in observations}),
+        rank23_duplicate_captures=sum(count-1 for scheme,count in
+            collections.Counter(row['scheme_id'] for row in observations if row['rank']==23).items() if count>1),
+        capture_drops=sum(row['counters'].get('capture_drops',0) for row in chunks),
+        seed_duplicates=sum(row['seed_duplicates'] for row in chunks),
+        pool_evictions=chunks[-1]['pool_evictions'] if chunks else 0,
+        headroom_wait_seconds=sum(row['headroom_wait_seconds'] for row in arm['chunks']),
+        native_wall_seconds=sum((row.get('native_guard') or {}).get('wall_seconds') or 0
+                                for row in arm['chunks']),
+        export_wall_seconds=sum(sum((row.get(field) or {}).get('wall_seconds') or 0
+                                for field in ('evaluation_export_guard','observation_export_guard'))
+                                for row in arm['chunks']),
+        gpu_seconds=sum(row['gpu']['gpu_all_seconds'] for row in chunks),
+        host_phases_microseconds=dict(phase),evaluation_phases_microseconds=dict(eval_phase),
+        late_evaluations=len(late),late_best_additions=min((row['additions'] for row in late),default=None),
+        timely_evaluations=len(timely))
+
+
+def fgm3_feedback_finding(arms, complete):
+    if not complete:
+        return 'inconclusive: comparison incomplete'
+    if not any(arm['selector']=='cost-diverse' and
+            arm['endpoints']['90']['feedback_installations']>0 for arm in arms):
+        return 'inconclusive: no timely cost-diverse feedback installation'
+    return None
+
+
+def fgm3_report(measurement):
+    lines=['# FGM-3 native additive comparison','',
+           'Status: '+measurement['status']+'.',
+           'This extension uses verified construction costs to select parents. It is an FGM extension to the recorded upstream search, with no novelty claim.',
+           '']
+    if measurement.get('stop_reason'):
+        lines.append('Stop reason: '+measurement['stop_reason']+'.')
+    pilot=measurement.get('qualification',{})
+    if pilot:
+        lines.append('Qualification: '+pilot.get('status','incomplete')+
+                     f"; workers {pilot.get('workers','unselected')}; chunk allowance {pilot.get('chunk_allowance_seconds','unfrozen')} s.")
+    measured=(str(measurement.get('final_elapsed_seconds',measurement.get('elapsed_seconds','unavailable')))+' s'
+              if 'measurement_started_monotonic' in measurement else 'not started')
+    lines.append(f"Preparation {measurement.get('preparation_seconds','unavailable')} s; qualification "
+                 f"{pilot.get('elapsed_seconds','unavailable')} s; measured window {measured}.")
+    lines += ['', '| Seed | Selector | Status | Best at 30 s | Best at 60 s | Best at 90 s | Evaluated | Feedback installs |',
+              '| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |']
+    for arm in measurement.get('arms',[]):
+        endpoints=arm.get('endpoints',{})
+        best=[endpoints.get(str(second),{}).get('best_additions') for second in (30,60,90)]
+        best=[str(cost) if cost is not None else '-' for cost in best]
+        lines.append(f"| {arm['seed']} | {arm['selector']} | {arm['status']} | "+' | '.join(best)+
+                     f" | {len(arm.get('evaluations',[]))} | {arm.get('feedback_installations',0)} |")
+    for arm in measurement.get('arms',[]):
+        if not arm.get('chunks'):continue
+        endpoint=arm.get('endpoints',{}).get('90',{})
+        histogram=endpoint.get('cost_histogram',{})
+        lines += ['',f"Seed {arm['seed']} {arm['selector']}: timely verified cost histogram "+
+            (', '.join(f'{cost}:{count}' for cost,count in histogram.items()) if histogram else 'unavailable')+'.',
+            f"Saved new rank-23 canonical discoveries {arm.get('canonical_discoveries','unavailable')}; "
+            f"evaluated {arm.get('evaluated_candidates','unavailable')}; installed parents {arm.get('parent_installations','unavailable')} "
+            f"with {arm.get('feedback_installations','unavailable')} new-parent feedback installations, "
+            f"including {arm.get('restart_feedback_installations','unavailable')} at restarts.",
+            f"Score groups {arm.get('score_group_selections',{})}; duplicate saved outputs "
+            f"{arm.get('duplicate_saved_outputs','unavailable')} (rank-23 repeated captures "
+            f"{arm.get('rank23_duplicate_captures','unavailable')}); seed rediscoveries "
+            f"{arm.get('seed_rediscoveries','unavailable')}; capture drops {arm.get('capture_drops','unavailable')}; "
+            f"pool evictions {arm.get('pool_evictions','unavailable')}; off-rank saved observations "
+            f"{arm.get('saved_offrank_observations','unavailable')}.",
+            f"Headroom waits {arm.get('headroom_wait_seconds',0):.3f} s; native {arm.get('native_wall_seconds',0):.3f} s; "
+            f"exports {arm.get('export_wall_seconds',0):.3f} s; GPU dispatch {arm.get('gpu_seconds',0):.3f} s; "
+            f"late verified evaluations {arm.get('late_evaluations','unavailable')}."]
+    lines += ['', 'Endpoint costs credit only circuits independently verified and durably published by that endpoint. Late completions remain in the chunk evidence.',
+              'Canonical discoveries count saved rank-23 observation exports, not every state visited by a walk.',
+              'Per-arm cost distributions, source bindings, parent installations, duplicate/capture counters, pool evictions, resource waits and phase timings are in measurement.json.',
+              'A missing or incomplete arm, or no timely cost-diverse installation of a newly evaluated parent, makes selection benefit inconclusive.',
+              '']
+    return '\n'.join(lines)
+
+
+def fgm3_finalize(data, output, started, deadline, clock, save):
+    """The final budget check includes the last report and checksum writes."""
+    finalization_start=clock()
+    data['elapsed_seconds']=clock()-started
+    data['finalization_seconds']=0.
+    save()
+    (output/'report.md').write_text(fgm3_report(data))
+    data['finalization_seconds']=clock()-finalization_start
+    data['final_elapsed_seconds']=clock()-started
+    if deadline is not None and clock()>deadline:
+        data['status']='budget-exceeded';data['complete']=False
+    save()
+    (output/'report.md').write_text(fgm3_report(data))
+    (output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
+    checked=clock()
+    if deadline is not None and checked>deadline:
+        data['status']='budget-exceeded';data['complete']=False
+        data['budget_check_elapsed_seconds']=checked-started
+        save()
+        (output/'report.md').write_text(fgm3_report(data))
+        (output/'measurement.sha256').write_text(digest(output/'measurement.json')+'\n')
+
+
+def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=None, guard=None,
+                 memory_sample=None):
+    """Qualify once, then run the fixed six-arm matched-time comparison once."""
+    clock=clock or time.monotonic
+    sleeper=sleeper or time.sleep
+    guard=guard or guarded_run
+    memory_sample=memory_sample or wired_memory
+    preparation_started=clock()
+    measurement_started=None
+    protocol=json.loads(FGM3_PROTOCOL_PATH.read_text())
+    if (protocol['schema']!='fgm3-additive-comparison-protocol-v1' or
+            protocol['seeds']!=[7,19,41] or protocol['selectors']!=['uniform','cost-diverse'] or
+            protocol['endpoints']!=[30,60,90] or protocol['arm_seconds']!=90 or
+            protocol['total_seconds']!=900):
+        raise ValueError('unsupported FGM-3 fixed comparison protocol')
+    population_path=Path(population_path).resolve(strict=True)
+    fgm3_population(population_path)
+    binary_dir=Path(binary_dir).resolve(strict=True)
+    build=fgm3_build_files(binary_dir)
+    output=Path(output).absolute()
+    output.mkdir(parents=True,exist_ok=False)
+    (output/'.gitignore').write_text('*\n')
+    qualification_deadline=preparation_started+protocol['qualification_total_seconds']
+    data=dict(schema='fgm3-additive-comparison-v1',status='incomplete',complete=False,
+              protocol=protocol,population_sha256=digest(population_path/'population.json'),
+              build_inventory=build,arms=[],qualification=dict(status='unrun'),
+              preparation_started_monotonic=preparation_started)
+    def save():write_json(output/'measurement.json',data)
+    save()
+    stop_gpu=False
+    try:
+        shutil.copytree(population_path,output/'population')
+        fgm3_population(output/'population')
+        data['population_bundle_sha256']=digest(output/'population/population.json')
+        for name,checksum in build.items():
+            destination=output/'binaries'/name
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(binary_dir/name,destination)
+            if digest(destination)!=checksum:raise ValueError('FGM-3 frozen build changed')
+        harness_paths=(Path(__file__),ROOT/'benchmarks/metal/guard.py',ROOT/'benchmarks/metal/application.py',
+                       ROOT/'tests/metal/verify.py',ROOT/'tests/workflow/identity_oracle.py',FGM3_PROTOCOL_PATH)
+        data['harness']={}
+        for path in harness_paths:
+            relative=path.relative_to(ROOT)
+            destination=output/'harness'/relative
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(path,destination)
+            data['harness'][str(relative)]=digest(destination)
+        data['hardware']=host_machine_identity()
+        data['preparation_seconds']=clock()-preparation_started
+        save()
+        binaries=output/'binaries'
+        population=output/'population'
+        qualification=dict(status='running',attempts=[])
+        data['qualification']=qualification
+        qualification_started=clock()
+        for workers in protocol['qualification_workers']:
+            observations=[]
+            attempt=dict(workers=workers,status='running',chunks=[])
+            qualification['attempts'].append(attempt)
+            save()
+            suitable=True
+            hard_failure=False
+            for selector in protocol['selectors']:
+                state=dict(build_inventory=build,evaluations=[],installations=[],observations=[],initial_ids=set(
+                    entry['canonical_id'] for entry in json.loads((population/'population.json').read_text())['entries']))
+                arm='qualification/workers-'+str(workers)+'/'+selector
+                for chunk in (0,1):
+                    record=fgm3_recorded_chunk(attempt['chunks'],save,clock,selector,chunk,
+                        lambda row:fgm3_run_chunk(output,population,binaries,protocol,selector,7,workers,
+                            arm,chunk,state,qualification_deadline,qualification_deadline,
+                            protocol['native_admission_seconds'],
+                            clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample,record=row))
+                    if record['status']!='verified':
+                        suitable=False
+                        hard_failure=True
+                        break
+                    if chunk==0 and len(state['evaluations'])<16:
+                        suitable=False
+                        hard_failure=True
+                        break
+                    observations.append(record['elapsed_seconds'])
+                    if record['best_additions']<=protocol['circuit_target']:
+                        qualification['status']='target-attained'
+                        attempt['status']='target-attained'
+                        qualification['elapsed_seconds']=clock()-qualification_started
+                        data['stop_reason']='independently verified pilot circuit target'
+                        stop_gpu=True
+                        return data
+                    if record['elapsed_seconds']-record['headroom_wait_seconds']>protocol['qualification_max_seconds']:
+                        suitable=False
+                if hard_failure:break
+            allowance=fgm3_chunk_allowance(observations) if observations else None
+            if allowance is not None and allowance>=protocol['arm_seconds']:
+                suitable=False
+            attempt['status']='failed' if hard_failure else 'qualified' if suitable else 'unsuitable'
+            if hard_failure:
+                qualification['status']='failed'
+                data['stop_reason']='qualification chunk or guard failed'
+                stop_gpu=True
+                break
+            if suitable:
+                qualification.update(status='qualified',workers=workers,
+                    chunk_allowance_seconds=allowance,
+                    slower_observed_seconds=max(observations))
+                break
+            if workers==1:
+                qualification['status']='unsuitable'
+                data['stop_reason']='qualification exceeded 30 seconds or a guard failed'
+                stop_gpu=True
+        qualification['elapsed_seconds']=clock()-qualification_started
+        save()
+        if qualification['status']!='qualified':
+            return data
+        data['preparation_qualification_elapsed_seconds']=clock()-preparation_started
+        measurement_started=clock()
+        deadline=measurement_started+protocol['total_seconds']
+        data['measurement_started_monotonic']=measurement_started
+        save()
+        allowance=qualification['chunk_allowance_seconds']
+        for seed,selector in fgm3_arm_order(protocol):
+            if stop_gpu or deadline-clock()<protocol['native_admission_seconds']:
+                data['stop_reason']='global finalization reserve or uncertain GPU cleanup'
+                break
+            arm_name=f'arms/{seed}-{selector}'
+            arm_start=clock()
+            arm_deadline=arm_start+protocol['arm_seconds']
+            state=dict(build_inventory=build,evaluations=[],installations=[],observations=[],
+                       initial_ids=set(entry['canonical_id'] for entry in
+                                       json.loads((population/'population.json').read_text())['entries']))
+            arm=dict(seed=seed,selector=selector,status='running',started_seconds=arm_start-measurement_started,
+                     chunks=[],endpoints={},initial_ids=sorted(state['initial_ids']),initial_verified=False)
+            data['arms'].append(arm)
+            arm_error=None
+            try:
+                save()
+                for chunk in range(1000000):
+                    reason=fgm3_admission(clock(),arm_deadline,deadline,allowance,protocol)
+                    if reason:
+                        arm['stop_reason']=reason
+                        break
+                    record=fgm3_recorded_chunk(arm['chunks'],save,clock,selector,chunk,
+                        lambda row:fgm3_run_chunk(output,population,binaries,protocol,selector,seed,
+                            qualification['workers'],arm_name,chunk,state,deadline,arm_deadline,allowance,
+                            clock=clock,sleeper=sleeper,guard=guard,memory_sample=memory_sample,record=row))
+                    if record['status']!='verified':
+                        arm['stop_reason']=record.get('stop_reason',record['status'])
+                        if record['status']!='unrun':stop_gpu=True
+                        break
+                    if chunk==0:
+                        arm['initial_verified']=len(state['evaluations'])>=16
+                        if not arm['initial_verified']:
+                            arm['stop_reason']='initial population lacks sixteen verified evaluations'
+                            stop_gpu=True
+                            break
+                    arm['evaluations']=state['evaluations']
+                    arm['installations']=state['installations']
+                    arm['observations']=state['observations']
+                    if record['best_additions']<=protocol['circuit_target']:
+                        arm['stop_reason']='independently verified circuit target'
+                        stop_gpu=True
+                        break
+                if not stop_gpu and clock()<arm_deadline:
+                    while clock()<arm_deadline:
+                        sleeper(min(30,arm_deadline-clock()))
+            except Exception as error:
+                arm_error=error
+                arm['stop_reason']=repr(error)
+                stop_gpu=True
+                raise
+            finally:
+                arm['elapsed_seconds']=clock()-arm_start
+                arm['status']='incomplete'
+                finish_error=None
+                try:
+                    fgm3_summarize_arm(arm,state,arm_start,protocol)
+                    if arm['elapsed_seconds']>=protocol['arm_seconds'] and arm['initial_verified'] and not stop_gpu:
+                        arm['status']='complete'
+                except Exception as error:
+                    arm['summary_error']=repr(error)
+                    finish_error=error
+                try:save()
+                except Exception as error:
+                    arm['persistence_error']=repr(error)
+                    if finish_error is None:finish_error=error
+                if finish_error is not None:
+                    arm['status']='incomplete'
+                    if arm_error is None:raise finish_error
+            if stop_gpu:break
+        data['complete']=len(data['arms'])==6 and all(arm['status']=='complete' for arm in data['arms'])
+        data['status']='complete' if data['complete'] else 'incomplete'
+        finding=fgm3_feedback_finding(data['arms'],data['complete'])
+        if finding:data['finding']=finding
+    except Exception as error:
+        data['status']='stopped'
+        data['complete']=False
+        data['error']=repr(error)
+        if data['qualification']['status']=='running':
+            data['qualification']['status']='failed'
+            data['qualification']['elapsed_seconds']=clock()-qualification_started
+            for attempt in data['qualification']['attempts']:
+                if attempt['status']=='running':
+                    attempt.update(status='failed',stop_reason=repr(error))
+        for arm in data['arms']:
+            if arm['status']=='running':
+                arm.update(status='incomplete',stop_reason=repr(error))
+        stop_gpu=True
+    finally:
+        data['total_elapsed_seconds_before_finalization']=clock()-preparation_started
+        fgm3_finalize(data,output,measurement_started or preparation_started,
+                      None if measurement_started is None else deadline,clock,save)
+    return data
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     operation = parser.add_mutually_exclusive_group(required=True)
@@ -2884,6 +3789,8 @@ def main():
     operation.add_argument('--effectiveness-panel', type=Path, metavar='PANEL_JSON', help='Run one FGM-1 baseline with a 15-minute measurement cap')
     operation.add_argument('--summarize-effectiveness', type=Path, metavar='MEASUREMENT_JSON', help='Independently check and summarize retained FGM-1 circuits')
     operation.add_argument('--fgm2', action='store_true', help='Run the fixed 72-invocation FGM-2 construction protocol')
+    operation.add_argument('--fgm3', action='store_true', help='Qualify and run the fixed native FGM-3 additive comparison once')
+    parser.add_argument('--fgm3-population', type=Path, help='Frozen shared 16-parent factor population for FGM-3')
     parser.add_argument('--fgm2-private-input', type=Path, help='Required external factor-only private input for FGM-2')
     parser.add_argument('--fgm2-private-reference', type=Path, help='Optional private supplied circuit for separate FGM-2 reference audit')
     parser.add_argument('--binary-dir', type=Path, help='Native binaries for FGM-1 (default build/metal)')
@@ -2899,6 +3806,18 @@ def main():
     parser.add_argument('--rows', nargs='+', choices=[r[0] for r in ROWS])
     parser.add_argument('--repetitions', type=int)
     args = parser.parse_args()
+    if args.fgm3:
+        if (args.output is None or args.fgm3_population is None or
+                any(v is not None for v in (args.fgm2_private_input,args.fgm2_private_reference,
+                   args.rows,args.protocol,args.baseline,args.production_run,args.repetitions,
+                   args.native_binary,args.calibration))):
+            parser.error('FGM-3 requires --output and --fgm3-population, with optional --binary-dir')
+        result=execute_fgm3(args.fgm3_population,args.binary_dir or ROOT/'build/metal',args.output)
+        if not result['complete']:
+            raise SystemExit(1)
+        return
+    if args.fgm3_population is not None:
+        parser.error('--fgm3-population requires --fgm3')
     if args.fgm2:
         if (args.output is None or args.fgm2_private_input is None
                 or any(v is not None for v in (args.rows,args.protocol,args.baseline,args.production_run,

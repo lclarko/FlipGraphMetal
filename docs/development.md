@@ -378,3 +378,79 @@ heuristics are deferred. Cancellation construction and circuit transposition
 extend FGM beyond those inspected implementations. This is a lineage statement,
 not a claim of research novelty. Generation, capture, pools, and mutation
 scheduling are unchanged.
+
+## Native additive search
+
+`flip_graph --run-config` accepts the opt-in `workflow: "additive-search"`
+with `operation: "search"`. It admits signed 3×3 rank-23 parents in the standard
+basis. Controlled generation can visit ranks 24 and 25; only rank-23 captures
+receive circuit scores and enter the parent population. The existing default
+workflow and `controlled-v1` controller are unchanged.
+
+The `evaluation` object uses the existing fixed-factor reduction parameters:
+`domain: "ZT"`, `strategy: "combined"`, a seed, positive `reducers`, `rounds` and
+`no_improvements`, plus `schemes: 1`, `max_flips: 0` and `target_additions: 0`.
+The separate optional `circuit_target` stops the workflow after a committed
+batch achieves that total. Independent verification is still required before
+reporting target attainment. `execution.max_batches` is a positive per-invocation
+bound, checked after batch commit. A resume begins new walkers and RNG streams.
+
+For `pool.selector: "cost-diverse"`, `capacity_per_rank: 16` and
+`elite_capacity: 8` retain the eight lowest verified costs and eight most recent
+nonelite identities. Equal costs retain earlier incumbents. Parent selection
+chooses either nonempty group with equal probability, then samples uniformly
+within it. `selector: "uniform"` retains the existing FIFO policy while doing
+the same evaluation work. Selection occurs at initialization and existing
+restart boundaries. Continuing walkers keep their current trajectories.
+
+Starting inputs are deduplicated canonically and must fit the parent capacity.
+Each starting parent is evaluated before walker initialization. First-seen
+rank-23 captures are evaluated in capture order, once per history, using their
+first effective ordered presentation. Evaluation seeds are derived from the
+configured evaluation seed and ordered-factor identity, independently of walk
+and parent-selection RNGs. A score is an achieved upper bound for that
+presentation and effort, not a lower bound or a judgment about descendants.
+
+The search executable calls the same baseline-plus-extension evaluator as
+`additions_reducer`. Search buffers remain resident while each reducer phase
+allocates and releases its buffers. Preflight adds their simultaneous peak to
+input, pool, verification and transaction reservations. Additive defaults use
+8 MiB each for pool storage and transaction size. The experiment uses a 512-MiB
+accounted allocation budget. These reservations exclude driver residency and
+GPU scratch and do not replace the system wired-memory guard.
+
+Captures, complete verified circuits, scores and the proposed population commit
+in one existing journal transaction. Only acknowledged scores can be selected.
+The global best circuit survives parent eviction and is published at successful
+invocation completion as one record in `OUTPUT.circuits.jsonl`. A failed
+invocation retains its prior acknowledged population. Existing journal recovery
+can promote a complete unacknowledged frame after its mathematics and state
+transitions pass replay checks.
+
+Resume requires matching workflow, evaluation settings, generation policy,
+pool policy, executable and Metal library identities. The generation seed can
+change for the new walkers. Changes to the evaluator or its build require a
+fresh history. Compiled Metal libraries are required for this workflow so the
+stored producer identity is explicit.
+
+Read-only evaluation export revalidates scores, factors, population transitions,
+parent draws and the receipt's acknowledged prefix:
+
+```sh
+build/metal/scheme_tool analyze --format journal --evaluations \
+  --input build/my-search/history --receipt build/my-search/receipt.json \
+  --record-bytes 8388608 --scan-bytes 1073741824 \
+  --output build/my-search/evaluations.jsonl
+```
+
+Rows contain either an evaluation and its admitted source factors or an actual
+parent-selection/installation record. The ordinary `--observations` option
+continues to export captures. Receipts additionally expose the committed best,
+historical/current evaluation counts and cumulative pool evictions. Export and
+all production execution remain native; the benchmark harness uses Python for
+coordination and independent checking.
+
+Cost-guided parent management is an FGM extension relative to the pinned
+upstream implementations described above. It introduces no kernels, basis
+changes, capture changes or CPU construction fallback. The first guarded GPU
+smoke was incomplete; see [the measured limitations](performance.md#fgm-3-retained-candidates-and-native-search).

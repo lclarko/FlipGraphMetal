@@ -319,3 +319,186 @@ Raw measurements, frozen binaries, source snapshots, corpus inputs and verificat
 Use [the benchmark tools](../benchmarks/metal/README.md) for new, separately labeled measurements. Keep source identities, fixtures, commands, raw logs, incomplete runs and timing protocols. Serialize GPU work with the documented process-group and memory supervision. Do not pool incompatible timing methods or replace slow observations selectively.
 
 New execution paths, compiler settings, search policies, hardware or broader performance claims warrant additional measurements after correctness checks. Each comparison above applies to its pinned revisions and recorded workload.
+
+## FGM-3 retained candidates and native search
+
+The retrospective pass completed **262/262** first retained canonical FGM-1
+alternatives in one 214.645-second segment. The roster came from the completed
+`baseline-04` discovery records at their 20-second endpoints, with 196 relevant
+receipt-bound journal prefixes replayed natively. It was not selected by circuit
+cost or by enumerating the candidate directory. Original endpoint results were
+preserved.
+
+Each factor-only presentation received one `combined` evaluation at seed 7,
+128 reducers, 16 rounds, `no_improvements=16`, one scheme, no flips and reducer
+target zero. All circuits passed native and independent exact factor/count
+verification.
+
+| Starting family | Alternatives | Best achieved additions |
+|---|---:|---:|
+| Original | 58 | 62 |
+| Laderman | 0 | unavailable |
+| Smirnov | 55 | 66 |
+| Sun | 73 | 59 |
+| CN122 | 76 | 56 |
+
+Against the 246 candidates with timely verified FGM-1 costs, 209 improved,
+37 tied and none worsened. Sixteen had no timely old cost. Against the direct
+baseline phase of these new invocations, 223 improved and 39 tied. Final totals
+ranged from 56 to 73; two reached 56. No 54 was found. These are reconstruction
+results for a fixed retained collection, not evidence that cost-guided selection
+improves search.
+
+The private reproducibility bundle is `build/fgm3/retained-rescore/`, with frozen
+inputs and builds, source/presentation bindings, circuits, logs, `audit.json`
+and a report. An initial sandbox launch failed before Metal dispatch; its
+explicit infrastructure retry and original failure remain recorded. No completed
+evaluation was repeated. Peak sampled wired memory in the successful segment
+was 2,841,739,264 bytes.
+
+The first native additive-search GPU smoke used public CN122, two packed
+workers, four bounded batches and the same 128-reducer/16-round evaluation
+quantum. Its test stagnation limit was 10, to exercise restart feedback. The
+3-GiB system wired-memory guard terminated it after 7.903 seconds: memory rose
+from 1,833,369,600 to a sampled 3,240,722,432 bytes. Process cleanup completed;
+this does not prove cancellation of all submitted Metal work. Further GPU
+admission stopped and the shared-population qualification/comparison was not
+launched.
+
+Eight evaluations had already committed. Read-only native replay and independent
+exact verification checked all eight, including CN122 at U13/V14/W28 = 55.
+The invocation published no final circuit artifact or complete receipt. These
+committed circuits are partial correctness evidence, with no endpoint or
+comparison credit. The source/build snapshot, journal, guard log and partial
+verification are retained under `build/fgm3/gpu-smoke/`.
+
+Follow-up packaged checks completed initialization and resume for both selectors
+using public CN122, one worker, one step and one batch per invocation. The
+128-reducer/16-round evaluation quantum and resource guards were unchanged.
+All four invocations ran from an unrelated working directory with an empty
+native PATH. Six evaluations across the two fresh histories passed native and
+independent verification; best cost was 55 (13/14/28). The checks took 5.340
+seconds in total, with peak sampled wired memory of 2,873,769,984 bytes. This
+establishes the small packaged execution path, not the full comparison workload.
+Evidence is retained under `build/fgm3/gpu-qualification-01/`.
+
+The frozen 16-parent qualification then completed its first uniform chunk:
+four batches, 20 verified evaluations (16 starting parents and four discoveries),
+best cost 55, and 14.099 seconds including exports and independent checks.
+Peak sampled wired memory was 3,168,567,296 bytes. The resume chunk hit the
+unchanged 3-GiB guard after 6.243 seconds, rising from 1,932,984,320 to
+3,330,719,744 bytes of system wired memory. Process cleanup completed. Further
+GPU admission stopped, including the one-worker fallback. No measured arm
+started. The attempt, retained under `build/fgm3/comparison-01/`, remains
+incomplete; its verified initialization does not establish complete qualification
+or a selection benefit. This stop was caused by memory, not the time allowance.
+
+Read-only replay of the stopped history independently verified 28 acknowledged
+evaluations in total, including eight from the unfinished resume. Best cost
+remained 55; none reached 54. One previously discovered parent was installed
+by uniform selection at resume initialization. This is evidence of parent
+reuse, not cost-diverse feedback or a selection benefit. These partial results
+receive no measured endpoint credit, and the original history was unchanged.
+
+With an explicitly authorized 4-GiB guard, full qualification passed at two
+workers in 53.863 seconds, including preparation. The prelaunch wired-memory
+ceiling remained 1,946,157,056 bytes; the 45-second child timeout and fixed
+128-reducer/16-round quantum were unchanged. Both selectors completed
+initialization and resume with 16 starting parents and four 32-step batches
+per invocation.
+
+| Selector | Chunk | Verified evaluations added | Complete elapsed seconds |
+|---|---|---:|---:|
+| Uniform | Initialization | 20 | 15.799 |
+| Uniform | Resume | 10 | 11.829 |
+| Cost-diverse | Initialization | 23 | 15.278 |
+| Cost-diverse | Resume | 5 | 9.682 |
+
+All 58 evaluations across the two fresh histories passed native and independent
+verification, representing 41 canonical identities across both. Best cost
+remained 55; none reached 54. Peak sampled wired memory was 3,370,205,184 bytes
+(3.139 GiB). The slower chunk gives a 22-second admission allowance under the
+existing rule. No fallback was needed. One newly discovered parent was installed
+by uniform selection at resume; cost-diverse selected starting parents only.
+Qualification does not establish a selection benefit. The sealed inputs,
+settings, commands, guard records and circuits are retained under
+`build/fgm3/qualification-4g-01/`; earlier attempts are unchanged.
+
+The supervisor's optional `wired_limit_bytes` argument records and enforces the
+per-call allowance. Its default, other workflows and the checked-in comparison
+protocol retain 3 GiB. The 4-GiB qualification has its own frozen resource policy.
+
+The first measured attempt under that policy stopped during seed 7's uniform
+arm after 59.264 seconds. Four chunks completed, retaining 47 independently
+verified evaluations: 16 initial parents and 31 new canonical alternatives.
+Best cost remained 55; the best new alternative cost 60. The 30-second endpoint
+retained 30 evaluations and best cost 55. Neither the 60/90-second endpoints nor
+the paired cost-diverse arm completed.
+
+The fifth chunk failed during host admission because cumulative journal reads
+exceeded the default 256-MiB scan budget. No GPU work started in that chunk,
+and the memory guard did not fire. Read-only validation of the same unchanged
+history passed with the existing 1-GiB scan setting, consuming 417,983,508 bytes
+of read work in 5.900 seconds. Replay reads earlier frames repeatedly; this
+limit measures cumulative reads, not resident allocation. A larger read budget
+does not remove that execution overhead or guarantee later chunks will fit.
+
+The incomplete attempt is sealed under `build/fgm3/comparison-02/`. Its original
+report contains snapshots labelled 60/90 seconds despite stopping earlier;
+`audit/findings.json` records that limitation without rewriting the evidence.
+The harness now reports only elapsed endpoints and can pass an explicit scan
+budget consistently to native execution and both read-only exports.
+
+A fresh comparison with a 1-GiB cumulative-read budget and the same 4-GiB
+memory guard is retained under `build/fgm3/comparison-03/`. Preparation and
+qualification took 88.242 seconds; the measured schedule took 540.120 seconds.
+Five arms completed. Seed 19's cost-diverse arm remained unrun because the
+prelaunch headroom requirement was not met within its admission window.
+The matrix is incomplete and selection benefit remains inconclusive.
+
+| Seed | Selector | Verified evaluations | New alternatives | Best new cost | New-parent installations |
+|---:|---|---:|---:|---:|---:|
+| 7 | Uniform | 20 | 4 | 64 | 0 |
+| 7 | Cost-diverse | 38 | 22 | 60 | 2 |
+| 19 | Cost-diverse | 0, unrun | 0 | unavailable | 0 |
+| 19 | Uniform | 46 | 30 | 57 | 4 |
+| 41 | Uniform | 41 | 25 | 57 | 3 |
+| 41 | Cost-diverse | 35 | 19 | 62 | 1 |
+
+All 180 measured evaluations passed native and independent verification. Each
+completed arm retained a starting-parent cost of 55 at all three endpoints;
+none reached 54. Counts include 16 freshly evaluated starting parents per
+completed arm. New alternatives are distinct within each arm, not necessarily
+across arms: the 100 new evaluations represent 99 canonical identities. The
+two new 57-addition circuits have U/V/W counts of 14/15/28 and 13/13/31.
+All ten new-parent installations occurred when initializing new
+walkers on resume; none occurred at an in-invocation restart.
+
+All 48 supervised children, including qualification, completed without a
+read-budget failure, forced termination or cleanup failure. Peak sampled wired
+memory was 3,456,958,464 bytes (3.220 GiB). Measured arms spent 124.003 seconds
+in native execution, including 93.383 seconds of GPU dispatch, plus 26.747
+seconds in exports and 55.942 seconds waiting for headroom. Native and GPU
+times overlap. Maximum native input reads were 125,824,280 bytes, below the
+previous 256-MiB cap; export read consumption is not reported. These shorter
+histories do not establish longer-run replay scalability. The inputs, receipts,
+circuits and read-only audit are sealed with the comparison bundle.
+
+Qualification's slowest chunk included a 30.45-second headroom wait, so the
+unchanged allowance rule reserved 59 seconds for each new chunk. That left
+about 31 seconds of each arm in which to admit work. Seed 7 uniform's second
+attempt exhausted that admission window while waiting; seed 19 cost-diverse
+never launched. Other arms completed two or three chunks. Unequal headroom
+waits and the conservative allowance limit what the observed differences can
+say about parent selection. The experiment was not repeated.
+
+The last full host suite passed 260 tests with no failures or skips; the independent
+verifier's four focused tests also passed. The scan-budget and endpoint changes
+passed 16 additive-workflow tests and 41 execution/supervision tests.
+Native programs and the package built,
+and relocated host commands plus additive preflight passed with Python absent
+from PATH. Host tests cover score binding, population selection, resume,
+transaction failures and malformed histories. Full GPU qualification passed
+under the recorded 4-GiB policy; matched-time selection benefit remains
+**inconclusive**. These qualification checks and the retrospective reconstruction
+pass do not establish a uniform versus cost-diverse selection result.

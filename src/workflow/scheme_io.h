@@ -60,6 +60,7 @@ public:
     std::string identity(const SchemeRecord&,bool canonical);
     SchemeRecord normalized(const SchemeRecord&);
     bool verify(const SchemeRecord&);
+    uint64_t verifyEvaluation(const Json&,const SchemeRecord&);
     Json analyze(const SchemeRecord&);
     Json schemeJson(const SchemeRecord&);
     std::string sha256File(const std::filesystem::path&);
@@ -79,6 +80,7 @@ private:
 uint64_t jsonMemoryBytes(const Json&);
 uint64_t admittedMemoryBytes(const AdmittedScheme&);
 std::string sha256Bytes(const std::string&);
+uint32_t evaluationSeed(uint32_t base,const std::string &factorsId);
 void publishNew(const std::filesystem::path&,const std::string&);
 int schemeToolMain(int argc,char**argv);
 }

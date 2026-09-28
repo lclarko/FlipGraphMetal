@@ -5,6 +5,9 @@
 #include "../workflow/execution_layout.h"
 #endif
 #if METAL_PROGRAM == 1
+#ifndef METAL_F2
+#include "../workflow/reduction_execution.h"
+#endif
 #include "../workflow/search_execution.h"
 #endif
 int metalRounds = 0;
@@ -52,6 +55,9 @@ void validateOptions(const ArgParser &parser) {
 }
 
 #if METAL_PROGRAM == 1
+#ifndef METAL_F2
+#include "scheme_additions_reducer.cpp"
+#endif
 #include "flip_graph.cpp"
 #include "main_flip_graph.cpp"
 #elif METAL_PROGRAM == 2

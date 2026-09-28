@@ -24,6 +24,7 @@ struct RunInput {
 struct ExecutionSettings {
     uint64_t workers, batchSteps, blockSize, memoryBytes;
     std::string backend;
+    uint64_t maxBatches=0;
 };
 
 struct ReductionSettings {
@@ -39,14 +40,17 @@ struct HistorySettings {
 
 struct RunConfig {
     std::string operation;
+    bool additive=false;
     std::optional<ControlledConfig> policy;
     std::optional<ReductionSettings> reduction;
+    std::optional<ReductionSettings> evaluation;
     RunInput input;
     ExecutionSettings execution;
     AdmissionLimits limits;
     PoolSettings pool;
     HistorySettings history;
     std::optional<uint64_t> discoveryTarget;
+    std::optional<uint64_t> circuitTarget;
     std::filesystem::path output;
     Json resolved;
 };
@@ -56,9 +60,13 @@ struct PreparedRun {
     std::vector<AdmittedScheme> inputs;
     Json receipt;
     Json recoveredPools;
+    Json recoveredAdditive;
     std::string recoveredHead;
     uint64_t historicalDiscoveries=0;
 };
+
+ReductionSettings parseReductionSettings(const Json &);
+Json additiveContract(const PreparedRun &);
 
 struct ExecutionLayout {
     uint64_t signedSchemeBytes, f2SchemeBytes, reducerLaneBytes, rngBytes, controlBytes;

@@ -285,6 +285,22 @@ inline void extendReduction(Json &result,const SchemeRecord &effective,const Red
     result.object["dispatch_microseconds"].integer+=int64_t(dispatch);
     result.object["verification_microseconds"].integer+=int64_t(verification);
 }
+inline Json evaluateReduction(const SchemeRecord &effective,const ReductionSettings &settings,uint64_t blockSize,
+                              const AdmissionLimits &limits,Json &receipt) {
+    Json result, phases=Json::dict();
+    for(const auto *key:{"baseline","transpose_pair","construction_u","construction_v","construction_wt","transposition","verification"})
+        phases.object[key]=Json(int64_t(0));
+    ReductionTimingBinding timing(receipt.object.at("dispatch_microseconds"),receipt.object.at("verification_microseconds"));
+    { ReceiptPhaseTimer timer(phases.object.at("baseline"));
+      SchemeAdditionsReducer reducer(int(settings.reducers),int(settings.schemes),int(settings.maxFlips),
+          int(settings.seed),int(blockSize),"",1);
+      if(!reducer.read(effective)) throw std::runtime_error("effective input exceeds signed reducer capacity");
+      result=reducer.reduceBounded(settings.rounds,settings.noImprovements,settings.targetAdditions,limits,effective); }
+    result.object["phase_microseconds"]=std::move(phases);
+    extendReduction(result,effective,settings,int(blockSize),limits);
+    return result;
+}
+
 inline void executeReduction(PreparedRun &run) {
     if(run.config.operation!="reduce" || !run.config.reduction) throw std::runtime_error("reduction configuration required");
     const auto &settings=*run.config.reduction;
@@ -300,17 +316,7 @@ inline void executeReduction(PreparedRun &run) {
         const auto retained=configCheckedAdd(resultBytes,circuits.capacity());
         if(configCheckedAdd(configCheckedAdd(fixedBytes,retained),workspace)>run.config.execution.memoryBytes)
             throw Resource("reduction workspace exceeds run memory budget");
-        Json result, phases=Json::dict();
-        for(const auto *key:{"baseline","transpose_pair","construction_u","construction_v","construction_wt","transposition","verification"})
-            phases.object[key]=Json(int64_t(0));
-        ReductionTimingBinding timing(run.receipt.object.at("dispatch_microseconds"),run.receipt.object.at("verification_microseconds"));
-        { ReceiptPhaseTimer timer(phases.object.at("baseline"));
-          SchemeAdditionsReducer reducer(int(settings.reducers),int(settings.schemes),int(settings.maxFlips),
-              int(settings.seed),int(run.config.execution.blockSize),"",1);
-          if(!reducer.read(input.effective)) throw std::runtime_error("effective input exceeds signed reducer capacity");
-          result=reducer.reduceBounded(settings.rounds,settings.noImprovements,settings.targetAdditions,run.config.limits,input.effective); }
-        result.object["phase_microseconds"]=std::move(phases);
-        extendReduction(result,input.effective,settings,int(run.config.execution.blockSize),run.config.limits);
+        Json result=evaluateReduction(input.effective,settings,run.config.execution.blockSize,run.config.limits,run.receipt);
         result.object["submitted_factors_id"]=input.report.at("factors_id");
         result.object["effective_input_factors_id"]=input.report.at("effective_factors_id");
         result.object["input_presentation_index"]=Json(int64_t(presentation));

@@ -1,5 +1,6 @@
 """Native retained-pool contracts and independent parent-selection comparisons."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import unittest
@@ -41,3 +42,18 @@ class PoolTests(unittest.TestCase):
 
     def test_memory_and_weight_overflow(self):
         self.assertEqual(self.run_driver('limits'), ['PASS limits'])
+
+    def test_cost_diverse_elite_ties_recent_exploration_and_draws(self):
+        lines = self.run_driver('cost-diverse')
+        roster = json.loads(lines[0])
+        elite = sorted(range(32), key=lambda i: (55+i%10, i))[:8]
+        exploration = sorted(set(range(32))-set(elite), reverse=True)[:8]
+        expected = elite+exploration
+        self.assertEqual([int(row['scheme_id']) for row in roster], expected)
+        rng = HostRNG(7)
+        draws = []
+        for _ in range(64):
+            group = rng.bounded(2)
+            selected = expected[group*8+rng.bounded(8)]
+            draws.append(('exploration' if group else 'elite')+' '+str(selected))
+        self.assertEqual(lines[1:], draws+['next '+str(rng.next())])

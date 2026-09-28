@@ -86,6 +86,23 @@ class BaselineTests(unittest.TestCase):
         receipt['counters']['flip_attempts']=0
         self.assertEqual(b.native_dispatch_evidence('',receipt)['status'],'GPU_NOT_RUN')
 
+    def test_additive_target_before_walk_still_requires_gpu_evaluation(self):
+        receipt=dict(counters={'flip_attempts':0},evaluated_current_run=1,
+                     library_sha256='a'*64,actual_backend=None,
+                     configuration={'operation':'search','workflow':'additive-search',
+                                    'policy':{'mode':'alternatives'}})
+        text=(log('runReducersKernel',1).replace('initializeKernel','initializeReducersKernel')+
+              'Metal library: signed.metallib SHA256 '+('a'*64)+'\n')
+        self.assertEqual(b.native_dispatch_evidence(text,receipt)['status'],'GPU_EXECUTED')
+        for bad in ('', text.replace('runReducersKernel','otherKernel')):
+            with self.assertRaises(ValueError):b.native_dispatch_evidence(bad,receipt)
+        receipt['counters']['flip_attempts']=1
+        with self.assertRaisesRegex(ValueError,'controlled kernel'):
+            b.native_dispatch_evidence(text,receipt)
+        receipt['counters']['flip_attempts']=0
+        receipt['evaluated_current_run']=0
+        self.assertEqual(b.native_dispatch_evidence('',receipt)['status'],'GPU_NOT_RUN')
+
     def test_adapter_headers(self):
         data = scalar()
         self.assertEqual(b.adapter_bytes(data, 'search').split(), [b'1', b'1',b'1',b'1',b'1', b'1',b'1',b'1'])

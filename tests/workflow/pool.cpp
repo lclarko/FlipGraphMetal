@@ -17,6 +17,18 @@ int main(int argc,char **argv){try{
         std::mt19937_64 rng(std::stoull(argv[3]));for(unsigned i=0;i<std::stoul(argv[4]);++i){auto member=pools.select(2,rng);require(member,"missing parent");std::cout<<member->id<<'\n';}std::cout<<"next "<<rng()<<'\n';
     }else if(command=="fifo"){
         RankPools pools(PoolSettings{2,2,1024*1024,1,"uniform"});pools.admit(structural("a",2));pools.admit(structural("b",2));require(!pools.admit(structural("a",2)),"duplicate admitted");pools.admit(structural("c",2));std::mt19937_64 rng(7);for(int i=0;i<32;++i)std::cout<<pools.select(2,rng)->id<<'\n';std::cout<<"next "<<rng()<<'\n';
+    }else if(command=="cost-diverse"){
+        PoolSettings settings{16,16,8*1024*1024,1,"cost-diverse",true,8};RankPools pools(settings);
+        for(uint64_t i=0;i<32;++i){auto m=structural(std::to_string(i),23);m.scheme.n={3,3,3};for(auto &factor:m.scheme.f)factor=Matrix(23,std::vector<int64_t>(9,0));m.admissionOrder=i;
+            m.evaluation=Json::dict();m.evaluation.object["additions"]=Json(int64_t(55+i%10));pools.admit(m);
+            if(i==4)require(!pools.admit(m),"canonical alias refreshed roster");}
+        AdmissionContext context;const auto snapshot=pools.snapshot(context);
+        std::cout<<dump(snapshot.at("active").array[0].at("members"))<<'\n';
+        require(snapshot.at("evictions").num()==16,"eviction count mismatch");
+        std::mt19937_64 rng(7);for(int i=0;i<64;++i){std::string group;const auto *member=pools.select(23,rng,&group);
+            std::cout<<group<<' '<<member->id<<'\n';}std::cout<<"next "<<rng()<<'\n';
+        auto offRank=structural("off-rank",24);offRank.evaluation=Json::dict();offRank.evaluation.object["additions"]=Json(int64_t(1));
+        rejects([&]{pools.admit(offRank);},"off-rank scored parent admitted");
     }else if(command=="stages"){
         RankPools pools(PoolSettings{3,2,1024*1024,2,"uniform"});pools.admit(structural("a",5));pools.admit(structural("b",3));require(pools.nextStage(8)==8,"smaller-population fallback used");pools.admit(structural("c",5));require(pools.nextStage(8)==5,"eligible rank not selected");pools.admit(structural("d",3));require(pools.nextStage(8)==3,"lowest eligible rank not selected");require(pools.nextStage(3)==3,"stage moved upward");std::cout<<"PASS stages\n";
     }else if(command=="reserves"){
