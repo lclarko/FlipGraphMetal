@@ -335,17 +335,34 @@ def qualify_required_stage(requests, responses, first_success):
                 f'tile/repeat determinism for transpose={transpose}')
 
 
-def wait_for_headroom(max_seconds):
-    start = time.monotonic()
+def wait_for_headroom(max_seconds, *, monotonic=time.monotonic,
+                      sample=wired_memory, sleep=time.sleep):
+    """Sample launch memory until admitted or the monotonic wait deadline expires.
+
+    A zero-second wait expires immediately. A sample that finishes at the
+    deadline is rejected, even when its wired-memory reading is acceptable.
+    """
+    start = monotonic()
+    deadline = start + max_seconds
     samples = []
     while True:
-        wired = wired_memory(timeout=2)
-        samples.append(dict(seconds=time.monotonic() - start, wired_bytes=wired))
+        now = monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            return dict(seconds=now - start, samples=samples, admitted=False)
+        wired = sample(timeout=min(2, remaining))
+        now = monotonic()
+        elapsed = now - start
+        samples.append(dict(seconds=elapsed, wired_bytes=wired))
+        if now >= deadline:
+            return dict(seconds=elapsed, samples=samples, admitted=False)
         if launch_headroom_available(wired):
-            return dict(seconds=time.monotonic() - start, samples=samples, admitted=True)
-        if time.monotonic() - start >= max_seconds:
-            return dict(seconds=time.monotonic() - start, samples=samples, admitted=False)
-        time.sleep(min(.5, max_seconds - (time.monotonic() - start)))
+            return dict(seconds=elapsed, samples=samples, admitted=True)
+        now = monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            return dict(seconds=now - start, samples=samples, admitted=False)
+        sleep(min(.5, remaining))
 
 
 def run_group(name, requests, output, binary, wait_seconds, expected_error=None):
@@ -376,7 +393,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/metal/correctness')
     parser.add_argument('--panel-chunk', type=int, default=8)
-    parser.add_argument('--headroom-wait-seconds', type=float, default=45.)
+    parser.add_argument('--headroom-wait-seconds', type=float, default=45.,
+                        help='maximum monotonic prelaunch wait (0 expires immediately; '
+                             'a sample finishing at the deadline is rejected)')
     parser.add_argument('--prepare-only', action='store_true')
     args = parser.parse_args()
     require(1 <= args.panel_chunk <= 16 and 0 <= args.headroom_wait_seconds <= 60,

@@ -420,6 +420,10 @@ admission step normalizes U/V signs and compensates W; independent verification
 repeats that normalization from the supplied factor bytes and checks the exact
 effective presentation. Reference circuits are never supplied to production.
 
+The oracle harness bounds headroom sampling and waiting by one monotonic
+deadline. Samples completing at or after that deadline cannot admit a child.
+`--headroom-wait-seconds 0` expires immediately without sampling or launching work.
+
 New routine guards default to 4,294,967,296 wired bytes; pass the limit explicitly
 when supervising an attempt. Prelaunch admission remains 1,946,157,056 bytes
 (`guard.launch_headroom_available`), independently of the termination cutoff.
