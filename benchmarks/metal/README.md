@@ -352,8 +352,18 @@ all generated histories remain local and uncommitted.
 Qualification exercises initialization and resume for both selectors at two
 workers and four 32-step batches. The fixed reducer quantum does not change.
 If complete work exceeds 30 seconds, qualification tries one worker once. A
-resource guard failure stops admission. The slower qualified chunk freezes the
-admission allowance at `ceil(1.25 * elapsed_seconds) + 2`.
+resource guard failure stops admission. For each qualified chunk, work duration
+is `elapsed_seconds - headroom_wait_seconds`. The admission allowance is
+`ceil(1.25 * maximum work duration) + 2`. Only explicit prelaunch headroom waiting
+is excluded from calibration; configuration, startup, replay, native work,
+exports, independent verification and persistence remain included. The measurement
+retains total elapsed, headroom waiting and the calibration basis. Invalid
+timing observations are rejected rather than clamped.
+
+Headroom waiting still consumes the full arm and global budgets. Admission is
+rechecked after waiting, and the memory thresholds, child guards, cleanup
+reserves and endpoint credit rules do not change. The allowance is an estimate;
+later history growth can increase replay and export costs.
 
 Preparation and qualification precede the measured 900-second envelope. The
 comparison has seeds 7/19/41, alternating paired arm order, fresh histories and
