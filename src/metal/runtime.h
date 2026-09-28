@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <type_traits>
 #include <new>
@@ -8,6 +9,7 @@
 
 void *metalAllocateBytes(size_t size);
 void metalFree(void *pointer);
+inline thread_local uint64_t metalLastGpuNanoseconds=0;
 struct MetalArgument {
     const void *pointer;
     size_t size;

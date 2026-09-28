@@ -56,9 +56,9 @@ build/metal/additions_reducer: $(METAL_SOURCES) $(NATIVE_WORKFLOW) $(NATIVE_WORK
 	@mkdir -p build/metal
 	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed) -DMETAL_PROGRAM=3 src/metal/main.cpp src/metal/runtime.mm $(NATIVE_WORKFLOW) -o $@
 
-build/metal/correctness: $(METAL_SOURCES) makefile scripts/build_config.py $(METAL_CONFIG) FORCE tests/metal/correctness.cpp tests/metal/candidate_capacity.h tests/workflow/reduction_result.cpp $(wildcard src/workflow/*.h) $(call metal_library_dependency,signed-testing)
+build/metal/correctness: $(METAL_SOURCES) src/workflow/scheme_io.cpp src/workflow/journal.cpp makefile scripts/build_config.py $(METAL_CONFIG) FORCE tests/metal/correctness.cpp tests/metal/candidate_capacity.h tests/workflow/reduction_result.cpp tests/workflow/two_aux_constructor.h $(wildcard src/workflow/*.h) $(call metal_library_dependency,signed-testing)
 	@mkdir -p build/metal
-	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed-testing) -DMETAL_TESTING tests/metal/correctness.cpp src/metal/runtime.mm -o $@
+	@$(call run_build,$(METAL_CONFIG)) $(METAL_CXX) $(METAL_FLAGS) $(call metal_runtime_flags,signed-testing) -DMETAL_TESTING tests/metal/correctness.cpp src/metal/runtime.mm src/workflow/scheme_io.cpp src/workflow/journal.cpp -o $@
 
 
 metal: build/metal/flip_graph_f2 build/metal/complexity_minimizer_f2

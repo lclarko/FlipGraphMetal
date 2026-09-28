@@ -80,7 +80,7 @@ public:
 #ifdef METAL_TESTING
         [source appendString:@"#define METAL_TESTING\n"];
 #endif
-        for (NSString *name in @[@"core.h", @"addition.h", @"flip_set.h", @"scheme_integer.h", @"scheme_z2.h", @"pairs_counter.h", @"additions_reducer.h", @"circuit_constructor.h",
+        for (NSString *name in @[@"core.h", @"addition.h", @"flip_set.h", @"scheme_integer.h", @"scheme_z2.h", @"pairs_counter.h", @"additions_reducer.h", @"circuit_constructor.h", @"two_aux_constructor.h",
 #ifndef METAL_F2
             @"compact.h",
 #endif
@@ -129,6 +129,7 @@ void metalFree(void *pointer) {
 }
 
 void metalLaunch(const char *name, size_t threads, size_t blockSize, std::initializer_list<MetalArgument> arguments) {
+    metalLastGpuNanoseconds=0;
     @autoreleasepool {
         auto &r = runtime();
         auto &pipeline = r.pipelines[name];
@@ -184,6 +185,9 @@ void metalLaunch(const char *name, size_t threads, size_t blockSize, std::initia
         [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted)
             throw std::runtime_error(command.error.localizedDescription.UTF8String);
+        const double gpuSeconds=command.GPUEndTime-command.GPUStartTime;
+        if (gpuSeconds>=0 && gpuSeconds<double(std::numeric_limits<uint64_t>::max())/1e9)
+            metalLastGpuNanoseconds=static_cast<uint64_t>(gpuSeconds*1e9);
         const int *status = static_cast<const int *>(errors.contents);
         for (size_t i = 0; i < threads; i++)
             if (status[i]) {

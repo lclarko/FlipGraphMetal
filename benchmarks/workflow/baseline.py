@@ -4,6 +4,7 @@ import ast
 import copy
 import collections
 from collections import defaultdict
+from functools import partial
 import hashlib
 import heapq
 import io
@@ -25,10 +26,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 sys.path.insert(0, str(ROOT / 'tests/metal'))
 from application import digest, hardware_inventory, write_json, source_identity
-from guard import run as guarded_run
+from guard import run as metal_guard_run
 from application import wired_memory, LIMIT
 from smoke import dispatch_evidence
 from verify import verify, reconstruct
+
+# Frozen FGM comparison protocols retain their original 3 GiB child guard.
+guarded_run = partial(metal_guard_run, wired_limit_bytes=LIMIT)
 
 BASELINE = '2f91a882dab71cd94de1897f397fe96271920797'
 PROGRAMS = ('flip_graph', 'flip_graph_f2', 'complexity_minimizer',
@@ -3066,17 +3070,20 @@ def fgm3_export_rows(path, record_limit=8388608):
             [row for row in rows if row['schema']=='fgm-parent-installation-v1'])
 
 
-def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, field=None):
+def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, field=None,
+                 wired_limit_bytes=LIMIT):
     try:
-        result=guard(['/usr/bin/time','-l','-p',*argv],destination)
+        result=guard(['/usr/bin/time','-l','-p',*argv],destination,
+                     wired_limit_bytes=wired_limit_bytes)
     except Exception as error:
         if record is not None:
-            record[field]=dict(status='unknown-cleanup',
+            record[field]=dict(status='unknown-cleanup',wired_limit_bytes=wired_limit_bytes,
                 result_sha256=digest(destination/'result.json') if (destination/'result.json').exists() else None,
                 log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None)
         raise RuntimeError(expected+' supervision has unknown cleanup') from error
     observed=dict(status='complete' if result.get('complete') and not result.get('forced_termination')
                   and not result.get('cleanup_failure') else 'failed',
+        wired_limit_bytes=wired_limit_bytes,
         forced_termination=bool(result.get('forced_termination')),
         cleanup_failure=bool(result.get('cleanup_failure')),
         wall_seconds=result.get('wall_seconds'),error=result.get('error'),
@@ -3084,6 +3091,9 @@ def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, f
         log_sha256=digest(destination/'run.log') if (destination/'run.log').exists() else None,
         peak_system_wired_bytes=max((item['wired_bytes'] for item in result.get('memory',[])),default=0))
     if record is not None:record[field]=observed
+    if result.get('wired_limit',wired_limit_bytes)!=wired_limit_bytes:
+        if record is not None:record[field]['status']='policy-mismatch'
+        raise ValueError(expected+' guard wired limit differs from protocol')
     if result.get('forced_termination') or result.get('cleanup_failure'):
         raise RuntimeError(expected+' was forcibly terminated or cleanup is uncertain')
     if not result.get('complete'):
@@ -3091,7 +3101,8 @@ def fgm3_guarded(argv, destination, guard, *, expected='command', record=None, f
     if observed['result_sha256'] is None or observed['log_sha256'] is None:
         if record is not None:record[field]['status']='missing-sidecar'
         raise ValueError(expected+' completed without required supervision sidecars')
-    return dict(complete=True,result_sha256=observed['result_sha256'],
+    return dict(complete=True,wired_limit_bytes=wired_limit_bytes,
+                result_sha256=observed['result_sha256'],
                 log_sha256=observed['log_sha256'],wall_seconds=result['wall_seconds'],
                 peak_system_wired_bytes=observed['peak_system_wired_bytes'])
 
@@ -3158,7 +3169,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     record['status']='native-started'
     native=fgm3_guarded([str(binaries/'flip_graph'),'--run-config',str(config_path)],
                         chunk_dir/'native-guard',guard,expected='additive native chunk',
-                        record=record,field='native_guard')
+                        record=record,field='native_guard',
+                        wired_limit_bytes=protocol['wired_limit_bytes'])
     record['native_guard']=native
     receipt=json.loads(receipt_path.read_text())
     record['receipt_sha256']=digest(receipt_path)
@@ -3192,7 +3204,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     record['status']='evaluation-export-started'
     record['evaluation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--evaluations',
         '--output',str(export_path)],chunk_dir/'evaluation-export-guard',guard,
-        expected='additive evaluation export',record=record,field='evaluation_export_guard')
+        expected='additive evaluation export',record=record,field='evaluation_export_guard',
+        wired_limit_bytes=protocol['wired_limit_bytes'])
     record['evaluation_export_sha256']=digest(export_path)
     if not fgm3_export_budget(clock(),global_deadline,1,protocol):
         record.update(status='export-pending',stop_reason='global observation export reserve')
@@ -3201,7 +3214,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
     record['status']='observation-export-started'
     record['observation_export_guard']=fgm3_guarded([str(tool),'analyze',*common,'--observations',
         '--output',str(observation_path)],chunk_dir/'observation-export-guard',guard,
-        expected='additive observation export',record=record,field='observation_export_guard')
+        expected='additive observation export',record=record,field='observation_export_guard',
+        wired_limit_bytes=protocol['wired_limit_bytes'])
     record['observation_export_sha256']=digest(observation_path)
     current_evaluations,current_installs=fgm3_export_rows(export_path)
     previous_evaluations=[] if not state.get('evaluation_export') else fgm3_export_rows(

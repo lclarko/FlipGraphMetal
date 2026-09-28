@@ -33,7 +33,7 @@ inline fgm::Json twoAuxGateJson(const fgm_constructor::Gate &gate) {
     return result;
 }
 
-inline fgm::Json twoAuxConstructorTest(const fgm::Json &request) {
+inline fgm::Json twoAuxConstructorTest(const fgm::Json &request,bool gpu=false) {
     using namespace fgm;
     using namespace fgm_constructor;
     auto integer=[](const Json &x) {
@@ -53,6 +53,36 @@ inline fgm::Json twoAuxConstructorTest(const fgm::Json &request) {
     }
     const auto p=prepareTwoAux(targets,integer(request.at("inputs")));
     const uint64_t budget=request.has("max_pair_slots")?natural(request.at("max_pair_slots")):65536;
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+    if(gpu && request.has("gpu_stage")) {
+        const bool transpose=request.has("transpose_two_aux") && request.at("transpose_two_aux").boolean;
+        const bool requireTwoLive=request.has("require_two_live") && request.at("require_two_live").boolean;
+        const int tile=request.has("tile_size")?integer(request.at("tile_size")):128;
+        const TwoAuxSettings settings{"signed-two-aux-distinct-v1",budget};
+        auto report=twoAuxReport(settings,"test");
+        const auto stageProblem=prepareTwoAuxStage(targets,p.inputs,transpose,report);
+        uint64_t dispatch=0,verification=0;
+        const auto stage=constructTwoAuxStageGPU(stageProblem,targets,transpose,1000000,settings,32,
+            AdmissionLimits{},report,dispatch,verification,tile,requireTwoLive);
+        auto result=Json::dict();
+        result.object["report"]=report;
+        result.object["status"]=Json(int64_t(stage.has_value()));
+        if(stage) {
+            Matrix expected=targets;
+            if(transpose) {
+                expected=Matrix(p.inputs,std::vector<int64_t>(targets.size()));
+                for(size_t r=0;r<targets.size();++r)
+                    for(int c=0;c<p.inputs;++c) expected[c][r]=targets[r][c];
+            }
+            result.object["count"]=Json(int64_t(verifyStage(*stage,expected,
+                transpose?int(targets.size()):p.inputs,AdmissionLimits{})));
+            result.object["fresh"]=stage->fresh; result.object["outputs"]=stage->outputs;
+        }
+        return result;
+    }
+#else
+    (void)gpu;
+#endif
     TwoAuxStream stream(p,budget);
     auto response=Json::dict(), results=Json::list();
     response.object["directions"]=Json(int64_t(p.directions));
@@ -106,6 +136,10 @@ inline fgm::Json twoAuxConstructorTest(const fgm::Json &request) {
     };
     if(request.has("witnesses")) {
         if(request.at("witnesses").array.size()>128) throw std::runtime_error("test batch exceeds tile capacity");
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+        std::vector<TwoAuxTask> providedTasks;
+        std::vector<TwoAuxWitness> providedWitnesses;
+#endif
         for(const auto &item:request.at("witnesses").array) {
             TwoAuxTask task{}; TwoAuxFilter filter{};
             if(!prepareTwoAuxTask(p,natural(item.at("raw_slot")),task,filter))
@@ -122,17 +156,89 @@ inline fgm::Json twoAuxConstructorTest(const fgm::Json &request) {
                 if(g.size()!=5) throw std::runtime_error("test gate width mismatch");
                 w.gates[i]={integer(g[0]),integer(g[1]),integer(g[2]),integer(g[3]),integer(g[4])};
             }
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+            if(gpu) { providedTasks.push_back(task); providedWitnesses.push_back(w); }
+            else
+#endif
             accept(task,w);
         }
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+        if(gpu && !providedTasks.empty()) {
+            const TwoAuxSettings settings{"signed-two-aux-distinct-v1",budget};
+            auto report=twoAuxReport(settings,"test"); uint64_t verification=0;
+            validateTwoAuxBatch(p,providedTasks.data(),providedWitnesses.data(),int(providedTasks.size()),
+                targets,false,false,AdmissionLimits{},report,verification);
+            for(size_t i=0;i<providedTasks.size();++i) accept(providedTasks[i],providedWitnesses[i]);
+            response.object["batch_validated"]=report.at("validated");
+        }
+#endif
     } else if(request.has("raw_slots")) {
         if(request.at("raw_slots").array.size()>128) throw std::runtime_error("test selection exceeds tile capacity");
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+        if(gpu && !prepareOnly) {
+            ReductionBuffer<TwoAuxProblem> problem(1); *problem.data=p;
+            ReductionBuffer<TwoAuxTask> tasks(128);
+            ReductionBuffer<TwoAuxWitness> witnesses(128);
+            int count=0;
+            for(const auto &id:request.at("raw_slots").array) {
+                TwoAuxFilter filter{};
+                if(prepareTwoAuxTask(p,natural(id),tasks.data[count],filter)) ++count;
+            }
+            if(count) {
+                metalDispatch("constructorTwoAuxClosureKernel",size_t((count+31)/32)*32,32,
+                    problem.data,tasks.data,witnesses.data,count);
+                const TwoAuxSettings settings{"signed-two-aux-distinct-v1",budget};
+                auto report=twoAuxReport(settings,"test"); uint64_t verification=0;
+                if(request.has("tamper_lane")) {
+                    const int lane=integer(request.at("tamper_lane"));
+                    if(lane<0 || lane>=count) throw std::runtime_error("test tamper lane out of range");
+                    const std::string kind=request.has("tamper_kind")?request.at("tamper_kind").str():"mask";
+                    if(kind=="premature_fixed_point") {
+                        auto &w=witnesses.data[lane];
+                        w.status=0; w.count=0; w.available=(uint64_t(1)<<p.inputs)-1;
+                        w.ruleChecks=0; w.sweeps=0;
+                    } else if(kind=="mask") witnesses.data[lane].available^=uint64_t(1)<<33;
+                    else throw std::runtime_error("unknown test tamper kind");
+                }
+                validateTwoAuxBatch(p,tasks.data,witnesses.data,count,targets,false,false,
+                    AdmissionLimits{},report,verification);
+                for(int i=0;i<count;++i) accept(tasks.data[i],witnesses.data[i]);
+                response.object["batch_validated"]=report.at("validated");
+            }
+        } else
+#endif
         for(const auto &id:request.at("raw_slots").array) {
             TwoAuxTask task{}; TwoAuxFilter filter{};
             if(prepareTwoAuxTask(p,natural(id),task,filter) && !prepareOnly) accept(task,testTwoAuxClosure(p,task));
         }
     } else {
-        TwoAuxTask task{};
-        while(stream.next(task)) if(!prepareOnly) accept(task,testTwoAuxClosure(p,task));
+#ifdef FGM_CONSTRUCTOR_GPU_TEST
+        if(gpu && !prepareOnly) {
+            ReductionBuffer<TwoAuxProblem> problem(1); *problem.data=p;
+            ReductionBuffer<TwoAuxTask> tasks(128);
+            ReductionBuffer<TwoAuxWitness> witnesses(128);
+            const TwoAuxSettings settings{"signed-two-aux-distinct-v1",budget};
+            auto report=twoAuxReport(settings,"test"); uint64_t verification=0;
+            uint64_t batchValidated=0;
+            TwoAuxTask task{};
+            for(;;) {
+                int count=0;
+                while(count<128 && stream.next(task)) tasks.data[count++]=task;
+                if(!count) break;
+                metalDispatch("constructorTwoAuxClosureKernel",size_t((count+31)/32)*32,32,
+                    problem.data,tasks.data,witnesses.data,count);
+                validateTwoAuxBatch(p,tasks.data,witnesses.data,count,targets,false,false,
+                    AdmissionLimits{},report,verification);
+                batchValidated+=uint64_t(count);
+                for(int i=0;i<count;++i) accept(tasks.data[i],witnesses.data[i]);
+            }
+            response.object["batch_validated"]=Json(int64_t(batchValidated));
+        } else
+#endif
+        {
+            TwoAuxTask task{};
+            while(stream.next(task)) if(!prepareOnly) accept(task,testTwoAuxClosure(p,task));
+        }
     }
     const auto stats=stream.stats(); auto counts=Json::dict();
     counts.object["raw_scanned"]=Json(int64_t(stats.rawScanned));

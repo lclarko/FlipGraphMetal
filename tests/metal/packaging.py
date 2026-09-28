@@ -8,14 +8,16 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 sys.path.insert(0, str(ROOT / 'tests/workflow'))
 from metal_library import package, PRODUCTION
-from guard import run
-from application import write_json
+from guard import (DEFAULT_WIRED_LIMIT_BYTES, LAUNCH_WIRED_CEILING_BYTES,
+                   launch_headroom_available, run)
+from application import wired_memory, write_json
 from smoke import check_fixtures, dispatch_evidence
 from verify import verify
 from copy import deepcopy
@@ -90,18 +92,62 @@ def native_workflow_checks(binaries, output, cwd):
     output.mkdir(parents=True, exist_ok=False)
     empty_path = output/'empty-path'; empty_path.mkdir()
     records = []
-    def execute(name, program, config):
+    def execute(name, program, config, *, require_headroom=False):
         config_path = output/(name+'.json')
         destination = output/(name+'-record.json')
         config = deepcopy(config); config['output'] = str(destination)
         config_path.write_text(json.dumps(config, sort_keys=True)+'\n')
         argv = ['/usr/bin/env', 'PATH='+str(empty_path), str(binaries/program),
                 '--run-config', str(config_path)]
-        result = run(argv, output/(name+'-guard'))
+        entry = dict(name=name, command=argv)
+        if require_headroom:
+            headroom = dict(status='waiting', ceiling_bytes=LAUNCH_WIRED_CEILING_BYTES,
+                            samples=0, waited_seconds=0.)
+            entry['prelaunch_headroom'] = headroom
+            records.append(entry)
+            write_json(output/'results.json', dict(complete=False, runs=records))
+            started = time.monotonic()
+            deadline = started+45
+            last_saved = started
+            while True:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    headroom['status'] = 'unavailable'
+                    write_json(output/'results.json', dict(complete=False, runs=records))
+                    raise ValueError(name+' prelaunch wired headroom unavailable within 45 seconds')
+                try:
+                    wired = wired_memory(timeout=min(2, remaining))
+                except Exception as error:
+                    headroom.update(status='sample-failed', error=str(error))
+                    write_json(output/'results.json', dict(complete=False, runs=records))
+                    raise
+                headroom.update(samples=headroom['samples']+1, last_wired_bytes=wired,
+                                waited_seconds=time.monotonic()-started)
+                if headroom['waited_seconds'] >= 45:
+                    headroom['status'] = 'unavailable'
+                    write_json(output/'results.json', dict(complete=False, runs=records))
+                    raise ValueError(name+' prelaunch wired headroom unavailable within 45 seconds')
+                if launch_headroom_available(wired):
+                    headroom['status'] = 'admitted'
+                    write_json(output/'results.json', dict(complete=False, runs=records))
+                    break
+                if time.monotonic()-last_saved >= 1:
+                    write_json(output/'results.json', dict(complete=False, runs=records))
+                    last_saved = time.monotonic()
+                time.sleep(min(.025, max(0, deadline-time.monotonic())))
+        result = run(argv, output/(name+'-guard'), wired_limit_bytes=DEFAULT_WIRED_LIMIT_BYTES)
+        entry['guard_complete'] = result['complete']
+        entry['guard_wired_limit_bytes'] = result['wired_limit']
+        if require_headroom:
+            write_json(output/'results.json', dict(complete=False, runs=records))
+            require(result['wired_limit']==DEFAULT_WIRED_LIMIT_BYTES and result['time_limit']==45,
+                    name+' changed the prospective child guard')
         require(result['complete'], name+' native workflow failed')
         record = json.loads(destination.read_text())
         require(record['status']=='complete' and record['execution_started'], name+' incomplete native run record')
-        records.append(dict(name=name, command=argv, record=record))
+        entry['record'] = record
+        if not require_headroom:
+            records.append(entry)
         write_json(output/'results.json', dict(complete=False, runs=records))
         return record
     base = dict(schema='fgm-run-v1', operation='search',
@@ -279,6 +325,116 @@ def native_workflow_checks(binaries, output, cwd):
         if strategy=='cancellation':
             require(result['stage_sources']['w']=='baseline' and
                     result['verified_circuit_additions_by_stage']['w']==baseline['w'],'cancellation changed direct W route')
+    two_aux = dict(family='signed-two-aux-distinct-v1', max_pair_slots=65536)
+    bad_config = dict(schema='fgm-run-v1', operation='reduce',
+        reduction=dict(domain='ZT',seed=7,rounds=16,reducers=128,schemes=1,max_flips=0,
+                       no_improvements=16,target_additions=0,strategy='combined',
+                       constructor=dict(two_aux,max_pair_slots=0)),
+        input=dict(kind='files',files=[dict(path=str(fixture),format='json',domain='ZT')]),
+        execution=dict(workers=1,batch_steps=1,block_size=32,backend='general',memory_bytes=536870912),
+        output=str(output/'two-aux-invalid-record.json'))
+    bad_path=output/'two-aux-invalid.json';bad_path.write_text(json.dumps(bad_config,sort_keys=True)+'\n')
+    bad_argv=['/usr/bin/env','PATH='+str(empty_path),str(binaries/'additions_reducer'),
+              '--run-config',str(bad_path)]
+    bad_guard=run(bad_argv,output/'two-aux-invalid-guard',wired_limit_bytes=DEFAULT_WIRED_LIMIT_BYTES)
+    bad_log=(output/'two-aux-invalid-guard/run.log').read_text()
+    bad_checks=dict(exit_code=bad_guard.get('exit_code')==1,
+        guard_incomplete=bad_guard['complete'] is False,
+        diagnostic='invalid configuration integer' in bad_log,
+        no_gpu_initialization=not any(marker in bad_log for marker in
+                                      ('Metal device:', 'Metal library:', 'Metal dispatch ')),
+        no_receipt=not Path(bad_config['output']).exists())
+    records.append(dict(name='two-aux-invalid-config',command=bad_argv,
+                        expected_rejection=True,checks=bad_checks))
+    write_json(output/'results.json',dict(complete=False,runs=records))
+    require(all(bad_checks.values()),'invalid packaged two-aux configuration reached GPU initialization')
+    reducer_link=output/'additions-reducer-link'
+    reducer_link.symlink_to(binaries/'additions_reducer')
+    for label,expected,program in (
+            ('sun',dict(u=13,v=13,w=30), 'additions_reducer'),
+            ('cn122',dict(u=13,v=14,w=28), reducer_link),
+            ('sun-cyclic',dict(u=16,v=13,w=27), 'additions_reducer'),
+            ('original',dict(u=19,v=15,w=32), 'additions_reducer'),
+            ('laderman',dict(u=16,v=16,w=30), 'additions_reducer')):
+        name='two-aux-'+label
+        source=output/(name+'-input.json')
+        fixture_label='sun' if label=='sun-cyclic' else label
+        shutil.copyfile(ROOT/'benchmarks/workflow/fixtures/fgm1/factors'/f'{fixture_label}.json',source)
+        if label=='sun-cyclic':
+            # Rotate the calibration tensor's axes to exercise production W.
+            rotated=json.loads(source.read_text())
+            rotated['u'],rotated['v'],rotated['w']=rotated['w'],rotated['u'],rotated['v']
+            source.write_text(json.dumps(rotated,sort_keys=True)+'\n')
+        config=deepcopy(bad_config)
+        config['reduction']['constructor']=dict(two_aux)
+        config['input']['files'][0]['path']=str(source)
+        record=execute(name,program,config,require_headroom=True)
+        result,=record['results']
+        presentation,=record['presentations']
+        raw=json.loads(source.read_text())
+        reference=deepcopy(raw)
+        for index in range(raw['m']):
+            for key in 'uv':
+                first=next((value for value in reference[key][index] if value),0)
+                if first<0:
+                    reference[key][index]=[-value for value in reference[key][index]]
+                    reference['w'][index]=[-value for value in reference['w'][index]]
+        effective={key:reference[key] for key in 'uvw'}
+        require(presentation['effective_factors']==effective,
+                name+' admission normalization differs from the source-derived factors')
+        source_sha256=hashlib.sha256(source.read_bytes()).hexdigest()
+        binding=dict(input_presentation_index=0,
+            submitted_factors_id=presentation['submitted_factors_id'],
+            effective_input_factors_id=presentation['effective_factors_id'],
+            source_sha256=source_sha256)
+        require(presentation['source_sha256']==source_sha256 and
+                result['source_sha256']==source_sha256 and
+                all(result[key]==value for key,value in binding.items()),
+                name+' result lost source factor identity')
+        artifact=record['circuit_artifact'];artifact_path=Path(artifact['path'])
+        require(hashlib.sha256(artifact_path.read_bytes()).hexdigest()==artifact['sha256'] and
+                artifact['records']==1,name+' circuit artifact binding mismatch')
+        circuit,=map(json.loads,artifact_path.read_text().splitlines())
+        require(circuit['source_binding']==binding,name+' circuit source binding mismatch')
+        checked=verify(circuit,reference)
+        require(checked['additions_by_stage']==expected and
+                checked['additions']==sum(expected.values()) and
+                result['verified_circuit_additions_by_stage']==expected and
+                result['verified_circuit_additions']==sum(expected.values()),
+                name+' exact factor or addition count mismatch')
+        native_output=output/(name+'-native-verified.jsonl')
+        native=run(['/usr/bin/env','PATH='+str(empty_path),str(binaries/'scheme_tool'),
+                    'verify','--format','jsonl','--input',str(artifact_path),
+                    '--output',str(native_output)],output/(name+'-verify-guard'),wired_limit_bytes=DEFAULT_WIRED_LIMIT_BYTES)
+        require(native['complete'],name+' packaged native circuit verification failed')
+        native_rows=[json.loads(line) for line in native_output.read_text().splitlines()]
+        require(len(native_rows)==1 and native_rows[0]['verified_circuit_additions']==sum(expected.values()) and
+                native_rows[0]['verified_circuit_additions_by_stage']==expected,
+                name+' native circuit count mismatch')
+        stages=result['two_auxiliary']['stages']
+        require(record['two_auxiliary']==result['two_auxiliary'] and
+                result['two_auxiliary']['effective_factors_id']==presentation['effective_factors_id'],
+                name+' two-aux report lost effective factor identity')
+        if label in ('original','laderman'):
+            expected_stop=('smaller-family-succeeded' if label=='original' else 'proved-no-improvement')
+            require(all(stage['stop_reason']==expected_stop and stage['dispatched']==0
+                        for stage in stages.values()), name+' skip control dispatched new work')
+        if label=='sun-cyclic':
+            require(stages['wt']['stop_reason']=='bound-attained' and
+                    stages['wt']['used_auxiliaries']==2 and
+                    stages['wt']['final_cost']==27 and
+                    result['stage_sources']['w']=='transpose-two-auxiliary',
+                    'cyclic Sun did not exercise actual production W transposition')
+        if label=='sun':
+            require(stages['v']['stop_reason']=='bound-attained' and
+                    stages['v']['selected_witness']['raw_slot']==32877 and
+                    stages['v']['logical_prefix']==32878 and
+                    stages['v']['used_auxiliaries']==2 and
+                    result['stage_sources']==dict(u='cancellation',v='two-auxiliary',w='baseline'),
+                    'Sun V two-aux bound or selected source mismatch')
+            require(all(stages[key]['stop_reason']=='smaller-family-succeeded' and
+                        stages[key]['dispatched']==0 for key in ('u','wt')),
+                    'Sun U or WT did not take the smaller-family path')
     summary=dict(complete=True,python_available=False,runs=records)
     write_json(output/'results.json',summary)
     return summary

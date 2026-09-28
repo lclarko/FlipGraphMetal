@@ -6,10 +6,20 @@ from pathlib import Path
 import subprocess
 import time
 
-from application import LIMIT, artifacts, digest, terminate, wired_memory, write_json
+from application import artifacts, digest, terminate, wired_memory, write_json
 
 
-def run(argv, output, *, absolute_deadline=None, wired_limit_bytes=LIMIT):
+DEFAULT_WIRED_LIMIT_BYTES = 4294967296
+LAUNCH_WIRED_RESERVE_BYTES = 2348810240
+LAUNCH_WIRED_CEILING_BYTES = DEFAULT_WIRED_LIMIT_BYTES - LAUNCH_WIRED_RESERVE_BYTES
+
+
+def launch_headroom_available(wired_bytes):
+    """Apply the prospective prelaunch admission ceiling."""
+    return wired_bytes <= LAUNCH_WIRED_CEILING_BYTES
+
+
+def run(argv, output, *, absolute_deadline=None, wired_limit_bytes=DEFAULT_WIRED_LIMIT_BYTES):
     if type(wired_limit_bytes) is not int or wired_limit_bytes <= 0:
         raise ValueError('wired limit must be a positive integer byte count')
     output.mkdir(parents=True, exist_ok=False)
@@ -88,12 +98,13 @@ def run(argv, output, *, absolute_deadline=None, wired_limit_bytes=LIMIT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--wired-limit-bytes', type=int, default=DEFAULT_WIRED_LIMIT_BYTES)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     argv = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not argv:
         parser.error('a command is required')
-    raise SystemExit(0 if run(argv, args.output)['complete'] else 1)
+    raise SystemExit(0 if run(argv, args.output, wired_limit_bytes=args.wired_limit_bytes)['complete'] else 1)
 
 
 if __name__ == '__main__':

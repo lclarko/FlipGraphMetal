@@ -210,8 +210,10 @@ class AdditiveWorkflowTest(unittest.TestCase):
                 if scan is not None:protocol['limits']=dict(scan_bytes=scan)
                 state=dict(build_inventory=inventory,evaluations=[],installations=[],observations=[])
                 observed=[]
+                guard_limits=[]
                 def guarded(argv,destination,guard,**kwargs):
                     observed.append(argv)
+                    guard_limits.append(kwargs['wired_limit_bytes'])
                     if len(observed)==1:
                         config_path=Path(argv[argv.index('--run-config')+1])
                         config=json.loads(config_path.read_text())
@@ -237,6 +239,7 @@ class AdditiveWorkflowTest(unittest.TestCase):
                 if scan is None:self.assertNotIn('limits',config)
                 else:self.assertEqual(config['limits'],dict(scan_bytes=scan))
                 self.assertEqual(len(observed),3)
+                self.assertEqual(guard_limits,[protocol['wired_limit_bytes']]*3)
                 for exported,mode in zip(observed[1:],('--evaluations','--observations')):
                     self.assertIn(mode,exported)
                     self.assertEqual(exported[exported.index('--scan-bytes')+1],
@@ -249,6 +252,32 @@ class AdditiveWorkflowTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'positive integer'):
                     b.fgm3_config(protocol,'uniform',7,1,1,Path('/unused'),
                                   Path('/unused/history'),Path('/unused/receipt'))
+
+    def test_guard_policy_is_passed_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination=Path(temp)/'guard'
+            calls=[]
+            def guarded(argv,output,*,wired_limit_bytes):
+                calls.append(wired_limit_bytes)
+                output.mkdir()
+                (output/'run.log').write_text('completed')
+                b.write_json(output/'result.json',dict(wired_limit=wired_limit_bytes))
+                return dict(complete=True,wall_seconds=1,memory=[dict(wired_bytes=3*1024**3+1)],
+                            wired_limit=wired_limit_bytes)
+            record={}
+            result=b.fgm3_guarded(['true'],destination,guarded,record=record,field='native_guard',
+                                  wired_limit_bytes=4*1024**3)
+            self.assertEqual(calls,[4*1024**3])
+            self.assertEqual(result['wired_limit_bytes'],4*1024**3)
+            self.assertEqual(record['native_guard']['wired_limit_bytes'],4*1024**3)
+            self.assertEqual(json.loads((destination/'result.json').read_text())['wired_limit'],4*1024**3)
+            mismatched={}
+            with self.assertRaisesRegex(ValueError,'differs from protocol'):
+                b.fgm3_guarded(['true'],Path(temp)/'other',
+                    lambda *args,**kwargs:dict(complete=True,wall_seconds=1,
+                                               wired_limit=3*1024**3),
+                    record=mismatched,field='native_guard',wired_limit_bytes=4*1024**3)
+            self.assertEqual(mismatched['native_guard']['status'],'policy-mismatch')
 
     def test_postwrite_change_stops_before_native_and_forced_cleanup_stops(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -322,7 +351,7 @@ class AdditiveWorkflowTest(unittest.TestCase):
                     record['status']='native-started' if failed_stage=='native' else 'evaluation-export-started'
                     field='native_guard' if failed_stage=='native' else 'evaluation_export_guard'
                     if failed_stage=='export':record['native_guard']=dict(wall_seconds=0)
-                    def guarded_failure(argv,destination):
+                    def guarded_failure(argv,destination,*,wired_limit_bytes):
                         clock.sleep(45)
                         return dict(complete=False,forced_termination=failed_stage=='native',
                                     cleanup_failure=False,wall_seconds=45,memory=[],error='injected failure')

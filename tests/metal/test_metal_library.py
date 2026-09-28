@@ -22,6 +22,7 @@ class MetalLibraryTests(unittest.TestCase):
         self.source.mkdir()
         self.names = ['core.h', 'addition.h', 'flip_set.h', 'scheme_integer.h',
                       'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h', 'circuit_constructor.h',
+                      'two_aux_constructor.h',
                       'compact.h', 'controlled.h', 'controlled_capture.h', 'controlled_packed.h', 'kernels.metal', 'controlled_kernels.metal', 'reduction_kernels.metal', 'test_kernels.metal']
         for name in self.names:
             (self.source / name).write_text('#pragma once\n' + name)
@@ -81,6 +82,13 @@ pathlib.Path(sys.argv[-1]).write_bytes(b'fake-metallib:' + source)
         self.output.write_bytes(b'tampered')
         self.build(flags='-different')
         self.assertEqual(len(self.calls()), 4)
+
+    def test_two_aux_header_change_rebuilds_signed_library(self):
+        before = self.build()
+        (self.source / 'two_aux_constructor.h').write_text('#pragma once\nchanged two-aux header')
+        after = self.build()
+        self.assertNotEqual(before['source_sha256'], after['source_sha256'])
+        self.assertEqual(len(self.calls()), 2)
 
     def test_failed_compilation_preserves_assets(self):
         self.build()

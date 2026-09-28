@@ -11,7 +11,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'benchmarks/metal'))
 from application import digest, write_json
-from guard import run
+from guard import DEFAULT_WIRED_LIMIT_BYTES, run
 from screen import check_log
 from verify import verify
 
@@ -29,7 +29,7 @@ def main():
     print('Evidence:', attempt, flush=True)
 
     def guarded(name, command):
-        result = run(command, attempt / (name + '-guard'))
+        result = run(command, attempt / (name + '-guard'), wired_limit_bytes=DEFAULT_WIRED_LIMIT_BYTES)
         summary['steps'].append({'name': name, 'complete': result['complete']})
         write_json(attempt / 'checks.json', summary)
         if not result['complete']:

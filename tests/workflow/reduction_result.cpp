@@ -1,9 +1,7 @@
 // Host-only verification of the production best-circuit binding boundary.
 #include "../../src/metal/host.h"
 #include "../../src/workflow/reduction_execution.h"
-#ifndef FGM_CONSTRUCTOR_GPU_TEST
 #include "two_aux_constructor.h"
-#endif
 // Shared by the existing host and GPU test drivers; never used in production.
 fgm::Json constructorTest(const fgm::Json &request,bool gpu=false) {
     fgm::Matrix targets;

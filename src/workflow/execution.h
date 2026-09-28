@@ -27,10 +27,17 @@ struct ExecutionSettings {
     uint64_t maxBatches=0;
 };
 
+inline constexpr uint64_t TwoAuxTileSize=128;
+inline constexpr uint64_t TwoAuxPreparationBytes=256*1024;
+struct TwoAuxSettings {
+    std::string family;
+    uint64_t maxPairSlots;
+};
 struct ReductionSettings {
     uint32_t seed;
     uint64_t rounds, reducers, schemes, maxFlips, noImprovements, targetAdditions;
     std::string strategy="baseline";
+    std::optional<TwoAuxSettings> constructor;
 };
 
 struct HistorySettings {
@@ -70,6 +77,7 @@ Json additiveContract(const PreparedRun &);
 
 struct ExecutionLayout {
     uint64_t signedSchemeBytes, f2SchemeBytes, reducerLaneBytes, rngBytes, controlBytes;
+    uint64_t twoAuxSharedBytes=0;
 };
 
 RunConfig parseRunConfig(const Json &, const std::filesystem::path &base,
