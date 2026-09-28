@@ -29,7 +29,8 @@ class BuildConfigurationTests(unittest.TestCase):
                      "src/common/arg_parser.cpp", "src/common/arg_parser.h",
                      "tests/metal/correctness.cpp", "tests/metal/f2_correctness.cpp",
                      "tests/metal/candidate_capacity.h", "tests/workflow/reduction_result.cpp",
-                     "tests/workflow/two_aux_constructor.h"):
+                     "tests/workflow/two_aux_constructor.h", "tests/workflow/pool.cpp",
+                     "tests/workflow/journal.cpp"):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.touch()
@@ -61,6 +62,15 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
             self.assertNotEqual(result.returncode, 0)
+        return result
+
+    def make_workflow(self):
+        result = subprocess.run(
+            ["make", "build/workflow/test_pool", "build/workflow/test_journal",
+             "WORKFLOW_CXX=" + self.command], cwd=self.root,
+            env={**os.environ, "FAKE_COMPILER_LOG": str(self.log)},
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
     def calls(self):
@@ -162,6 +172,24 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
         self.assertIn('src/workflow/journal.cpp', correctness)
         self.make()
         self.assertEqual(len(self.calls()), 12)
+
+    def test_two_aux_report_header_rebuilds_host_journal_and_pool(self):
+        self.make_workflow()
+        self.assertEqual(len(self.calls()), 2)
+        header = self.root / "src/workflow/two_aux_report_validation.h"
+        for target in ("test_pool", "test_journal"):
+            receipt = self.root / "build/workflow" / (target + ".build.json")
+            dependencies = json.loads(receipt.read_text())["inputs"]["dependencies"]
+            self.assertIn("src/workflow/two_aux_report_validation.h", dependencies)
+        before = header.stat()
+        header.write_text(header.read_text() + "\n// changed report validation\n")
+        os.utime(header, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.make_workflow()
+        self.assertEqual(len(self.calls()), 4)
+        self.assertEqual({Path(args[args.index('-o') + 1]).name for args in self.calls()[2:]},
+                         {"test_pool", "test_journal"})
+        self.make_workflow()
+        self.assertEqual(len(self.calls()), 4)
 
     def test_explicit_source_mode_and_return_to_packaged(self):
         self.make()

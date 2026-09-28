@@ -115,11 +115,11 @@ class ExecutionTests(unittest.TestCase):
             execution=dict(workers=2, batch_steps=3, block_size=32, backend='general', memory_bytes=16*1024*1024),
             output='receipt.json')
 
-    def invoke(self, config=None, extra=()):
+    def invoke(self, config=None, extra=(), env=None):
         (self.root/'run.json').write_text(json.dumps(self.config if config is None else config))
         return subprocess.run([str(self.binary), '--run-config', str(self.root/'run.json'),
                                '--validate-only', *extra], capture_output=True, text=True, timeout=10,
-                              env={**os.environ, 'PATH':''}, cwd='/')
+                              env={**os.environ, 'PATH':'', **(env or {})}, cwd='/')
 
     def fixed_reduction(self, *, constructor=True):
         fixture = ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json'
@@ -136,8 +136,16 @@ class ExecutionTests(unittest.TestCase):
         config['execution'].update(workers=1, memory_bytes=256*1024*1024)
         return config
 
-    def validated_receipt(self, config):
-        result = self.invoke(config)
+    def fixed_additive(self, *, constructor=True):
+        config = self.fixed_reduction(constructor=constructor)
+        config['evaluation'] = config.pop('reduction')
+        config.update(operation='search', workflow='additive-search',
+                      policy=dict(settings(), seed=7))
+        config['execution'].update(max_batches=1, memory_bytes=512*1024*1024)
+        return config
+
+    def validated_receipt(self, config, env=None):
+        result = self.invoke(config, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads((self.root/'receipt.json').read_text())
         (self.root/'receipt.json').unlink()
@@ -323,15 +331,74 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn('memory budget', rejected.stderr)
         self.assertFalse((self.root/'receipt.json').exists())
 
-    def test_two_aux_additive_evaluation_requires_future_qualification(self):
-        config = self.fixed_reduction()
-        evaluation = config.pop('reduction')
-        config.update(operation='search', workflow='additive-search',
-                      policy=dict(settings(), seed=7), evaluation=evaluation)
+    def test_two_aux_additive_admission_and_fixed_factor_constraints(self):
+        config = self.fixed_additive()
+        prepared = self.validated_receipt(config)
+        self.assertEqual(prepared['configuration']['evaluation'], config['evaluation'])
+        self.assertEqual(prepared['two_aux_preparation_bytes'], 256*1024)
+        self.assertFalse(prepared['execution_started'])
+        invalid = (
+            ('evaluation', 'constructor', None),
+            ('evaluation', 'constructor', {'family':'signed-two-aux-distinct-v1'}),
+            ('evaluation', 'constructor', {'max_pair_slots':1}),
+            ('evaluation', 'constructor', {'family':'unknown', 'max_pair_slots':1}),
+            ('evaluation', 'constructor', {'family':'signed-two-aux-distinct-v1', 'max_pair_slots':True}),
+            ('evaluation', 'constructor', {'family':'signed-two-aux-distinct-v1', 'max_pair_slots':0}),
+            ('evaluation', 'constructor', {'family':'signed-two-aux-distinct-v1', 'max_pair_slots':1047553}),
+            ('evaluation', 'constructor', {'family':'signed-two-aux-distinct-v1', 'max_pair_slots':1, 'extra':1}),
+            ('evaluation', 'domain', 'F2'),
+            ('evaluation', 'strategy', 'transpose'),
+            ('evaluation', 'schemes', 2),
+            ('evaluation', 'max_flips', 1),
+            ('evaluation', 'target_additions', 1),
+            ('policy', 'domain', 'F2'),
+            ('policy', 'collection_rank', 22),
+        )
+        for section, field, value in invalid:
+            with self.subTest(section=section, field=field, value=value):
+                trial = copy.deepcopy(config)
+                trial[section][field] = value
+                result = self.invoke(trial)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse((self.root/'receipt.json').exists())
+        (self.root/'scheme.json').write_text(json.dumps(self.scheme))
         result = self.invoke(config)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn('Milestone 3 qualification', result.stderr)
+        self.assertIn('rank 23', result.stderr)
+
+    def test_two_aux_additive_resident_memory_and_layout_failures(self):
+        evaluator = self.validated_receipt(self.fixed_reduction(constructor=False))['planned_buffer_bytes']
+        ordinary = self.validated_receipt(self.fixed_additive(constructor=False))
+        disabled_without_layout = self.validated_receipt(
+            self.fixed_additive(constructor=False), {'FGM_TEST_TWO_AUX_SHARED_BYTES':'0'})
+        self.assertEqual(disabled_without_layout['planned_buffer_bytes'], ordinary['planned_buffer_bytes'])
+        self.assertNotIn('two_aux_shared_bytes', disabled_without_layout)
+        config = self.fixed_additive()
+        tile = evaluator + 1
+        prepared = self.validated_receipt(config, {'FGM_TEST_TWO_AUX_SHARED_BYTES':str(tile)})
+        resident = ordinary['planned_buffer_bytes'] - evaluator
+        self.assertGreater(resident, 0)
+        self.assertEqual(prepared['two_aux_shared_bytes'], tile)
+        self.assertEqual(prepared['planned_buffer_bytes'], resident + tile)
+        self.assertEqual(prepared['reserved_host_bytes'] - ordinary['reserved_host_bytes'], 256*1024)
+        required = (prepared['planned_buffer_bytes'] + prepared['admission_content_bytes'] +
+                    prepared['reserved_host_bytes'])
+        config['execution']['memory_bytes'] = required
+        exact = self.validated_receipt(config, {'FGM_TEST_TWO_AUX_SHARED_BYTES':str(tile)})
+        self.assertEqual(exact['planned_buffer_bytes'], prepared['planned_buffer_bytes'])
+        config['execution']['memory_bytes'] = required - 1
+        rejected = self.invoke(config, env={'FGM_TEST_TWO_AUX_SHARED_BYTES':str(tile)})
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertIn('memory budget', rejected.stderr)
         self.assertFalse((self.root/'receipt.json').exists())
+        config['execution']['memory_bytes'] = 512*1024*1024
+        for tile, expected, message in ((0, 2, 'missing two-auxiliary execution layout'),
+                                        ((1 << 64)-1, 1, 'addition overflow')):
+            with self.subTest(tile=tile):
+                rejected = self.invoke(config, env={'FGM_TEST_TWO_AUX_SHARED_BYTES':str(tile)})
+                self.assertEqual(rejected.returncode, expected, rejected.stderr)
+                self.assertIn(message, rejected.stderr)
+                self.assertFalse((self.root/'receipt.json').exists())
 
     def test_selection_is_not_resume(self):
         import hashlib

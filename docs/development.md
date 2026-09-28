@@ -395,7 +395,7 @@ closures also receive a complete fixed-point check. The raw budget counts
 filtered positions and never rounds up to a full batch. Ordinary budget
 exhaustion retains the verified incumbent. Invalid output fails the invocation.
 Omitting the option preserves the previous evaluation path and allocations.
-Additive-search admission of this option awaits its separate integration gate.
+Native additive search accepts the same option under `evaluation.constructor`.
 
 `two_auxiliary.stages` records the family, implementation and enumeration
 versions, bounds, raw/filter/dispatch/validation counts, coverage, stop reason,
@@ -445,6 +445,13 @@ batch achieves that total. Independent verification is still required before
 reporting target attainment. `execution.max_batches` is a positive per-invocation
 bound, checked after batch commit. A resume begins new walkers and RNG streams.
 
+To enable the bounded two-helper pass, add
+`"constructor": {"family": "signed-two-aux-distinct-v1", "max_pair_slots": 65536}`
+to `evaluation`. It uses the shared standalone evaluator, including the existing
+zero-/one-helper fast paths and strict stage replacement. Omitting the object
+retains the existing scoring path. Enabling it or changing its family or raw-slot
+budget requires a fresh history; old scores are never relabeled or rescored.
+
 For `pool.selector: "cost-diverse"`, `capacity_per_rank: 16` and
 `elite_capacity: 8` retain the eight lowest verified costs and eight most recent
 nonelite identities. Equal costs retain earlier incumbents. Parent selection
@@ -468,6 +475,13 @@ input, pool, verification and transaction reservations. Additive defaults use
 8 MiB each for pool storage and transaction size. The experiment uses a 512-MiB
 accounted allocation budget. These reservations exclude driver residency and
 GPU scratch and do not replace the system wired-memory guard.
+
+With two-helper scoring, the shared-buffer allowance is resident generation
+storage plus the maximum of the serial reducer and constructor phases. The
+256-KiB constructor preparation reservation stays live alongside the existing
+input, pool, transaction, verification and serialization reservations. Evaluation
+records still have the existing 65,536-byte cap; larger reports fail before
+their scores can commit.
 
 Captures, complete verified circuits, scores and the proposed population commit
 in one existing journal transaction. Only acknowledged scores can be selected.
@@ -499,6 +513,18 @@ continues to export captures. Receipts additionally expose the committed best,
 historical/current evaluation counts and cumulative pool evictions. Export and
 all production execution remain native; the benchmark harness uses Python for
 coordination and independent checking.
+
+Constructor-enabled evaluation records retain `two_auxiliary` and
+`pre_two_aux_additions_by_stage`. Replay checks their settings and factor binding,
+stage costs, stop reasons, work-counter consistency and selected helper routes
+and trace. Exact circuit/factor/count verification remains mandatory. Recorded
+work counters do not independently prove that every negative candidate was
+searched; those traces are validated during execution and are not stored.
+
+Run `python3 tests/metal/two_aux_search.py --output build/two-aux/search-NEW`
+for bounded native qualification on Sun and CN122. It checks receipt-bound
+exports, resume, and standalone equality using the native score's factor-derived
+seed. Its host tests and protocol fixtures do not substitute for GPU execution.
 
 Cost-guided parent management is an FGM extension relative to the pinned
 upstream implementations described above. It introduces no kernels, basis

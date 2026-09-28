@@ -1,6 +1,7 @@
 #include "scheme_io.h"
 #include "journal.h"
 #include "pool.h"
+#include "two_aux_report_validation.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <array>
@@ -1538,6 +1539,8 @@ uint64_t AdmissionContext::verifyEvaluation(const Json &evaluation,const SchemeR
     auto digest=[](const Json &j){const auto &s=j.str();return s.size()==64&&s.find_first_not_of("0123456789abcdef")==std::string::npos;};
     if(producer.at("library_mode").str()!="metallib" || !digest(producer.at("executable_sha256")) ||
        !digest(producer.at("library_sha256")))throw std::runtime_error("invalid additive producer identity");
+    if(settings.has("constructor"))impl->charge(3*32768); // Bounded direction/trace/report replay, no closure search.
+    two_aux_report::validate(evaluation,expected,factors);
     return circuit.operations;
 }
 Json AdmissionContext::analyze(const SchemeRecord &s) { impl->shape(s); return impl->assess(s); }

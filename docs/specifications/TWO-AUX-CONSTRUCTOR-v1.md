@@ -4,14 +4,16 @@ Family identifier: `signed-two-aux-distinct-v1`.
 
 ## Implementation status
 
-Milestone 2 adds Metal closure and opt-in standalone evaluation to the host
-preparation, streamed route enumeration, validation and oracle supplied by
-Milestone 1. Production closure runs on the GPU. The independent host closure
-remains confined to tests. Additive-search admission of the option is deferred
-to its separate Milestone 3 qualification.
+Milestones 1 and 2 supply host preparation, streamed route enumeration,
+validation, an independent oracle, and opt-in standalone Metal construction.
+Milestone 3 connects the same evaluator to native additive search, with report
+validation, history binding and simultaneous resource admission. Production
+closure runs on the GPU. Independent host closure remains confined to tests.
 
 The Milestone 2 implementation base is the reviewed Milestone 1 merge,
-`2cfdf3acd0e7d5684802a8cfc0da151fbc90d513`. The randomized pair reducer already
+`2cfdf3acd0e7d5684802a8cfc0da151fbc90d513`. Milestone 3 starts from the reviewed
+Milestone 2 merge, `585972cbaa7f7bd664c817e3ce6fdb5ebf650cbe`.
+The randomized pair reducer already
 permits several non-target intermediates. This family extends the explicit
 zero-/one-auxiliary constructor's systematic coverage.
 
@@ -203,7 +205,7 @@ maps with inactive inputs require actual cost comparison unless a bound is met.
 
 The option requires `schemes: 1`, `max_flips: 0`, a positive integer raw budget
 at most 1,047,552, and the exact family identifier. Unknown fields, unsupported
-strategies/domains/shapes and additive-search use are rejected before Metal
+strategies/domains/shapes are rejected before Metal
 initialization. Omission creates no new constructor buffers or dispatches.
 
 Replace a stage only after exact verification and only on strict improvement.
@@ -251,8 +253,33 @@ copies, the old preparation temporary, stream state and bounded arithmetic
 scratch. Circuit/report JSON, replay matrices, transposition, identity and
 serialization remain in the existing `128 * record_bytes` reservation, also
 charged while result artifacts are retained. These are accounted allocations,
-not measured process/system memory or GPU private scratch. Native search keeps
-its current settings until its resident-buffer qualification in Milestone 3.
+not measured process/system memory or GPU private scratch. Native search adds
+resident generation buffers to the maximum evaluator phase, retaining the
+preparation allowance during runtime admission and capture serialization.
+
+## Native additive integration
+
+The same optional object is admitted under `evaluation.constructor`. Additive
+evaluation keeps its existing signed 3x3 rank-23, `combined`, `schemes: 1`,
+`max_flips: 0` and `target_additions: 0` requirements. Each canonical history
+identity is scored once in its first effective ordered presentation. The
+factor-derived evaluator seed, generation RNG, captures, parent selection and
+incumbent tie behavior are unchanged.
+
+Scores retain the complete two-helper reports and pre-extension stage counts.
+Native acceptance and journal replay check the optional settings, factor identity,
+versions, costs, bounds, stop/coverage classifications, counter consistency and
+the selected witness's routes, dependencies, arithmetic, availability and live
+helper count. This bounded trace replay performs no closure search. Final circuit
+reconstruction verifies the effective factors, tensor and emitted operation count.
+Stored summaries are not independent certificates of exhaustive failure: negative
+witnesses are checked during the original dispatch and are not retained in history.
+
+The existing contract binds the complete evaluation settings and producer hashes.
+Enabling/disabling the option or changing its family, budget or implementation
+build requires a fresh history. No migration or reuse of old scores is provided.
+The record, transaction and pool limits remain unchanged; report-size or resource
+failure prevents the pending score/population transaction from committing.
 
 ## Calibration and acceptance gates
 

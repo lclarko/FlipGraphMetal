@@ -136,10 +136,10 @@ build/workflow/test_host_rng: tests/workflow/host_rng.cpp makefile scripts/build
 build/workflow/test_execution: tests/workflow/execution.cpp $(WORKFLOW_SOURCES) $(SHADER_SOURCES) src/metal/host.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -DFGM_JOURNAL_TESTING -DFGM_SEARCH_TESTING -Isrc/workflow tests/workflow/execution.cpp $(NATIVE_WORKFLOW) -o $@
 
-build/workflow/test_pool: src/workflow/journal.cpp src/workflow/journal.h tests/workflow/pool.cpp src/workflow/pool.h src/workflow/run_config.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+build/workflow/test_pool: src/workflow/journal.cpp src/workflow/journal.h tests/workflow/pool.cpp src/workflow/pool.h src/workflow/run_config.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/two_aux_report_validation.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow tests/workflow/pool.cpp src/workflow/scheme_io.cpp src/workflow/journal.cpp -o $@
 
-build/workflow/test_journal: tests/workflow/journal.cpp src/workflow/journal.cpp src/workflow/journal.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+build/workflow/test_journal: tests/workflow/journal.cpp src/workflow/journal.cpp src/workflow/journal.h src/workflow/scheme_io.cpp src/workflow/scheme_io.h src/workflow/two_aux_report_validation.h src/workflow/json.h makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -DFGM_JOURNAL_TESTING -Isrc/workflow tests/workflow/journal.cpp src/workflow/journal.cpp src/workflow/scheme_io.cpp -o $@
 
 test-workflow: scheme-tool $(WORKFLOW_TEST_DRIVERS)
