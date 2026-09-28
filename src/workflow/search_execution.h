@@ -108,6 +108,8 @@ template<class S> void executeSearch(PreparedRun &run) {
     auto reserved=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
         configCheckedAdd(configCheckedMultiply(config.history.transactionBytes,4),config.history.indexMemoryBytes));
     if(config.additive)reserved=configCheckedAdd(reserved,configCheckedMultiply(config.limits.record,128));
+    if(config.additive && config.evaluation->constructor)
+        reserved=configCheckedAdd(reserved,TwoAuxPreparationBytes);
     const auto planned=uint64_t(run.receipt.at("planned_buffer_bytes").num());
     if(configCheckedAdd(configCheckedAdd(planned,uint64_t(run.receipt.at("admission_content_bytes").num())),reserved)>config.execution.memoryBytes)
         throw Resource("run memory budget cannot reserve pools and transactions");
@@ -147,6 +149,7 @@ template<class S> void executeSearch(PreparedRun &run) {
         auto settings=*config.evaluation;
         const auto factorsId=serialization.identity(member.scheme,false);
         settings.seed=evaluationSeed(settings.seed,factorsId);
+        if(settings.constructor)run.receipt.object.erase("two_auxiliary");
 #ifdef FGM_SEARCH_TESTING
         Json result=searchTestEvaluation(member.scheme,settings,run.receipt);
 #else
@@ -161,6 +164,8 @@ template<class S> void executeSearch(PreparedRun &run) {
         value.object["additions_by_stage"]=result.at("verified_circuit_additions_by_stage");
         for(const auto *key:{"circuit","phase_microseconds","construction","stage_sources","baseline_additions",
                             "baseline_additions_by_stage","rounds_completed","flip_attempts","flips_applied"})
+            value.object[key]=result.at(key);
+        if(settings.constructor)for(const auto *key:{"two_auxiliary","pre_two_aux_additions_by_stage"})
             value.object[key]=result.at(key);
         serialization.verifyEvaluation(value,member.scheme);
         if(dump(value).size()>65536)throw Resource("evaluation exceeds reserved record capacity");

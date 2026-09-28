@@ -2,6 +2,7 @@
 #include "../../src/metal/host.h"
 #include "../../src/workflow/reduction_execution.h"
 #include "two_aux_constructor.h"
+#include "../../src/workflow/two_aux_report_validation.h"
 // Shared by the existing host and GPU test drivers; never used in production.
 fgm::Json constructorTest(const fgm::Json &request,bool gpu=false) {
     fgm::Matrix targets;
@@ -60,6 +61,21 @@ int main() {
         std::string bytes; char byte;
         while(std::cin.get(byte)) { if(bytes.size()==1048576) throw fgm::Resource("test input bound"); bytes+=byte; }
         auto request=fgm::Parser(bytes).parse();
+        if(request.has("two_aux_report")) {
+            fgm::AdmissionContext context;
+            auto source=context.normalized(context.fromJson(request.at("effective"),"ZT"));
+            if(!context.verify(source))throw std::runtime_error("invalid report test factors");
+            fgm::two_aux_report::validate(request.at("two_aux_report"),source,context.identity(source,false));
+            std::cout<<"validated\n";return 0;
+        }
+        if(request.has("evaluation")) {
+            fgm::AdmissionLimits limits;
+            if(request.has("work"))limits.work=uint64_t(request.at("work").num());
+            fgm::AdmissionContext context(limits);
+            auto source=context.fromJson(request.at("effective"),"ZT");
+            const auto count=context.verifyEvaluation(request.at("evaluation"),source);
+            std::cout<<count<<'\n';return 0;
+        }
         if(request.has("two_aux")) {
             std::cout<<fgm::dump(twoAuxConstructorTest(request))<<'\n'; return 0;
         }

@@ -112,7 +112,6 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
                 throw std::runtime_error("additive-search requires fixed signed 3x3 rank-23 alternatives with excursion at most two");
             result.evaluation=parseReductionSettings(value.at("evaluation"));
             const auto &r=*result.evaluation;
-            if(r.constructor) throw std::runtime_error("two-auxiliary additive evaluation requires Milestone 3 qualification");
             if(r.strategy!="combined" || r.schemes!=1 || r.maxFlips || r.targetAdditions)
                 throw std::runtime_error("additive evaluation requires combined fixed factors and disabled reducer target");
             if(value.has("circuit_target") && value.at("circuit_target").kind!=Json::Null)
@@ -373,7 +372,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     if (config.policy) for (auto dimension : config.policy->dimensions) packedEligible &= dimension == 3;
     if (config.execution.backend == "packed" && !packedEligible)
         throw std::runtime_error("configuration is not eligible for signed 3x3 packed execution");
-    uint64_t allocation = 0;
+    uint64_t allocation = 0, residentSearch = 0, evaluatorBuffers = 0;
     if (config.policy) {
         const auto schemeSize = domainOf(config) == "ZT" ? layout.signedSchemeBytes : layout.f2SchemeBytes;
         // Current, best, mandatory and optional capture states; local device
@@ -384,9 +383,11 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         if(packedEligible&&config.execution.backend!="general")allocation=configCheckedAdd(allocation,
             configCheckedMultiply((config.execution.workers+31)/32*32,26400));
         if(config.additive) {
+            residentSearch=allocation;
             const auto lanes=config.evaluation->reducers;
             uint64_t reduction=configCheckedAdd(configCheckedMultiply(lanes+1,layout.reducerLaneBytes),configCheckedMultiply(lanes,layout.rngBytes));
             reduction=configCheckedAdd(reduction,configCheckedMultiply(lanes,3*sizeof(int)));
+            evaluatorBuffers=reduction;
             allocation=configCheckedAdd(allocation,reduction);
         }
     } else {
@@ -394,6 +395,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
             layout.reducerLaneBytes), configCheckedMultiply(config.reduction->reducers, layout.rngBytes));
         if(config.reduction->maxFlips)allocation=configCheckedAdd(allocation,configCheckedMultiply(config.reduction->schemes,16));
         allocation=configCheckedAdd(allocation,configCheckedMultiply(config.reduction->reducers,3*sizeof(int)));
+        evaluatorBuffers=allocation;
     }
     // Evaluator phases are serial. The new tile is never live with baseline
     // reducer buffers; search generation buffers remain resident separately.
@@ -403,7 +405,7 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     if(twoAux) {
         if(!layout.twoAuxSharedBytes) throw Resource("missing two-auxiliary execution layout");
         constructorShared=layout.twoAuxSharedBytes;
-        allocation=std::max(allocation,constructorShared);
+        allocation=configCheckedAdd(residentSearch,std::max(evaluatorBuffers,constructorShared));
     }
     uint64_t reservedHost=0;
     if(config.policy)reservedHost=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
