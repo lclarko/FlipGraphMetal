@@ -1,6 +1,6 @@
 {
   "schema": "fgm3-additive-comparison-protocol-v1",
-  "revision": 1,
+  "revision": 2,
   "population_count": 16,
   "population_selection_seed": 7,
   "seeds": [7, 19, 41],
@@ -20,7 +20,7 @@
   "qualification_max_seconds": 30,
   "qualification_total_seconds": 900,
   "qualification_workers": [2, 1],
-  "chunk_allowance_rule": "ceil(1.25 * slower qualified initialization or resume elapsed seconds) + 2",
+  "chunk_allowance_rule": "ceil(1.25 * maximum qualified (elapsed_seconds - headroom_wait_seconds)) + 2",
   "execution": {
     "workers": 2,
     "batch_steps": 32,

@@ -410,6 +410,75 @@ class AdditiveWorkflowTest(unittest.TestCase):
             self.assertGreater(result['total_elapsed_seconds_before_finalization'],
                                result['final_elapsed_seconds'])
 
+    def test_qualification_allowance_excludes_headroom_but_charges_elapsed_window(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);population=root/'population';population.mkdir()
+            b.write_json(population/'population.json',dict(entries=[dict(canonical_id=str(i)) for i in range(16)]))
+            binaries=root/'binaries';binaries.mkdir();(binaries/'flip_graph').write_text('binary')
+            clock=Clock()
+            def chunk(output,population,binaries,protocol,selector,seed,workers,arm,index,state,
+                      global_deadline,arm_deadline,allowance,**kwargs):
+                if arm.startswith('qualification/'):
+                    duration,wait=(45,30) if selector=='uniform' and index==0 else (10,0)
+                    clock.sleep(duration)
+                    if index==0:state['evaluations']=[{} for _ in range(16)]
+                    return dict(status='verified',headroom_wait_seconds=wait,best_additions=55,
+                                new_installations=[],new_observations=[])
+                if index:
+                    return dict(status='unrun',stop_reason='injected no further work',headroom_wait_seconds=0)
+                clock.sleep(15)
+                state['evaluations']=[{} for _ in range(16)]
+                return dict(status='verified',headroom_wait_seconds=5,best_additions=55,
+                            new_installations=[],new_observations=[],verified_seconds=clock.now())
+            with (mock.patch.object(b,'fgm3_population',return_value={}),
+                  mock.patch.object(b,'fgm3_build_files',return_value={'flip_graph':b.digest(binaries/'flip_graph')}),
+                  mock.patch.object(b,'fgm3_run_chunk',side_effect=chunk),
+                  mock.patch.object(b,'fgm3_summarize_arm',side_effect=lambda arm,*args:
+                      arm.update(endpoints={'90':dict(feedback_installations=0)})),
+                  mock.patch.object(b,'host_machine_identity',return_value={'test':True})):
+                result=b.execute_fgm3(population,binaries,root/'out',clock=clock.now,
+                    sleeper=clock.sleep,guard=lambda *args:None,memory_sample=lambda timeout:0)
+            pilot=result['qualification']
+            self.assertEqual(pilot['status'],'qualified')
+            self.assertEqual(pilot['chunk_allowance_seconds'],21)
+            self.assertEqual(pilot['slower_observed_seconds'],45)
+            self.assertEqual(pilot['slower_work_seconds'],15)
+            self.assertEqual(pilot['slower_work_total_seconds'],45)
+            self.assertEqual(pilot['slower_work_headroom_wait_seconds'],30)
+            self.assertEqual(pilot['attempts'][0]['chunks'][0]['elapsed_seconds'],45)
+            self.assertEqual(pilot['elapsed_seconds'],75)
+            self.assertTrue(result['complete'])
+            self.assertEqual(len(result['arms']),6)
+            self.assertTrue(all(arm['elapsed_seconds']>=90 and arm['chunks'][0]['headroom_wait_seconds']==5
+                                and arm['chunks'][0]['elapsed_seconds']==15 for arm in result['arms']))
+            self.assertGreaterEqual(result['total_elapsed_seconds_before_finalization'],75+6*90)
+            self.assertIn('45.000 s elapsed minus 30.000 s headroom wait',(root/'out/report.md').read_text())
+
+    def test_qualification_rejects_impossible_elapsed_headroom_pairs(self):
+        for elapsed,wait in ((0,0),(45,45),(45,46),(45,-1),(True,0),(45,True),
+                             (float('nan'),0),(45,float('inf')),('45',0)):
+            with self.subTest(elapsed=elapsed,wait=wait),self.assertRaisesRegex(ValueError,'timing is invalid'):
+                b.fgm3_qualification_work_seconds(dict(elapsed_seconds=elapsed,headroom_wait_seconds=wait))
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);population=root/'population';population.mkdir()
+            b.write_json(population/'population.json',dict(entries=[dict(canonical_id=str(i)) for i in range(16)]))
+            binaries=root/'binaries';binaries.mkdir();(binaries/'flip_graph').write_text('binary')
+            clock=Clock()
+            def impossible(*args,**kwargs):
+                state=args[9]
+                state['evaluations']=[{} for _ in range(16)]
+                clock.sleep(45)
+                return dict(status='verified',headroom_wait_seconds=45,best_additions=55)
+            with (mock.patch.object(b,'fgm3_population',return_value={}),
+                  mock.patch.object(b,'fgm3_build_files',return_value={'flip_graph':b.digest(binaries/'flip_graph')}),
+                  mock.patch.object(b,'fgm3_run_chunk',side_effect=impossible),
+                  mock.patch.object(b,'host_machine_identity',return_value={'test':True})):
+                result=b.execute_fgm3(population,binaries,root/'out',clock=clock.now,
+                    sleeper=clock.sleep,guard=lambda *args:None,memory_sample=lambda timeout:0)
+            self.assertEqual(result['qualification']['status'],'failed')
+            self.assertIn('timing is invalid',result['error'])
+            self.assertEqual(result['arms'],[])
+
     def test_orchestration_does_not_complete_zero_initialization_arms(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);population=root/'population';population.mkdir()

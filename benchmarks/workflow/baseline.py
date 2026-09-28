@@ -2899,6 +2899,16 @@ def fgm3_chunk_allowance(seconds):
     return math.ceil(1.25*max(seconds))+2
 
 
+def fgm3_qualification_work_seconds(record):
+    elapsed=record.get('elapsed_seconds')
+    wait=record.get('headroom_wait_seconds')
+    if (type(elapsed) not in (int,float) or type(wait) not in (int,float) or
+            not math.isfinite(elapsed) or not math.isfinite(wait) or
+            elapsed<=0 or wait<0 or wait>=elapsed):
+        raise ValueError('qualification elapsed/headroom timing is invalid')
+    return elapsed-wait
+
+
 def fgm3_admission(now, arm_deadline, global_deadline, allowance, protocol):
     if arm_deadline-now <= allowance:
         return 'arm admission allowance'
@@ -3500,8 +3510,14 @@ def fgm3_report(measurement):
         lines.append('Stop reason: '+measurement['stop_reason']+'.')
     pilot=measurement.get('qualification',{})
     if pilot:
-        lines.append('Qualification: '+pilot.get('status','incomplete')+
-                     f"; workers {pilot.get('workers','unselected')}; chunk allowance {pilot.get('chunk_allowance_seconds','unfrozen')} s.")
+        qualification_line=('Qualification: '+pilot.get('status','incomplete')+
+                            f"; workers {pilot.get('workers','unselected')}; chunk allowance {pilot.get('chunk_allowance_seconds','unfrozen')} s")
+        if 'slower_work_seconds' in pilot:
+            qualification_line+=(f" from {pilot['slower_work_seconds']:.3f} s work "
+                f"({pilot['slower_work_total_seconds']:.3f} s elapsed minus "
+                f"{pilot['slower_work_headroom_wait_seconds']:.3f} s headroom wait); "
+                f"slowest total elapsed {pilot['slower_observed_seconds']:.3f} s")
+        lines.append(qualification_line+'.')
     measured=(str(measurement.get('final_elapsed_seconds',measurement.get('elapsed_seconds','unavailable')))+' s'
               if 'measurement_started_monotonic' in measurement else 'not started')
     lines.append(f"Preparation {measurement.get('preparation_seconds','unavailable')} s; qualification "
@@ -3622,6 +3638,7 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
         qualification_started=clock()
         for workers in protocol['qualification_workers']:
             observations=[]
+            work_observations=[]
             attempt=dict(workers=workers,status='running',chunks=[])
             qualification['attempts'].append(attempt)
             save()
@@ -3645,7 +3662,9 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
                         suitable=False
                         hard_failure=True
                         break
+                    work=fgm3_qualification_work_seconds(record)
                     observations.append(record['elapsed_seconds'])
+                    work_observations.append(work)
                     if record['best_additions']<=protocol['circuit_target']:
                         qualification['status']='target-attained'
                         attempt['status']='target-attained'
@@ -3653,10 +3672,10 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
                         data['stop_reason']='independently verified pilot circuit target'
                         stop_gpu=True
                         return data
-                    if record['elapsed_seconds']-record['headroom_wait_seconds']>protocol['qualification_max_seconds']:
+                    if work>protocol['qualification_max_seconds']:
                         suitable=False
                 if hard_failure:break
-            allowance=fgm3_chunk_allowance(observations) if observations else None
+            allowance=fgm3_chunk_allowance(work_observations) if work_observations else None
             if allowance is not None and allowance>=protocol['arm_seconds']:
                 suitable=False
             attempt['status']='failed' if hard_failure else 'qualified' if suitable else 'unsuitable'
@@ -3666,9 +3685,15 @@ def execute_fgm3(population_path, binary_dir, output, *, clock=None, sleeper=Non
                 stop_gpu=True
                 break
             if suitable:
+                slow_work_index=max(range(len(work_observations)),key=lambda index:work_observations[index])
                 qualification.update(status='qualified',workers=workers,
                     chunk_allowance_seconds=allowance,
-                    slower_observed_seconds=max(observations))
+                    slower_observed_seconds=max(observations),
+                    slower_work_seconds=work_observations[slow_work_index],
+                    slower_work_total_seconds=observations[slow_work_index],
+                    slower_work_headroom_wait_seconds=(observations[slow_work_index]-
+                                                        work_observations[slow_work_index]),
+                    allowance_basis='ceil(1.25 * max(completed elapsed minus headroom wait)) + 2')
                 break
             if workers==1:
                 qualification['status']='unsuitable'

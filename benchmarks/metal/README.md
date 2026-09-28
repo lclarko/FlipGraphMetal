@@ -352,8 +352,18 @@ all generated histories remain local and uncommitted.
 Qualification exercises initialization and resume for both selectors at two
 workers and four 32-step batches. The fixed reducer quantum does not change.
 If complete work exceeds 30 seconds, qualification tries one worker once. A
-resource guard failure stops admission. The slower qualified chunk freezes the
-admission allowance at `ceil(1.25 * elapsed_seconds) + 2`.
+resource guard failure stops admission. For each qualified chunk, work duration
+is `elapsed_seconds - headroom_wait_seconds`. The admission allowance is
+`ceil(1.25 * maximum work duration) + 2`. Only explicit prelaunch headroom waiting
+is excluded from calibration; configuration, startup, replay, native work,
+exports, independent verification and persistence remain included. The measurement
+retains total elapsed, headroom waiting and the calibration basis. Invalid
+timing observations are rejected rather than clamped.
+
+Headroom waiting still consumes the full arm and global budgets. Admission is
+rechecked after waiting, and the memory thresholds, child guards, cleanup
+reserves and endpoint credit rules do not change. The allowance is an estimate;
+later history growth can increase replay and export costs.
 
 Preparation and qualification precede the measured 900-second envelope. The
 comparison has seeds 7/19/41, alternating paired arm order, fresh histories and
@@ -385,13 +395,20 @@ After a full-population resume hit the 3-GiB guard, a separately authorized
 qualification passed with a 4-GiB per-call limit and the original prelaunch
 ceiling. `guard.run(..., wired_limit_bytes=...)` supports that explicit override;
 the default and checked-in comparison protocol remain at 3 GiB. The frozen
-qualification is retained under `build/fgm3/qualification-4g-01/`. No measured
-comparison completed: the first attempt stopped during uniform resume at the
+qualification is retained under `build/fgm3/qualification-4g-01/`. The first
+measured attempt stopped during uniform resume at the
 native scan budget. Its earlier verified results and failed attempt are retained
 under `build/fgm3/comparison-02/`. A fresh attempt with a 1-GiB read budget,
 retained under `build/fgm3/comparison-03/`, completed five arms with 180 verified
 evaluations and best cost 55. One arm could not launch within the headroom
 admission window, leaving the matrix incomplete. The qualification wait also
-increased the frozen chunk allowance to 59 seconds. Selection benefit remains
-inconclusive. Retained-candidate and qualification results are reported
+increased the frozen chunk allowance to 59 seconds, leaving that comparison
+inconclusive.
+
+With headroom waiting excluded from calibration, `build/fgm3/comparison-04/`
+completed all six arms in 540.125 seconds, after 75.108 seconds of preparation
+and qualification. Its frozen allowance was 23 seconds; all 307 measured
+evaluations were independently verified by their endpoints. Best cost remained
+55. This completed measurement is separate from the earlier incomplete attempts.
+Retained-candidate and qualification results are reported
 in [performance notes](../../docs/performance.md#fgm-3-retained-candidates-and-native-search).
