@@ -115,7 +115,7 @@ build/metal/scheme_tool: $(WORKFLOW_SOURCES) makefile scripts/build_config.py $(
 
 WORKFLOW_TEST_DRIVERS = build/workflow/test_run_config build/workflow/test_host_rng build/workflow/test_execution build/workflow/test_journal build/workflow/test_pool build/workflow/test_reduction_result
 
-build/workflow/test_reduction_result: tests/workflow/reduction_result.cpp $(WORKFLOW_SOURCES) $(SHADER_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
+build/workflow/test_reduction_result: tests/workflow/reduction_result.cpp tests/workflow/two_aux_constructor.h $(WORKFLOW_SOURCES) $(SHADER_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
 	@$(call run_build,$(WORKFLOW_CONFIG)) $(WORKFLOW_CXX) $(WORKFLOW_FLAGS) -Isrc/workflow -Isrc/metal tests/workflow/reduction_result.cpp src/workflow/scheme_io.cpp src/workflow/journal.cpp -o $@
 
 build/workflow/test_controlled: tests/workflow/controlled.cpp src/workflow/run_config.h src/workflow/json.h $(SHADER_SOURCES) makefile scripts/build_config.py $(WORKFLOW_CONFIG) FORCE
