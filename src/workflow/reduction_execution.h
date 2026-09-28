@@ -60,11 +60,13 @@ inline SchemeRecord verifyReductionCircuit(const Json &circuit,const SchemeRecor
         throw std::runtime_error("fixed reduction circuit changed effective input factors");
     return result;
 }
-// All extension allocations are released before the next phase. Their maximum
-// shared storage is below the already planned baseline reducer population.
+// Evaluator phases release their shared allocations before the next phase.
 template<class T> struct ReductionBuffer {
     T *data=nullptr;
-    explicit ReductionBuffer(size_t count) { metalAllocate(&data,count*sizeof(T)); }
+    explicit ReductionBuffer(size_t count) {
+        if(count>SIZE_MAX/sizeof(T)) throw Resource("reduction allocation size overflow");
+        metalAllocate(&data,count*sizeof(T));
+    }
     ~ReductionBuffer() { if(data) metalFree(data); }
     ReductionBuffer(const ReductionBuffer&)=delete;
     ReductionBuffer& operator=(const ReductionBuffer&)=delete;
@@ -201,6 +203,9 @@ inline CircuitStage transposeStage(const CircuitStage &source,int inputs) {
     }
     return result;
 }
+} // namespace fgm
+#include "two_aux_execution.h"
+namespace fgm {
 inline uint32_t transposeSeed(uint32_t seed) {
     uint32_t value=seed^0xa511e9b3u; value^=value>>16; value*=0x7feb352du;
     value^=value>>15; value*=0x846ca68bu; value^=value>>16; return value?value:1;
@@ -226,7 +231,7 @@ inline CircuitStage pairTransposeGPU(const Matrix &target,const ReductionSetting
     auto parsed=Parser(encoded.str()).parse(); return {parsed.at("x"),parsed.at("x_fresh")};
 }
 inline void extendReduction(Json &result,const SchemeRecord &effective,const ReductionSettings &settings,
-                            int block,const AdmissionLimits &limits) {
+                            int block,const AdmissionLimits &limits,Json &receipt) {
     using PairReducer=fgm_constructor::PairReducer;
     using U=AdditionsReducer<350,250,32,2016>;
     using W=AdditionsReducer<64,500,175,61075>;
@@ -275,6 +280,43 @@ inline void extendReduction(Json &result,const SchemeRecord &effective,const Red
             if(stage) { if(p==2) transpose(*stage,"transpose-cancellation"); else select(*stage,p,"cancellation"); }
         }
     }
+    if(settings.constructor) {
+        result.object["pre_two_aux_additions_by_stage"]=result.at("verified_circuit_additions_by_stage");
+        auto &active=receipt.object["two_auxiliary"]; active=Json::dict();
+        AdmissionContext identity(limits);
+        active.object["effective_factors_id"]=Json(identity.identity(effective,false));
+        active.object["stages"]=Json::dict();
+        for(int p=0;p<3;++p) {
+            const std::string key=p==0?"u":p==1?"v":"wt", outputKey(1,"uvw"[p]);
+            auto &report=active.object["stages"].object[key];
+            report=twoAuxReport(*settings.constructor,key);
+            report.object["baseline_cost"]=result.at("baseline_additions_by_stage").at(outputKey);
+            const uint64_t incumbent=uint64_t(result.at("verified_circuit_additions_by_stage").at(outputKey).num());
+            report.object["incumbent_cost"]=Json(int64_t(incumbent));
+            report.object["final_cost"]=Json(int64_t(incumbent));
+            auto &phase=phases.object["two_aux_"+key]; phase=Json(int64_t(0));
+            ReceiptPhaseTimer phaseTimer(phase);
+            try {
+                auto prepared=prepareTwoAuxStage(effective.f[p],9,p==2,report);
+                if(reports.at(key).at("status").str()!="family-exhausted") {
+                    report.object["stop_reason"]=Json("smaller-family-succeeded");
+                    continue;
+                }
+                if(incumbent<=uint64_t(report.at("improvement_floor").num())) {
+                    report.object["stop_reason"]=Json("proved-no-improvement");
+                    continue;
+                }
+                auto stage=constructTwoAuxStageGPU(prepared,effective.f[p],p==2,incumbent,
+                    *settings.constructor,block,limits,report,dispatch,verification);
+                if(stage) select(*stage,p,p==2?"transpose-two-auxiliary":"two-auxiliary");
+                report.object["final_cost"]=result.at("verified_circuit_additions_by_stage").at(outputKey);
+            } catch(const std::exception &) {
+                report.object["stop_reason"]=Json("invocation-failed");
+                throw;
+            }
+        }
+        result.object["two_auxiliary"]=active;
+    }
     { ReductionPhaseTimer timer(verification,reductionVerificationField);
       int64_t total=0; for(const auto &stage:result.at("verified_circuit_additions_by_stage").object) total+=stage.second.num();
       result.object["verified_circuit_additions"]=Json(total);
@@ -297,7 +339,7 @@ inline Json evaluateReduction(const SchemeRecord &effective,const ReductionSetti
       if(!reducer.read(effective)) throw std::runtime_error("effective input exceeds signed reducer capacity");
       result=reducer.reduceBounded(settings.rounds,settings.noImprovements,settings.targetAdditions,limits,effective); }
     result.object["phase_microseconds"]=std::move(phases);
-    extendReduction(result,effective,settings,int(blockSize),limits);
+    extendReduction(result,effective,settings,int(blockSize),limits,receipt);
     return result;
 }
 
@@ -311,7 +353,7 @@ inline void executeReduction(PreparedRun &run) {
     std::string circuits;
     const std::filesystem::path circuitPath=run.config.output.string()+".circuits.jsonl";
     const uint64_t fixedBytes=configCheckedAdd(uint64_t(run.receipt.at("planned_buffer_bytes").num()),uint64_t(run.receipt.at("admission_content_bytes").num()));
-    const auto workspace=reductionWorkspaceBytes(run.config.limits.record);
+    const auto workspace=configCheckedAdd(reductionWorkspaceBytes(run.config.limits.record),settings.constructor?TwoAuxPreparationBytes:0);
     for(const auto &input:run.inputs) {
         const auto retained=configCheckedAdd(resultBytes,circuits.capacity());
         if(configCheckedAdd(configCheckedAdd(fixedBytes,retained),workspace)>run.config.execution.memoryBytes)

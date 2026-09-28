@@ -1,4 +1,15 @@
 #ifndef METAL_F2
+kernel void constructorTwoAuxClosureKernel(device const fgm_constructor::TwoAuxProblem *problem [[buffer(0)]],
+    device const fgm_constructor::TwoAuxTask *tasks [[buffer(1)]],
+    device fgm_constructor::TwoAuxWitness *witnesses [[buffer(2)]],
+    constant int &count [[buffer(3)]],device int *errors [[buffer(30)]],
+    uint index [[thread_position_in_grid]]) {
+    if(index>=uint(count)) return;
+    fgm_constructor::TwoAuxWitness witness{};
+    fgm_constructor::closeTwoAux(*problem,tasks[index],witness);
+    storeObject(witnesses+index,witness);
+    errors[index]=witness.status<0?2:0;
+}
 kernel void constructorClosureKernel(device const fgm_constructor::Problem *problem [[buffer(0)]],
     device fgm_constructor::Witness *results [[buffer(1)]],constant int &first [[buffer(2)]],
     constant int &count [[buffer(3)]],device int *errors [[buffer(30)]],uint index [[thread_position_in_grid]]) {

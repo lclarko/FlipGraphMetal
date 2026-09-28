@@ -39,6 +39,84 @@ struct TwoAuxWitness {
     Gate gates[25];
 };
 
+// Shared-buffer ABI. Compile these checks in both the host and Metal sources.
+static_assert(sizeof(Gate)==20,"two-aux gate ABI");
+static_assert(__builtin_offsetof(TwoAuxProblem,inputs)==0 &&
+              __builtin_offsetof(TwoAuxProblem,directions)==4 &&
+              __builtin_offsetof(TwoAuxProblem,outputs)==8 &&
+              __builtin_offsetof(TwoAuxProblem,operationCount)==12 &&
+              __builtin_offsetof(TwoAuxProblem,vectors)==16 &&
+              __builtin_offsetof(TwoAuxProblem,outputDirection)==1168 &&
+              __builtin_offsetof(TwoAuxProblem,outputSign)==1260 &&
+              __builtin_offsetof(TwoAuxProblem,operations)==1352 && sizeof(TwoAuxProblem)==21192,
+              "two-aux problem ABI");
+static_assert(__builtin_offsetof(TwoAuxTask,rawSlot)==0 &&
+              __builtin_offsetof(TwoAuxTask,helpers)==8 &&
+              __builtin_offsetof(TwoAuxTask,creations)==80 &&
+              __builtin_offsetof(TwoAuxTask,operationCount)==120 &&
+              __builtin_offsetof(TwoAuxTask,operations)==124 && sizeof(TwoAuxTask)==2728,
+              "two-aux task ABI");
+static_assert(__builtin_offsetof(TwoAuxWitness,status)==0 &&
+              __builtin_offsetof(TwoAuxWitness,count)==4 &&
+              __builtin_offsetof(TwoAuxWitness,available)==8 &&
+              __builtin_offsetof(TwoAuxWitness,ruleChecks)==16 &&
+              __builtin_offsetof(TwoAuxWitness,sweeps)==24 &&
+              __builtin_offsetof(TwoAuxWitness,gates)==28 && sizeof(TwoAuxWitness)==528,
+              "two-aux witness ABI");
+
+#ifdef __METAL_VERSION__
+
+inline bool twoAuxApply(LOCAL TwoAuxWitness &w,LOCAL const Gate &g,int inputs,int directions,
+                        LOCAL bool &changed) {
+    if(g.out<inputs || g.out>=directions+2 || g.left<0 || g.left>=directions+2 ||
+       g.right<0 || g.right>=directions+2 || g.left>=g.right) {
+        w.status=-1; return false;
+    }
+    ++w.ruleChecks;
+    const uint64_t result=uint64_t(1)<<g.out;
+    if((w.available&result) || !(w.available&(uint64_t(1)<<g.left)) ||
+       !(w.available&(uint64_t(1)<<g.right))) return true;
+    if(w.count>=TwoAuxMaxGates) { w.status=-1; return false; }
+    w.gates[w.count++]=g;
+    w.available|=result;
+    changed=true;
+    return true;
+}
+
+// The host supplies all permitted rules. This device closure only tracks
+// reachability and records the first applicable gate in fixed scan order.
+inline void closeTwoAux(GLOBAL const TwoAuxProblem &p,GLOBAL const TwoAuxTask &task,
+                        LOCAL TwoAuxWitness &w) {
+    w.status=0; w.count=0; w.available=0; w.ruleChecks=0; w.sweeps=0;
+    if(p.inputs<1 || p.inputs>9 || p.directions<p.inputs || p.directions>32 ||
+       p.outputs<0 || p.outputs>23 || p.operationCount<0 || p.operationCount>992 ||
+       task.operationCount<0 || task.operationCount>TwoAuxMaxExtraRules) {
+        w.status=-1; return;
+    }
+    w.available=(uint64_t(1)<<p.inputs)-1;
+    const uint64_t required=(uint64_t(1)<<p.directions)-1;
+    bool changed=true;
+    while(changed && (w.available&required)!=required) {
+        if(w.sweeps>=TwoAuxMaxGates+1) { w.status=-1; return; }
+        changed=false; ++w.sweeps;
+        for(int i=0;i<p.operationCount;++i) {
+            Gate gate=p.operations[i];
+            if(!twoAuxApply(w,gate,p.inputs,p.directions,changed)) return;
+        }
+        for(int i=0;i<task.operationCount;++i) {
+            Gate gate=task.operations[i];
+            if(!twoAuxApply(w,gate,p.inputs,p.directions,changed)) return;
+        }
+        for(int i=0;i<2;++i) {
+            Gate gate=task.creations[i];
+            if(!twoAuxApply(w,gate,p.inputs,p.directions,changed)) return;
+        }
+    }
+    w.status=(w.available&required)==required?1:0;
+}
+
+#endif
+
 #ifndef __METAL_VERSION__
 
 static_assert(std::is_standard_layout_v<TwoAuxProblem> && std::is_trivial_v<TwoAuxProblem>);
@@ -50,19 +128,6 @@ static_assert(sizeof(TwoAuxTask::operations)/sizeof(Gate)==TwoAuxMaxExtraRules);
 static_assert(sizeof(TwoAuxWitness::gates)/sizeof(Gate)==TwoAuxMaxGates);
 static_assert(32*31*33*32==TwoAuxMaxPairSlots);
 static_assert(992+TwoAuxMaxExtraRules+2==TwoAuxMaxRules);
-// Host ABI guards for the shared-buffer records. Metal layout needs its own
-// compile/runtime check before this header is used by a kernel.
-static_assert(sizeof(Gate)==20);
-static_assert(offsetof(TwoAuxProblem,vectors)==16 &&
-              offsetof(TwoAuxProblem,outputDirection)==1168 &&
-              offsetof(TwoAuxProblem,operations)==1352 && sizeof(TwoAuxProblem)==21192);
-static_assert(offsetof(TwoAuxTask,helpers)==8 &&
-              offsetof(TwoAuxTask,creations)==80 &&
-              offsetof(TwoAuxTask,operations)==124 && sizeof(TwoAuxTask)==2728);
-static_assert(offsetof(TwoAuxWitness,available)==8 &&
-              offsetof(TwoAuxWitness,ruleChecks)==16 &&
-              offsetof(TwoAuxWitness,gates)==28 && sizeof(TwoAuxWitness)==528);
-
 enum class TwoAuxFilter { None, FirstInvalid, SecondInvalid, Symmetry };
 
 struct TwoAuxStats {

@@ -4,14 +4,14 @@ Family identifier: `signed-two-aux-distinct-v1`.
 
 ## Implementation status
 
-Milestone 1 supplies shared bounded representations, host relation preparation,
-a streaming route enumerator, witness validation, and independent host tests.
-The host closure used by these tests lives under `tests/workflow`. Production
-evaluation is unchanged. There is no new GPU kernel, production CPU closure,
-configuration option, search score, or campaign enablement in this milestone.
+Milestone 2 adds Metal closure and opt-in standalone evaluation to the host
+preparation, streamed route enumeration, validation and oracle supplied by
+Milestone 1. Production closure runs on the GPU. The independent host closure
+remains confined to tests. Additive-search admission of the option is deferred
+to its separate Milestone 3 qualification.
 
-The inspected implementation base is
-`226b57cd0c2933037a86c8a870372ba2d5a6e4cd`. The randomized pair reducer already
+The Milestone 2 implementation base is the reviewed Milestone 1 merge,
+`2cfdf3acd0e7d5684802a8cfc0da151fbc90d513`. The randomized pair reducer already
 permits several non-target intermediates. This family extends the explicit
 zero-/one-auxiliary constructor's systematic coverage.
 
@@ -96,8 +96,7 @@ independent symmetry. At each returned task and at stream exhaustion:
 rawScanned = firstInvalid + secondInvalid + symmetryFiltered + prepared
 ```
 
-No list of all pairs or witnesses is materialized. Production integration will
-use a recommended 65,536-slot prefix per eligible stage and tiles of at most 128
+No list of all pairs or witnesses is materialized. Production uses a recommended 65,536-slot prefix per eligible stage and tiles of at most 128
 prepared candidates, flushing partial tiles without rounding the raw budget up.
 
 ## Closure and witness validation
@@ -109,7 +108,7 @@ Availability grows monotonically, so this computes reachability for the fixed
 route pair. Complete enumeration covers the declared finite family; a prefix
 establishes only partial coverage. Neither is a general optimality certificate.
 
-Production closure will execute on Metal. Host preparation and witness
+Production closure executes on Metal. Host preparation and witness
 validation do not supply a production CPU fallback.
 
 Validate every returned trace before accepting any result from its dispatch:
@@ -167,21 +166,21 @@ The coefficient admission bound is `M <= floor(INT32_MAX/4)`, with
 helpers by `3M`, and helper-pair calculations by `5M`. Use `int64` for sums,
 differences, normalization, and replay; range-check stored helpers before
 converting to `int32`. Because every operand is an admitted `int32` value, these
-wide pair operations cannot overflow `int64`. The kernel will consume rules
+wide pair operations cannot overflow `int64`. The kernel consumes rules
 and masks without computing coefficient vectors.
 
 The raw and filtered work bounds are not latency estimates. A 65,536-slot prefix
 permits at most 1,915,224,064 GPU rule checks, plus separate host validation work.
 
-Shared structs are separate from the old constructor types. Exact ABI and
-padded-dispatch allocation checks belong to GPU integration. Account for
+Shared structs are separate from the old constructor types. Host and Metal builds assert identical sizes and offsets. The admitted
+128-task tile includes a 1,024-lane padded error buffer. Account for
 resident generation buffers, per-thread scratch, host preparation, verification,
 serialization, pools, indexes, and transactions simultaneously. Old static
 allocation assertions do not prove that the new phase fits.
 
-## Later evaluator integration
+## Standalone evaluator integration
 
-Milestone 2 will add an optional `constructor` object under reduction settings:
+Milestone 2 adds an optional `constructor` object under reduction settings:
 
 ```json
 {"family":"signed-two-aux-distinct-v1","max_pair_slots":65536}
@@ -202,11 +201,58 @@ for production tensor-valid W maps; the eligible family cost is `m+2+q-9`.
 These conditions justify first-success stopping in production. Generalized test
 maps with inactive inputs require actual cost comparison unless a bound is met.
 
+The option requires `schemes: 1`, `max_flips: 0`, a positive integer raw budget
+at most 1,047,552, and the exact family identifier. Unknown fields, unsupported
+strategies/domains/shapes and additive-search use are rejected before Metal
+initialization. Omission creates no new constructor buffers or dispatches.
+
 Replace a stage only after exact verification and only on strict improvement.
 Incumbents win ties. Full family failure, a completed raw prefix, a proved
 no-improvement bound, and infrastructure/numeric/witness failure are distinct.
 Retain exact ordered-factor, tensor, count, work, coverage, stop-reason, timing,
 and build provenance. Changed evaluator settings require fresh search histories.
+
+## Reports, accounting and failure
+
+`fgm-two-aux-report-v1` uses implementation `metal-two-aux-v1` and enumeration
+`lexicographic-pairs-plus-first-v1`. The enclosing `two_auxiliary` object binds
+the effective ordered-factor identity. Per-stage reports retain baseline,
+pre-extension and final costs, the improvement floor, requested/live helpers,
+raw family size, configured budget, and clipped prefix limit.
+
+`raw_scanned` is physical enumeration work and equals `first_invalid +
+second_invalid + symmetry_filtered + prepared`. `dispatched`, `completed` and
+`validated` count lanes at their respective trust boundaries. GPU sweeps/rule
+checks accumulate only checked witnesses; `negative_validation_rule_checks`
+counts the host's single fixed-point scan separately. `logical_prefix` identifies
+the reproducible stopping point. `batch_tail_candidates` counts lanes after the
+selected bound-attaining witness. `coverage` describes physical raw coverage;
+`unvisited_raw_slots` includes positions outside the configured prefix.
+
+Stop reasons are `smaller-family-succeeded`, `proved-no-improvement`,
+`bound-attained`, `budget-exhausted`, `family-exhausted`, or `invocation-failed`.
+The generalized test path uses `family-covered` when full enumeration reaches
+outputs, including success without strict cost improvement. Failure never
+becomes an exhaustion claim. Failed receipts retain checked progress; a hard
+process failure can leave only the supervisor and flushed output.
+
+A selected witness records its raw slot, both route IDs, helper vectors,
+creation gates, forward trace and availability. Actual emitted stage counts
+and final tensor/factors are checked before publication. Timing fields report
+allocation, preparation, synchronous dispatch wall time, completed command GPU
+time, witness validation, transposition and exact verification in microseconds.
+Phase totals include these components; verification and dispatch totals overlap
+phase totals and must not be added to them.
+
+Shared storage is `21192 + 128*(2728+528) + 1024*4 = 442056` bytes. Evaluator
+phases release buffers serially, so admission takes the maximum phase rather
+than their sum. A 256-KiB host preparation reservation covers fixed problem
+copies, the old preparation temporary, stream state and bounded arithmetic
+scratch. Circuit/report JSON, replay matrices, transposition, identity and
+serialization remain in the existing `128 * record_bytes` reservation, also
+charged while result artifacts are retained. These are accounted allocations,
+not measured process/system memory or GPU private scratch. Native search keeps
+its current settings until its resident-buffer qualification in Milestone 3.
 
 ## Calibration and acceptance gates
 

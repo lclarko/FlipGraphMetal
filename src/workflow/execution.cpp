@@ -51,7 +51,7 @@ std::string domainOf(const RunConfig &config) {
 }
 
 ReductionSettings parseReductionSettings(const Json &settings) {
-    fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions", "strategy"});
+    fields(settings, {"domain", "seed", "rounds", "reducers", "schemes", "max_flips", "no_improvements", "target_additions", "strategy", "constructor"});
     if (settings.at("domain").str() != "ZT") throw std::runtime_error("only signed addition reduction is supported");
     auto seed = natural(settings.at("seed"), false);
     if (seed > UINT32_MAX) throw std::runtime_error("seed exceeds uint32");
@@ -64,6 +64,15 @@ ReductionSettings parseReductionSettings(const Json &settings) {
         throw std::runtime_error("unknown reduction strategy");
     if(r.strategy!="baseline" && (r.maxFlips || r.schemes!=1))
         throw std::runtime_error("construction strategies require max_flips=0 and schemes=1");
+    if(settings.has("constructor")) {
+        const auto &option=settings.at("constructor");
+        fields(option,{"family","max_pair_slots"});
+        TwoAuxSettings constructor{option.at("family").str(),natural(option.at("max_pair_slots"))};
+        if(constructor.family!="signed-two-aux-distinct-v1" || constructor.maxPairSlots>1047552)
+            throw std::runtime_error("unsupported two-auxiliary family or raw-slot budget");
+        if(r.strategy!="combined") throw std::runtime_error("two-auxiliary construction requires combined strategy");
+        r.constructor=std::move(constructor);
+    }
     if (r.schemes > r.reducers || r.reducers > 1048576 || r.maxFlips >= INT32_MAX ||
         r.rounds > INT32_MAX || r.noImprovements > INT32_MAX || r.targetAdditions > INT32_MAX)
         throw std::runtime_error("reduction setting exceeds execution capacity");
@@ -103,6 +112,7 @@ RunConfig parseRunConfig(const Json &value, const std::filesystem::path &base,
                 throw std::runtime_error("additive-search requires fixed signed 3x3 rank-23 alternatives with excursion at most two");
             result.evaluation=parseReductionSettings(value.at("evaluation"));
             const auto &r=*result.evaluation;
+            if(r.constructor) throw std::runtime_error("two-auxiliary additive evaluation requires Milestone 3 qualification");
             if(r.strategy!="combined" || r.schemes!=1 || r.maxFlips || r.targetAdditions)
                 throw std::runtime_error("additive evaluation requires combined fixed factors and disabled reducer target");
             if(value.has("circuit_target") && value.at("circuit_target").kind!=Json::Null)
@@ -385,11 +395,22 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
         if(config.reduction->maxFlips)allocation=configCheckedAdd(allocation,configCheckedMultiply(config.reduction->schemes,16));
         allocation=configCheckedAdd(allocation,configCheckedMultiply(config.reduction->reducers,3*sizeof(int)));
     }
+    // Evaluator phases are serial. The new tile is never live with baseline
+    // reducer buffers; search generation buffers remain resident separately.
+    const auto *evaluation=config.reduction?&*config.reduction:(config.evaluation?&*config.evaluation:nullptr);
+    const bool twoAux=evaluation && evaluation->constructor.has_value();
+    uint64_t constructorShared=0;
+    if(twoAux) {
+        if(!layout.twoAuxSharedBytes) throw Resource("missing two-auxiliary execution layout");
+        constructorShared=layout.twoAuxSharedBytes;
+        allocation=std::max(allocation,constructorShared);
+    }
     uint64_t reservedHost=0;
     if(config.policy)reservedHost=configCheckedAdd(configCheckedMultiply(config.pool.memoryBytes,2),
         configCheckedAdd(configCheckedMultiply(config.history.transactionBytes,4),config.history.indexMemoryBytes));
     else reservedHost=configCheckedMultiply(config.limits.record,128);
     if(config.additive)reservedHost=configCheckedAdd(reservedHost,configCheckedMultiply(config.limits.record,128));
+    if(twoAux) reservedHost=configCheckedAdd(reservedHost,TwoAuxPreparationBytes);
     if (configCheckedAdd(configCheckedAdd(allocation, admittedBytes),reservedHost) > config.execution.memoryBytes)
         throw Resource("planned buffers and admission exceed run memory budget");
     Json receipt = Json::dict();
@@ -407,6 +428,10 @@ PreparedRun prepareRun(const std::filesystem::path &configuration, const Executi
     receipt.object["planned_buffer_bytes"] = integer(allocation);
     receipt.object["admission_content_bytes"] = integer(admittedBytes);
     receipt.object["reserved_host_bytes"]=integer(reservedHost);
+    if(twoAux) {
+        receipt.object["two_aux_shared_bytes"]=integer(constructorShared);
+        receipt.object["two_aux_preparation_bytes"]=integer(TwoAuxPreparationBytes);
+    }
     receipt.object["memory_accounting"] = Json("planned shared buffers and accounted owned input allocations; excludes allocator bookkeeping, driver residency and device scratch; not process RSS");
     receipt.object["input_read_bytes"] = integer(context.scannedBytes());
     receipt.object["presentations"] = std::move(presentations);

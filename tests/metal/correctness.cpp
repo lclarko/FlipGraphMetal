@@ -36,7 +36,8 @@ int main(int argc, char **argv) {
             std::ifstream input(argv[2]); std::string bytes((std::istreambuf_iterator<char>(input)),{});
             if(!input || bytes.size()>1048576) throw std::runtime_error("constructor test input bound");
             auto requests=fgm::Parser(bytes).parse(), results=fgm::Json::list();
-            for(const auto &request:requests.array) results.array.push_back(constructorTest(request,true));
+            for(const auto &request:requests.array)
+                results.array.push_back(request.has("two_aux")?twoAuxConstructorTest(request,true):constructorTest(request,true));
             std::ofstream result(output/"constructor.json"); result<<fgm::dump(results)<<'\n';
             if(!result) throw std::runtime_error("constructor test output write failed"); return 0;
         }

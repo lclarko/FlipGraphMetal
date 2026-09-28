@@ -121,6 +121,28 @@ class ExecutionTests(unittest.TestCase):
                                '--validate-only', *extra], capture_output=True, text=True, timeout=10,
                               env={**os.environ, 'PATH':''}, cwd='/')
 
+    def fixed_reduction(self, *, constructor=True):
+        fixture = ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json'
+        (self.root/'scheme.json').write_bytes(fixture.read_bytes())
+        config = copy.deepcopy(self.config)
+        config.pop('policy')
+        config['operation'] = 'reduce'
+        config['reduction'] = dict(domain='ZT', seed=7, rounds=2, reducers=2,
+                                   schemes=1, max_flips=0, no_improvements=2,
+                                   target_additions=0, strategy='combined')
+        if constructor:
+            config['reduction']['constructor'] = dict(
+                family='signed-two-aux-distinct-v1', max_pair_slots=1047552)
+        config['execution'].update(workers=1, memory_bytes=256*1024*1024)
+        return config
+
+    def validated_receipt(self, config):
+        result = self.invoke(config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads((self.root/'receipt.json').read_text())
+        (self.root/'receipt.json').unlink()
+        return receipt
+
     def test_native_preflight_without_python_or_metal(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -231,6 +253,85 @@ class ExecutionTests(unittest.TestCase):
             trial = dict(config,reduction=dict(config['reduction'],**change))
             self.assertEqual(self.invoke(trial).returncode,1)
             self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_two_aux_settings_are_explicit_and_disabled_receipt_is_unchanged(self):
+        disabled = self.fixed_reduction(constructor=False)
+        ordinary = self.validated_receipt(disabled)
+        self.assertEqual(ordinary['configuration']['reduction'], disabled['reduction'])
+        self.assertNotIn('constructor', ordinary['configuration']['reduction'])
+        self.assertNotIn('two_aux_shared_bytes', ordinary)
+        self.assertNotIn('two_aux_preparation_bytes', ordinary)
+        enabled = self.fixed_reduction()
+        prepared = self.validated_receipt(enabled)
+        self.assertEqual(prepared['configuration']['reduction'], enabled['reduction'])
+        self.assertEqual(prepared['two_aux_preparation_bytes'], 256*1024)
+        self.assertEqual(prepared['reserved_host_bytes']-ordinary['reserved_host_bytes'], 256*1024)
+        self.assertEqual(prepared['planned_buffer_bytes'], max(ordinary['planned_buffer_bytes'],
+                                                               prepared['two_aux_shared_bytes']))
+        self.assertFalse(prepared['execution_started'])
+
+    def test_two_aux_rejects_invalid_settings_and_ineligible_inputs(self):
+        base = self.fixed_reduction()
+        invalid = (
+            dict(constructor=dict(family='unknown', max_pair_slots=1)),
+            dict(constructor=dict(family='signed-two-aux-distinct-v1', max_pair_slots=1, extra=1)),
+            dict(constructor=dict(family='signed-two-aux-distinct-v1', max_pair_slots=True)),
+            dict(constructor=dict(family='signed-two-aux-distinct-v1', max_pair_slots=1.5)),
+            dict(constructor=dict(family='signed-two-aux-distinct-v1', max_pair_slots=0)),
+            dict(constructor=dict(family='signed-two-aux-distinct-v1', max_pair_slots=1047553)),
+            dict(strategy='baseline'), dict(strategy='transpose'),
+            dict(schemes=2), dict(max_flips=1), dict(domain='F2'),
+        )
+        for change in invalid:
+            with self.subTest(change=change):
+                trial = copy.deepcopy(base)
+                trial['reduction'].update(change)
+                result = self.invoke(trial)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse((self.root/'receipt.json').exists())
+        trial = copy.deepcopy(base)
+        (self.root/'scheme.json').write_text(json.dumps(self.scheme))
+        result = self.invoke(trial)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('3x3 rank-23', result.stderr)
+        self.assertFalse((self.root/'receipt.json').exists())
+        rank25 = json.loads((ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json').read_text())
+        for key in ('u','v','w'):
+            rank25[key].append(copy.deepcopy(rank25[key][0]))
+            rank25[key].append(copy.deepcopy(rank25[key][0]))
+        rank25['w'][-1] = [-value for value in rank25['w'][-1]]
+        rank25['m'] = 25
+        (self.root/'scheme.json').write_text(json.dumps(rank25))
+        result = self.invoke(trial)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('3x3 rank-23', result.stderr)
+        self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_two_aux_memory_budget_accepts_exact_limit_and_rejects_one_below(self):
+        config = self.fixed_reduction()
+        prepared = self.validated_receipt(config)
+        required = (prepared['planned_buffer_bytes'] + prepared['admission_content_bytes'] +
+                    prepared['reserved_host_bytes'])
+        config['execution']['memory_bytes'] = required
+        exact = self.validated_receipt(config)
+        self.assertEqual(exact['planned_buffer_bytes'], prepared['planned_buffer_bytes'])
+        self.assertEqual(exact['reserved_host_bytes'], prepared['reserved_host_bytes'])
+        self.assertEqual(exact['admission_content_bytes'], prepared['admission_content_bytes'])
+        config['execution']['memory_bytes'] = required - 1
+        rejected = self.invoke(config)
+        self.assertEqual(rejected.returncode, 2, rejected.stderr)
+        self.assertIn('memory budget', rejected.stderr)
+        self.assertFalse((self.root/'receipt.json').exists())
+
+    def test_two_aux_additive_evaluation_requires_future_qualification(self):
+        config = self.fixed_reduction()
+        evaluation = config.pop('reduction')
+        config.update(operation='search', workflow='additive-search',
+                      policy=dict(settings(), seed=7), evaluation=evaluation)
+        result = self.invoke(config)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Milestone 3 qualification', result.stderr)
+        self.assertFalse((self.root/'receipt.json').exists())
 
     def test_selection_is_not_resume(self):
         import hashlib

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "reduction_execution.h"
+// Included after CircuitStage and its expression helpers.
 #include "../metal/two_aux_constructor.h"
 
 namespace fgm {

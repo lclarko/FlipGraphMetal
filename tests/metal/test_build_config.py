@@ -28,7 +28,8 @@ class BuildConfigurationTests(unittest.TestCase):
         for name in ("src/metal/main.cpp", "src/metal/runtime.mm", "src/metal/probe.mm",
                      "src/common/arg_parser.cpp", "src/common/arg_parser.h",
                      "tests/metal/correctness.cpp", "tests/metal/f2_correctness.cpp",
-                     "tests/metal/candidate_capacity.h", "tests/workflow/reduction_result.cpp"):
+                     "tests/metal/candidate_capacity.h", "tests/workflow/reduction_result.cpp",
+                     "tests/workflow/two_aux_constructor.h"):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.touch()
@@ -144,6 +145,23 @@ pathlib.Path(args[args.index('-o') + 1]).write_text(json.dumps(args))
                             'src/workflow/execution.cpp' in args for args in calls))
         self.make()
         self.assertEqual(len(self.calls()), 11)
+
+    def test_validation_source_change_rebuilds_correctness(self):
+        self.make()
+        source = self.root / "src/workflow/scheme_io.cpp"
+        before = source.stat()
+        source.write_text(source.read_text() + "\n// changed validation source\n")
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.make()
+        calls = self.calls()[8:]
+        self.assertEqual({Path(args[args.index('-o') + 1]).name for args in calls},
+                         {'flip_graph', 'flip_graph_f2', 'additions_reducer', 'correctness'})
+        self.assertEqual(len(calls), 4)
+        correctness = next(args for args in calls if Path(args[args.index('-o') + 1]).name == 'correctness')
+        self.assertIn('src/workflow/scheme_io.cpp', correctness)
+        self.assertIn('src/workflow/journal.cpp', correctness)
+        self.make()
+        self.assertEqual(len(self.calls()), 12)
 
     def test_explicit_source_mode_and_return_to_packaged(self):
         self.make()

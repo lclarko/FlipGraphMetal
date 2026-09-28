@@ -296,7 +296,7 @@ make smoke-metal
 
 These targets create fresh `build/metal/check-*` attempts. Correctness and smoke exports, commands and logs are retained separately for each attempt. A retry must use a new directory. Failed and incomplete runs remain useful evidence and must not be overwritten.
 
-GPU processes are serialized and supervised with a 45-second process-group timeout, sampled 3 GiB system wired-memory cutoff, TERM and then KILL after two seconds. Sampling cannot guarantee a bound on transient memory peaks. The smoke child writes output directly to retained files so termination does not discard already-written logs.
+GPU processes are serialized and supervised with a 45-second process-group timeout, sampled 4 GiB system wired-memory cutoff, TERM and then KILL after two seconds. Sampling cannot guarantee a bound on transient memory peaks. The smoke child writes output directly to retained files so termination does not discard already-written logs.
 
 Native correctness covers signed/F2 arithmetic and transformations, ordered candidates and RNG states, and reducer circuits. Smoke checks cover both searches, resizing, both minimizers, reducer prefix reuse and reducer scheme flips. CLI regressions cover malformed inputs and deliberate unsupported-case rejection. Independent tensor verification complements comparisons against C++ versions of the arithmetic.
 
@@ -380,10 +380,50 @@ not a claim of research novelty. Generation, capture, pools, and mutation
 scheduling are unchanged.
 
 The [bounded two-auxiliary specification](specifications/TWO-AUX-CONSTRUCTOR-v1.md)
-defines the next construction family. Its first milestone adds host preparation,
-route enumeration, witness validation, and independent host tests only. It is
-not connected to production evaluation. Run `make test-workflow` for these
-checks; GPU integration and factors-only Sun-56 qualification remain later gates.
+defines the opt-in standalone construction family. Add this object under a
+fixed-factor signed 3×3 rank-23 `reduction` using `strategy: "combined"`:
+
+```json
+"constructor": {"family": "signed-two-aux-distinct-v1", "max_pair_slots": 65536}
+```
+
+The existing evaluator runs first. Stages with exhausted zero-/one-helper
+coverage escalate only when their current cost exceeds the stage-local
+improvement floor. Metal closes batches of at most 128 prepared route pairs;
+the host validates every returned lane before accepting a result. Failed
+closures also receive a complete fixed-point check. The raw budget counts
+filtered positions and never rounds up to a full batch. Ordinary budget
+exhaustion retains the verified incumbent. Invalid output fails the invocation.
+Omitting the option preserves the previous evaluation path and allocations.
+Additive-search admission of this option awaits its separate integration gate.
+
+`two_auxiliary.stages` records the family, implementation and enumeration
+versions, bounds, raw/filter/dispatch/validation counts, coverage, stop reason,
+selected routes and forward trace, and phase times. `logical_prefix` ends at
+the selected bound-attaining route; `raw_scanned` includes preparation for the
+whole dispatched tile. Every dispatched tail is validated. The retained
+`two_auxiliary` receipt field also exposes checked progress on invocation
+failure. Circuit publication still requires final exact verification.
+
+The new shared tile reserves 442,056 bytes including the maximum padded error
+buffer. Admission uses the larger of this phase and the baseline buffers,
+plus 256 KiB for fixed host preparation. The existing `128 * record_bytes`
+workspace covers simultaneous circuit JSON, witness verification, transposition,
+identity, serialization, and report copies. Allocator bookkeeping, driver
+residency, and per-thread scratch remain outside these accounted allocations.
+
+Run `make test-workflow` for host coverage and
+`python3 tests/metal/two_aux.py --output build/two-aux/qualification-NEW`
+for guarded GPU/oracle qualification. Packaged workflow checks also reconstruct
+Sun at U13/V13/W30 and CN122 at U13/V14/W28 from factor files. Sun's existing
+admission step normalizes U/V signs and compensates W; independent verification
+repeats that normalization from the supplied factor bytes and checks the exact
+effective presentation. Reference circuits are never supplied to production.
+
+New routine guards default to 4,294,967,296 wired bytes; pass the limit explicitly
+when supervising an attempt. Prelaunch admission remains 1,946,157,056 bytes
+(`guard.launch_headroom_available`), independently of the termination cutoff.
+Frozen benchmark protocols keep their explicit historical limits.
 
 ## Native additive search
 

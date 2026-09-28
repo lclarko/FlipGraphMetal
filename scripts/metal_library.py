@@ -31,7 +31,8 @@ def assemble(source_dir, variant='signed'):
         raise ValueError(f'unknown Metal variant: {variant}')
     f2 = variant.startswith('f2')
     names = ['core.h', 'addition.h', 'flip_set.h', 'scheme_integer.h',
-             'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h', 'circuit_constructor.h']
+             'scheme_z2.h', 'pairs_counter.h', 'additions_reducer.h', 'circuit_constructor.h',
+             'two_aux_constructor.h']
     if not f2:
         names.append('compact.h')
     names.extend(['controlled.h', 'controlled_capture.h', 'controlled_packed.h', 'kernels.metal', 'controlled_kernels.metal', 'reduction_kernels.metal'])
