@@ -550,3 +550,77 @@ transaction failures and malformed histories. Full GPU qualification and one
 complete matched-time comparison passed under the recorded 4-GiB policy.
 The comparison's costs and saved diversity are descriptive outcomes under this
 short protocol, not evidence of a general selection advantage.
+
+## Bounded two-auxiliary evaluation
+
+The constructor improved fixed-factor reconstruction, with a measurable time
+cost. Keep it opt-in: these short native-search trials did not show a better
+final circuit from enabling it throughout search.
+
+The frozen comparison used an 8-GB M1 Mac, baseline `226b57c`, candidate
+`e87a06b`, and a 65,536-slot constructor budget. All 20 qualification and 168
+measurement attempts completed under the 4-GiB wired-memory guard. Disabled-path
+and same-factor comparisons contained 480 evaluations each (three seeds, five
+repetitions, two treatments on 16 factors). Standalone equal-time comparison used
+72 twenty-second arms; native search used 12 sixty-second arms on shared populations.
+
+### Fixed factors
+
+With the constructor omitted, all 240 baseline/candidate pairs matched circuits,
+factor identities, addition counts and accounted allocations. No two-auxiliary
+kernel was dispatched. With it enabled, two of four eligible E4 schemes and
+three of eight unfiltered U8 schemes improved by one to three additions; the
+others tied. E4 was selected using the old evaluator only. U8 was selected
+before eligibility screening from one frozen descendant bank, so it is not a
+representative sample of all rank-23 schemes.
+
+Sun improved from 57 to its known 56; CN122 reproduced 55. The authors prove
+[CN122's fixed-factor optimum is 55](https://github.com/trylogical/cn122_add55/tree/34949f9ce50a89a5ad6b47a17f5834ad5a87a2fb)
+(U13/V14/W28) in the binary addition/subtraction model. Treat unchanged CN122
+as an optimal-cost recovery, regression and timing control in future benchmarks.
+A tie at 55 is successful recovery, not a missed improvement. Keep it outside
+improvement-opportunity denominators. Changed factors produced by search do not
+inherit this bound. CAL2 (Sun/CN122) and SKIP2 (Original/Laderman) were already
+reported separately from the effectiveness cohorts.
+
+Complete evaluation-and-verification latency in seconds (median / p95 / max):
+
+| Cohort | Omitted | Enabled |
+|---|---|---|
+| E4, 60 samples per treatment | 0.681 / 1.157 / 1.838 | 1.171 / 1.405 / 2.469 |
+| U8, 120 samples per treatment | 0.780 / 1.283 / 1.966 | 1.090 / 2.244 / 2.951 |
+
+These times include headroom waits. Excluding only those waits, the respective
+medians were 0.670/1.161 seconds for E4 and 0.744/1.082 for U8.
+
+### Equal time and practical use
+
+By 20 seconds, enabled standalone construction beat omitted construction in
+6/12 E4 and 9/24 U8 factor/seed pairs; the rest tied. It completed fewer timely
+verified evaluations: 151 versus 184 for E4 and 322 versus 388 for U8.
+
+By 60 seconds, the shared Original/Laderman/Smirnov population tied at 62 in
+all three seed pairs, with 41 versus 52 timely evaluations enabled/omitted.
+The shared U8 population finished at 65/65/63 enabled versus 62/62/63 omitted
+for seeds 7/19/41, with 61 versus 67 evaluations. Stronger scoring can change
+later parent selections as well as evaluation throughput. All native arms
+reached descendant evaluation; the combined timely count was 66 initial plus
+155 descendant evaluations. Three late native evaluations were retained
+without endpoint credit. No timed arm reached 54.
+
+These results support using the constructor for selected fixed-factor second
+passes. They do not establish that a deferred second-pass search workflow is
+better overall; that workflow was not measured. Existing standalone reduction
+can reread saved factors with the constructor enabled. Changing evaluation
+settings inside native search still requires a fresh history.
+
+Peak observed process RSS was 1,048,248,320 bytes; peak sampled system wired
+memory was 3,421,569,024 bytes. These have different scopes from receipt-accounted
+allocations. Timing results are descriptive: no numerical regression allowance
+was approved, and no paired uncertainty interval was computed.
+
+The unchanged evidence is retained locally in `build/two-aux/m4-execution-01/`,
+`m4-report-02/` and `m4-analysis-01/`. The exact experiment source is preserved
+at commit `30e30791e35b89d423b43e87ac161ac5610bdf7e` and in
+`build/two-aux/m4-archive-01/`. The frozen manifest SHA-256 is
+`8fe9aa117a4679de845a91ad4f995a7e2bec44fac3dba36f6aa30dd76d8158fa`.
