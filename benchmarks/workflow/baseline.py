@@ -3043,15 +3043,18 @@ def fgm3_bind_installations(previous, current, evaluations, selector):
     return checked
 
 
-def fgm3_bind_initial_population(entries, presentations, evaluations=None):
-    if len(entries)!=16 or len(presentations)!=16 or any(
+def fgm3_bind_initial_population(entries, presentations, evaluations=None,
+                                 *, expected_population_count=16):
+    if (type(expected_population_count) is not int or expected_population_count<=0 or
+            len(entries)!=expected_population_count or
+            len(presentations)!=expected_population_count or any(
             presentation['source_sha256']!=entry['sha256'] or
             presentation['submitted_factors_id']!=entry['source_factors_id'] or
             presentation['effective_factors_id']!=entry['effective_factors_id']
-            for presentation,entry in zip(presentations,entries)):
+            for presentation,entry in zip(presentations,entries))):
         raise ValueError('additive submitted population differs from frozen factor presentations')
-    if evaluations is not None and (len(evaluations)<16 or
-            [row['source_factors_id'] for row in evaluations[:16]]!=
+    if evaluations is not None and (len(evaluations)<expected_population_count or
+            [row['source_factors_id'] for row in evaluations[:expected_population_count]]!=
             [entry['effective_factors_id'] for entry in entries]):
         raise ValueError('additive initial evaluated factors differ from normalized presentations')
 
@@ -3136,7 +3139,8 @@ def fgm3_wait_headroom(clock, sleeper, global_deadline, arm_deadline, allowance,
 
 def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, workers,
                    arm, chunk, state, global_deadline, arm_deadline, allowance,
-                   *, clock, sleeper, guard, memory_sample, record=None):
+                   *, clock, sleeper, guard, memory_sample, record=None,
+                   expected_population_count=16, verify_callback=None, before_native=None):
     """Complete native work, both read-only exports and exact independent checks."""
     started=clock()
     chunk_dir=Path(output)/arm/'chunks'/f'{chunk:03d}'
@@ -3167,6 +3171,11 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         record.update(status='unrun',stop_reason=reason)
         return record
     record['status']='native-started'
+    if before_native is not None:
+        reason=before_native(config_path,record)
+        if reason:
+            record.update(status='unrun',stop_reason=reason)
+            return record
     native=fgm3_guarded([str(binaries/'flip_graph'),'--run-config',str(config_path)],
                         chunk_dir/'native-guard',guard,expected='additive native chunk',
                         record=record,field='native_guard',
@@ -3182,7 +3191,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         raise ValueError('additive native receipt/build/configuration mismatch')
     if chunk==0:
         population_entries=json.loads((Path(population)/'population.json').read_text())['entries']
-        fgm3_bind_initial_population(population_entries,receipt['presentations'])
+        fgm3_bind_initial_population(population_entries,receipt['presentations'],
+            expected_population_count=expected_population_count)
     record['run_id']=receipt['run_id']
     record['counters']=receipt['counters']
     record['seed_duplicates']=receipt.get('seed_duplicates',0)
@@ -3193,7 +3203,7 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         raise ValueError('additive pool eviction or duplicate counter invalid')
     record['host_phases_microseconds']={k:v for k,v in receipt.items() if k.endswith('_microseconds')}
     record['gpu']=native_dispatch_evidence((chunk_dir/'native-guard/run.log').read_text(),receipt)
-    if not fgm3_export_budget(clock(),global_deadline,2,protocol):
+    if not fgm3_export_budget(clock(),global_deadline,3 if verify_callback else 2,protocol):
         record.update(status='verification-pending',stop_reason='global verification reserve')
         return record
     tool=binaries/'scheme_tool'
@@ -3207,7 +3217,7 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         expected='additive evaluation export',record=record,field='evaluation_export_guard',
         wired_limit_bytes=protocol['wired_limit_bytes'])
     record['evaluation_export_sha256']=digest(export_path)
-    if not fgm3_export_budget(clock(),global_deadline,1,protocol):
+    if not fgm3_export_budget(clock(),global_deadline,2 if verify_callback else 1,protocol):
         record.update(status='export-pending',stop_reason='global observation export reserve')
         return record
     observation_path=chunk_dir/'observations.jsonl'
@@ -3217,6 +3227,20 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         expected='additive observation export',record=record,field='observation_export_guard',
         wired_limit_bytes=protocol['wired_limit_bytes'])
     record['observation_export_sha256']=digest(observation_path)
+    if verify_callback is not None:
+        return verify_callback(output,population,protocol,selector,chunk,state,receipt,
+            receipt_path,config,record,export_path,observation_path,started,
+            expected_population_count,clock)
+    return fgm3_verify_chunk(output,population,protocol,selector,chunk,state,receipt,
+        receipt_path,config,record,export_path,observation_path,started,
+        expected_population_count,clock)
+
+
+def fgm3_verify_chunk(output,population,protocol,selector,chunk,state,receipt,
+                      receipt_path,config,record,export_path,observation_path,started,
+                      expected_population_count,clock):
+    """Bind a completed native receipt to cumulative exports and exact circuits."""
+    chunk_dir=Path(export_path).parent
     current_evaluations,current_installs=fgm3_export_rows(export_path)
     previous_evaluations=[] if not state.get('evaluation_export') else fgm3_export_rows(
         Path(output)/state['evaluation_export'])[0]
@@ -3231,7 +3255,8 @@ def fgm3_run_chunk(output, population, binaries, protocol, selector, seed, worke
         raise ValueError('additive current-run evaluation count mismatch')
     if chunk==0:
         population_entries=json.loads((Path(population)/'population.json').read_text())['entries']
-        fgm3_bind_initial_population(population_entries,receipt['presentations'],new)
+        fgm3_bind_initial_population(population_entries,receipt['presentations'],new,
+            expected_population_count=expected_population_count)
     for item in current_evaluations[len(previous_evaluations):]:
         if item['run_id']!=receipt['run_id']:
             raise ValueError('new additive evaluation is outside native run')

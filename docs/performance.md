@@ -550,3 +550,74 @@ transaction failures and malformed histories. Full GPU qualification and one
 complete matched-time comparison passed under the recorded 4-GiB policy.
 The comparison's costs and saved diversity are descriptive outcomes under this
 short protocol, not evidence of a general selection advantage.
+
+## M4 two-auxiliary evaluation
+
+The approved frozen manifest has SHA-256
+`8fe9aa117a4679de845a91ad4f995a7e2bec44fac3dba36f6aa30dd76d8158fa`.
+It compared baseline commit `226b57c` with candidate commit `e87a06b` on an
+8-GB M1 Mac under the 4-GiB wired-memory guard. All 20 qualification and 168
+measurement attempts completed. A and B each produced 480 exact-verified
+fixed-factor cells, or 240 factor/seed/repeat pairs. C-S ran 72 arms (36 pairs)
+for 20 seconds with 10/20-second endpoints; C-N ran 12 arms for 60 seconds
+with 30/60-second endpoints. Endpoint credit required durable exact
+verification by the cutoff. Later verified work remains in the evidence.
+
+In A, every baseline-omitted and candidate-omitted pair had the same circuit,
+factor identity, U/V/W and total addition counts, and accounted allocations.
+The omitted candidate made no two-auxiliary dispatch. In B, enabling the
+extension improved two of four E4 factors and three of eight U8 factors by
+one to three additions; the other factors tied, with no worse cost. E4 is a
+conditional eligible cohort, while U8 was sampled from the frozen bank before
+eligibility screening. Sun improved from 57 to 56; CN122 remained at 55. CAL2 is calibration
+and SKIP2 is a skip control, so neither is pooled with E4 or U8.
+
+Fixed-unit latency in seconds is shown as median / p95 / maximum. Full time
+includes admission and independent verification; active time excludes explicit
+headroom waiting. The table shows the effectiveness cohorts; CAL2 and SKIP2
+remain separate in the retained metrics.
+
+| Comparison | Cohort | Treatment | Full unit s | Active unit s |
+|---|---|---|---|---|
+| A | E4 | Baseline omitted | 0.641 / 0.863 / 1.957 | 0.631 / 0.856 / 0.889 |
+| A | E4 | Candidate omitted | 0.676 / 1.141 / 8.119 | 0.655 / 0.979 / 1.172 |
+| A | U8 | Baseline omitted | 0.764 / 2.183 / 4.055 | 0.718 / 0.882 / 1.108 |
+| A | U8 | Candidate omitted | 0.768 / 1.991 / 4.475 | 0.726 / 0.872 / 1.011 |
+| B | E4 | Candidate omitted | 0.681 / 1.157 / 1.838 | 0.670 / 0.784 / 0.869 |
+| B | E4 | Candidate enabled | 1.171 / 1.405 / 2.469 | 1.161 / 1.347 / 1.460 |
+| B | U8 | Candidate omitted | 0.780 / 1.283 / 1.966 | 0.744 / 0.906 / 0.930 |
+| B | U8 | Candidate enabled | 1.090 / 2.244 / 2.951 | 1.082 / 1.470 / 1.528 |
+
+In C-S, enabled beat omitted on best verified cost in 6/12 E4 and 9/24 U8
+paired arms at both 10 and 20 seconds; the rest tied. Timely evaluation counts
+were lower with the extension: E4 85 versus 104 at 10 seconds and 151 versus
+184 at 20 seconds, and U8 182 versus 217 and 322 versus 388. These are
+candidate counts, not chunk counts. C-N did not show a broad native benefit.
+The shared Original/Laderman/Smirnov roster tied in all three seed pairs at
+both endpoints while enabled completed 28 versus 35 evaluations by 30 seconds
+and 41 versus 52 by 60 seconds. U8 had one better and two tied pairs at 30
+seconds, then one tied and two worse at 60 seconds; counts were 46 versus 46
+and 61 versus 67. Across all verified C-N work, the G3 omitted/enabled arms
+evaluated 9/9 initial candidates and 44/34 descendants, with 35/26 parent
+installations. U8 evaluated 24/24 initial candidates and 43/37 descendants,
+with 28/22 installations. These counts include late work: one G3 omitted
+evaluation and two G3 enabled evaluations finished after the 60-second
+endpoint. Neither timed experiment found an exact-verified 54-addition result.
+
+Across qualification and measurement children, maximum observed process RSS
+was 1,048,248,320 bytes and maximum sampled system-wide wired memory was
+3,421,569,024 bytes. Receipt-accounted maxima were 192,919,464 planned-buffer
+bytes, 185,860,096 reserved-host bytes, and 3,532,562 admission-content bytes.
+Those receipt fields describe planned allocations and have a different scope
+from process RSS and system-wide wired samples. The report retains per-unit
+native/GPU, verifier, headroom, and full-workflow timings.
+
+These measurements are descriptive: no numeric regression margin was approved,
+and the analysis does not compute a paired uncertainty interval. Keep the
+two-auxiliary extension opt-in. The frozen manifest, sealed run, descriptive
+metrics, and report are retained locally at
+`build/two-aux/m4-protocol-proposal-01/`,
+`build/two-aux/m4-execution-01/`, `build/two-aux/m4-analysis-01/`, and
+`build/two-aux/m4-report-02/`. Public fixture release remains held because
+original hash-bound files contain local path metadata; the release-content
+check is `build/two-aux/m4-authorization-01/release-content-check.json`.

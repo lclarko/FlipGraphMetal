@@ -96,6 +96,21 @@ class AdditiveWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'normalized'):
             b.fgm3_bind_initial_population(entries,presentations,altered)
 
+    def test_explicit_m4_initial_population_count_preserves_fgm3_default(self):
+        for count in (3, 8):
+            entries=[dict(sha256=str(i),source_factors_id=f'raw-{i}',
+                          effective_factors_id=f'effective-{i}') for i in range(count)]
+            presentations=[dict(source_sha256=str(i),submitted_factors_id=f'raw-{i}',
+                                effective_factors_id=f'effective-{i}') for i in range(count)]
+            evaluations=[dict(source_factors_id=f'effective-{i}') for i in range(count)]
+            b.fgm3_bind_initial_population(entries,presentations,evaluations,
+                                           expected_population_count=count)
+            with self.assertRaisesRegex(ValueError,'population'):
+                b.fgm3_bind_initial_population(entries,presentations,evaluations)
+            with self.assertRaisesRegex(ValueError,'population'):
+                b.fgm3_bind_initial_population(entries,presentations[:-1],evaluations,
+                                               expected_population_count=count)
+
     def test_valid_factor_substitution_cannot_relabel_frozen_population(self):
         original=ROOT/'benchmarks/workflow/fixtures/fgm1/factors/original.json'
         replacement=ROOT/'benchmarks/workflow/fixtures/fgm1/factors/cn122.json'
