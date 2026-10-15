@@ -115,13 +115,16 @@ static MetalRuntime &runtime() {
 }
 
 void *metalAllocateBytes(size_t size) {
-    auto &r = runtime();
-    if (!size || size > r.device.maxBufferLength) throw std::runtime_error("Metal: unsupported buffer size");
-    id<MTLBuffer> buffer = [r.device newBufferWithLength:size options:MTLResourceStorageModeShared];
-    if (!buffer) throw std::runtime_error("Metal: buffer allocation failed");
-    std::memset(buffer.contents, 0, size);
-    r.buffers[buffer.contents] = buffer;
-    return buffer.contents;
+    // Drain the implicit autoreleases from MTLBuffer.contents before returning.
+    @autoreleasepool {
+        auto &r = runtime();
+        if (!size || size > r.device.maxBufferLength) throw std::runtime_error("Metal: unsupported buffer size");
+        id<MTLBuffer> buffer = [r.device newBufferWithLength:size options:MTLResourceStorageModeShared];
+        if (!buffer) throw std::runtime_error("Metal: buffer allocation failed");
+        std::memset(buffer.contents, 0, size);
+        r.buffers[buffer.contents] = buffer;
+        return buffer.contents;
+    }
 }
 
 void metalFree(void *pointer) {
